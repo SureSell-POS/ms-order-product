@@ -100,7 +100,7 @@ class OrderHandlerTest {
                 // está apagado — que es como nace. Estas pruebas comprueban la
                 // venta, y el hecho de que sigan pasando fija algo que importa:
                 // la venta NO depende del inventario para completarse.
-                org.mockito.Mockito.mock(RegistroDeIntencionDeInventario.class));
+                org.mockito.Mockito.mock(RegistroDeIntencionDeInventario.class), null);
     }
     @Test
     void getAllOrdersCallsProductServiceOncePerDistinctProductId() {
@@ -276,7 +276,7 @@ class OrderHandlerTest {
                 null, "MIXED",
                 List.of(new OrderRequestRecord.PaymentSplitRecord("CASH", BigDecimal.valueOf(4000)),
                         new OrderRequestRecord.PaymentSplitRecord("NEQUI", BigDecimal.valueOf(6000))),
-                null, null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null, null);
 
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
                 () -> orderHandler.createOrUpdateOrder(request));
