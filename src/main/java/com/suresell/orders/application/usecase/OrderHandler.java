@@ -246,14 +246,19 @@ public class OrderHandler implements OrderPort {
         // nace en false y el outbox la marca al confirmar la nube.
         order.setSynced(!cloudSyncEnabled);
         
-        // Ola 2 (mayorista): con CLIENTE, el precio lo resuelve la base con su
-        // lista (V45) y el que mandó el POS se descarta. Sin cliente, nada cambia.
-        List<OrderItemRequestRecord> lineas = dto.items();
-        java.util.Map<String, com.suresell.orders.mayorista.ResolucionDePrecios.Precio> preciosResueltos = java.util.Map.of();
-        if (dto.clienteDocumento() != null && !dto.clienteDocumento().isBlank()) {
-            preciosResueltos = resolucionDePrecios.resolver(dto.clienteDocumento().trim(), dto.items());
-            lineas = resolucionDePrecios.conPrecios(dto.items(), preciosResueltos);
-            order.setClienteDocumento(dto.clienteDocumento().trim());
+        // Ola 2 (mayorista, V45) e integración (V46): EL PRECIO LO PONE LA BASE
+        // EN TODA VENTA. Con cliente, su lista; sin cliente, el precio BASE del
+        // catálogo. El que mandó el POS se guarda como declarado y se compara,
+        // nunca se cobra. Antes solo se resolvía con cliente, y una venta sin
+        // cliente con precio 1 se cobraba a 1 (medido en staging). Un producto
+        // que el catálogo no conoce conserva lo declarado, con origen POS.
+        String cliente = dto.clienteDocumento() == null || dto.clienteDocumento().isBlank()
+                ? null : dto.clienteDocumento().trim();
+        java.util.Map<String, com.suresell.orders.mayorista.ResolucionDePrecios.Precio> preciosResueltos =
+                resolucionDePrecios.resolver(cliente, dto.items(), cliente != null);
+        List<OrderItemRequestRecord> lineas = resolucionDePrecios.conPrecios(dto.items(), preciosResueltos);
+        if (cliente != null) {
+            order.setClienteDocumento(cliente);
             preciosResueltos.values().stream().map(pr -> pr.listaPrecioId()).filter(java.util.Objects::nonNull)
                     .findFirst().ifPresent(order::setListaPrecioId);
         } else if ("CREDITO".equals(normalizePaymentMethod(dto.paymentMethod()))) {
@@ -284,7 +289,7 @@ public class OrderHandler implements OrderPort {
         savedOrder.setIdOrder(numericId);
 
         // 3. Crear y Guardar Items individualmente con el ID numérico poblado
-        List<OrderItem> items = createOrderItems(savedOrder, lineas, preciosResueltos);
+        List<OrderItem> items = createOrderItems(savedOrder, lineas, preciosResueltos, dto.items());
         for (OrderItem item : items) {
             orderItemRepositoryPort.save(item);
         }
@@ -342,7 +347,12 @@ public class OrderHandler implements OrderPort {
      * vigente.
      */
     private Order agregarAOrdenAbierta(Order abierta, OrderRequestRecord dto) {
-        List<OrderItem> nuevos = createOrderItems(abierta, dto.items());
+        // V46: también en una ronda sobre la mesa abierta el precio lo pone la
+        // base, con la lista del cliente de esa orden si la tiene.
+        java.util.Map<String, com.suresell.orders.mayorista.ResolucionDePrecios.Precio> precios =
+                resolucionDePrecios.resolver(abierta.getClienteDocumento(), dto.items(), false);
+        List<OrderItem> nuevos = createOrderItems(abierta,
+                resolucionDePrecios.conPrecios(dto.items(), precios), precios, dto.items());
         for (OrderItem item : nuevos) {
             orderItemRepositoryPort.save(item);
         }
@@ -509,7 +519,11 @@ public class OrderHandler implements OrderPort {
         order.setPagerColor(dto.pagerColor());
         order.setPagerNumber(dto.pagerNumber());
         order.getItems().clear();
-        List<OrderItem> newItems = createOrderItems(order, dto.items());
+        // V46: editar una orden tampoco deja que el POS ponga el precio.
+        java.util.Map<String, com.suresell.orders.mayorista.ResolucionDePrecios.Precio> precios =
+                resolucionDePrecios.resolver(order.getClienteDocumento(), dto.items(), false);
+        List<OrderItem> newItems = createOrderItems(order,
+                resolucionDePrecios.conPrecios(dto.items(), precios), precios, dto.items());
         order.getItems().addAll(newItems);
         BigDecimal subtotal = order.getItems().stream()
                 .map(OrderItem::getTotalPrice)
@@ -979,16 +993,21 @@ public class OrderHandler implements OrderPort {
         }
     }
 
-    private List<OrderItem> createOrderItems(Order order, List<OrderItemRequestRecord> itemDtos) {
-        return createOrderItems(order, itemDtos, java.util.Map.of());
-    }
-
-    /** Con los precios resueltos por la base (ola 2): cada línea guarda de dónde salió su precio. */
+    /**
+     * Con los precios resueltos por la base (ola 2): cada línea guarda de dónde
+     * salió su precio y, desde V46, también el que declaró el POS.
+     *
+     * @param itemDtos   las líneas con el precio YA resuelto (lo que se cobra)
+     * @param declarados las líneas tal como llegaron del POS, en el mismo orden
+     */
     private List<OrderItem> createOrderItems(Order order, List<OrderItemRequestRecord> itemDtos,
-                                             java.util.Map<String, com.suresell.orders.mayorista.ResolucionDePrecios.Precio> precios) {
-        return itemDtos.stream().map(itemDto -> {
+                                             java.util.Map<String, com.suresell.orders.mayorista.ResolucionDePrecios.Precio> precios,
+                                             List<OrderItemRequestRecord> declarados) {
+        return java.util.stream.IntStream.range(0, itemDtos.size()).mapToObj(i -> {
+            OrderItemRequestRecord itemDto = itemDtos.get(i);
             com.suresell.orders.mayorista.ResolucionDePrecios.Precio resuelto = precios.get(itemDto.productId());
             OrderItem item = new OrderItem();
+            item.setPrecioDeclarado(i < declarados.size() ? declarados.get(i).unitPrice() : null);
             item.setOrder(order);
             item.setOrderId(order.getIdOrder()); // ASIGNACIÓN CRÍTICA PARA SQLITE
             item.setProductId(itemDto.productId());

@@ -38,6 +38,28 @@ public class ResolucionDePrecios {
 
     /** Un precio por producto de la orden, con la cantidad TOTAL del producto en la orden. */
     public Map<String, Precio> resolver(String clienteDocumento, List<OrderItemRequestRecord> lineas) {
+        return resolver(clienteDocumento, lineas, true);
+    }
+
+    /**
+     * Resuelve el precio de cada producto en la base: la lista del cliente si
+     * la tiene, y si no el precio BASE del catálogo.
+     *
+     * <p>Integración de la ola 2: <b>se llama SIEMPRE</b>, con o sin cliente.
+     * Antes solo se llamaba con cliente, y sin cliente el servidor aceptaba el
+     * precio que mandaba el POS: una venta sin cliente con precio 1 se cobraba a
+     * 1 (medido en staging, orden 4 de {@code qa-zeta-v38}, producto de 120.000).
+     * Es el mismo hueco que la Fase 2 cerró para los importes, abierto por otro
+     * lado.
+     *
+     * @param exigirCatalogo con {@code true}, un producto que no está en el
+     *        catálogo es un error (venta con cliente: no hay lista que aplicar).
+     *        Con {@code false} se omite del mapa y la línea conserva el precio
+     *        declarado por el POS, marcado como tal: una venta no se pierde por
+     *        un producto que el catálogo todavía no conoce.
+     */
+    public Map<String, Precio> resolver(String clienteDocumento, List<OrderItemRequestRecord> lineas,
+                                        boolean exigirCatalogo) {
         Map<String, Integer> cantidadPorProducto = new LinkedHashMap<>();
         for (OrderItemRequestRecord l : lineas) {
             cantidadPorProducto.merge(l.productId(), l.quantity(), Integer::sum);
@@ -53,9 +75,17 @@ public class ResolucionDePrecios {
                     clienteDocumento, e.getKey(), e.getValue());
             if (filas.isEmpty()) {
                 // Sin fila no hay producto: ni en la lista ni en el catálogo.
-                // No se vende algo que no existe a un precio que mandó el cliente.
-                throw new IllegalArgumentException(
-                        "El producto " + e.getKey() + " no existe en el catálogo: no se le puede poner precio.");
+                if (exigirCatalogo) {
+                    // Con cliente: no se vende algo que no existe a un precio
+                    // que mandó el POS.
+                    throw new IllegalArgumentException(
+                            "El producto " + e.getKey() + " no existe en el catálogo: no se le puede poner precio.");
+                }
+                // Sin cliente: no hay catálogo con qué contradecir al POS. La
+                // línea conserva lo declarado, con origen POS, que es visible
+                // (en producción: 15 de 2.407 líneas en 30 días, productos ya
+                // retirados del menú). Una venta no se pierde por eso.
+                continue;
             }
             resultado.put(e.getKey(), filas.get(0));
         }
