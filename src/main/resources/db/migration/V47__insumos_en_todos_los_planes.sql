@@ -1,0 +1,53 @@
+-- =====================================================================
+-- V47 -- El módulo `insumos` entra en TODOS los planes.
+--
+-- LA DECISION
+--
+-- El inventario va desde el plan más básico. Es captura de datos -- lo que el
+-- comercio compra y consume --, no una función premium: sin ella no hay costo,
+-- y sin costo no hay margen ni historial que enseñarle a nadie. Cobrar por
+-- dejar que el comercio registre sus propios datos retrasa justo lo que hace
+-- útil al resto del producto.
+--
+-- LO QUE HABIA (medido el 2026-09-07, en solo lectura)
+--
+--   producción:  basico = cierre, cocina, historial, ventas
+--                pro    = ... + insumos          <- puesto A MANO, no por migración
+--   staging:     basico = cierre, cocina, historial, ventas
+--                pro    = ... SIN insumos
+--
+-- Los dos ambientes no decían lo mismo, y la diferencia no estaba en ninguna
+-- migración: `insumos` llegó al plan `pro` de producción por el panel del KAM
+-- o por un INSERT suelto. Shark Burger además lo tiene por excepción, en
+-- `tenant_modules`. Esta migración pone la misma verdad en los dos sitios.
+--
+-- QUE HACE
+--
+-- Añade `insumos` a cada plan que exista al aplicarse (hoy `basico` y `pro`).
+-- No toca `tenant_modules`: el override de Shark Burger sigue donde está y
+-- ahora es redundante, que es inofensivo -- un módulo regalado dos veces se
+-- ve una sola vez (`effectiveModules` trabaja sobre un conjunto).
+--
+-- Idempotente: `ON CONFLICT DO NOTHING`. Aplicarla dos veces no cambia nada, y
+-- en producción `pro` ya lo tiene.
+--
+-- LA DEUDA QUE NO SE PAGA AQUI
+--
+-- El mapa plan → módulos es dato desde V27, pero la LISTA de módulos que
+-- existen sigue siendo constantes de Java (`PlanCatalog.KNOWN`): inventar un
+-- módulo nuevo todavía exige recompilar, aunque regalarlo o meterlo en un plan
+-- ya no. Es el mismo salto que el perfil vertical dio para las verticales
+-- (V50 del inventario) y que a los módulos les falta. No se rediseña en una
+-- noche de despliegue: queda anotado.
+--
+-- ROLLBACK
+--
+--   DELETE FROM plan_modules WHERE module = 'insumos';
+--
+-- Deja `pro` como estaba en staging, y en producción quita lo que había puesto
+-- la mano. Shark Burger no lo pierde: su override vive en `tenant_modules`.
+-- =====================================================================
+
+INSERT INTO plan_modules (plan_id, module)
+SELECT p.id, 'insumos' FROM plans p
+ON CONFLICT DO NOTHING;
