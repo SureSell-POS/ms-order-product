@@ -49,19 +49,33 @@ class AltaDeNegocioIT {
                 POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
         jdbc = new JdbcTemplate(ds);
 
+        // V48: el alta lee el catálogo de perfiles del inventario (otra cadena).
+        // Aquí se levanta su doble; sin él, el alta exige perfil solo si hay catálogo.
+        EsquemaInventarioDePrueba.crear(jdbc);
+
         servicio = new AltaDeNegocioService(jdbc, new BCryptPasswordEncoder(),
-                new PlanCatalogService(new PlanRepository(jdbc)));
+                new PlanCatalogService(new PlanRepository(jdbc)),
+                new com.suresell.orders.flujo.FlujosDeVenta(jdbc), new PerfilDelNegocio(jdbc));
     }
 
+    /** Un KAM viejo: manda `modo` y ningún `flujoDeVenta`, pero ya con perfil. */
     private static AltaDeNegocioService.Solicitud restaurante(String nombre, String email, int mesas) {
         return new AltaDeNegocioService.Solicitud(
                 nombre, email, "clave-seguraaa", "pro", "RESTAURANTE", mesas,
-                "900123456-1", "Calle 1 # 2-3", "3001234567");
+                "900123456-1", "Calle 1 # 2-3", "3001234567", "restaurante", null);
     }
 
     private static AltaDeNegocioService.Solicitud plazoleta(String nombre, String email) {
         return new AltaDeNegocioService.Solicitud(
-                nombre, email, "clave-seguraaa", "pro", "PLAZOLETA", null, null, null, null);
+                nombre, email, "clave-seguraaa", "pro", "PLAZOLETA", null, null, null, null,
+                "restaurante", null);
+    }
+
+    /** Un KAM nuevo: perfil y, si quiere, flujo. */
+    private static AltaDeNegocioService.Solicitud conPerfil(String nombre, String email, String perfil,
+                                                            String flujo, Integer mesas) {
+        return new AltaDeNegocioService.Solicitud(
+                nombre, email, "clave-seguraaa", "pro", null, mesas, null, null, null, perfil, flujo);
     }
 
     @Test
@@ -93,6 +107,9 @@ class AltaDeNegocioIT {
         // Si se dejara al disparador de V28, la sede naceria en PLAZOLETA y el
         // restaurante arrancaria sin plano de mesas.
         assertThat(sede.get("pos_mode")).isEqualTo("RESTAURANTE");
+        // V48: `modo` viejo RESTAURANTE se resolvió contra el catálogo.
+        assertThat(jdbc.queryForObject("SELECT flujo_de_venta FROM sites WHERE tenant_id = 'asadero-la-80'",
+                String.class)).isEqualTo("MESA");
         assertThat(sede.get("is_default")).isEqualTo(true);
         assertThat(sede.get("code")).isEqualTo("PRINCIPAL");
     }
@@ -193,14 +210,16 @@ class AltaDeNegocioIT {
         assertThatThrownBy(() -> servicio.darDeAlta(plazoleta("Sin Arroba", "no-es-un-email")))
                 .hasMessageContaining("email");
 
+        // V48: un `modo` que no está en el catálogo se rechaza diciendo cuáles hay.
         assertThatThrownBy(() -> servicio.darDeAlta(
                 new AltaDeNegocioService.Solicitud("Modo Raro", "admin@modoraro.co", "clave-seguraaa",
-                        "pro", "DELIVERY", null, null, null, null)))
-                .hasMessageContaining("PLAZOLETA o RESTAURANTE");
+                        "pro", "DELIVERY", null, null, null, null, "restaurante", null)))
+                .hasMessageContaining("DELIVERY")
+                .hasMessageContaining("RASTREADOR");
 
         assertThatThrownBy(() -> servicio.darDeAlta(
                 new AltaDeNegocioService.Solicitud("Plan Raro", "admin@planraro.co", "clave-seguraaa",
-                        "inexistente", "PLAZOLETA", null, null, null, null)))
+                        "inexistente", "PLAZOLETA", null, null, null, null, "restaurante", null)))
                 .hasMessageContaining("no existe");
     }
 
@@ -222,5 +241,116 @@ class AltaDeNegocioIT {
         Integer n = jdbc.queryForObject("SELECT count(*) FROM " + tabla + " WHERE " + condicion,
                 Integer.class);
         return n == null ? 0 : n;
+    }
+
+    // ------------------------------------------------------------------
+    // V48 (ola 3): perfil en el alta, flujo por perfil, mesas solo donde hay.
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("🔴 una droguería nace vendiendo DIRECTO, sin mesas, y con su perfil anotado por el KAM")
+    void unaDrogueriaNaceDirectoYConPerfil() {
+        var r = servicio.darDeAlta(conPerfil("Droguería La Salud", "admin@lasalud.co", "drogueria", null, null),
+                "kam@suresell.com.co");
+
+        assertThat(r.perfil()).isEqualTo("drogueria");
+        assertThat(r.flujoDeVenta()).isEqualTo("DIRECTO");
+        assertThat(r.perfilRegistrado()).isTrue();
+        assertThat(r.mesasCreadas()).isZero();
+        // Lo que ve un POS viejo: PLAZOLETA, porque así lo dice la fila del catálogo.
+        assertThat(r.modo()).isEqualTo("PLAZOLETA");
+
+        Map<String, Object> sede = jdbc.queryForMap(
+                "SELECT pos_mode, flujo_de_venta FROM sites WHERE tenant_id = 'drogueria-la-salud'");
+        assertThat(sede.get("flujo_de_venta")).isEqualTo("DIRECTO");
+        assertThat(sede.get("pos_mode")).isEqualTo("PLAZOLETA");
+
+        // El libro del perfil: una fila, del KAM, con la fuente y la confianza de V50.
+        jdbc.queryForObject("SELECT set_config('app.tenant_id', 'drogueria-la-salud', false)", String.class);
+        Map<String, Object> libro = jdbc.queryForMap(
+                "SELECT perfil_codigo, fuente, confianza, usuario_id, referencia "
+                        + "FROM inventario.perfil_asignado WHERE tenant_id = 'drogueria-la-salud'");
+        assertThat(libro.get("perfil_codigo")).isEqualTo("drogueria");
+        assertThat(libro.get("fuente")).isEqualTo("asignado_por_suresell");
+        assertThat(((Number) libro.get("confianza")).intValue()).isEqualTo(3);
+        assertThat(libro.get("usuario_id")).isEqualTo("kam@suresell.com.co");
+        assertThat(libro.get("referencia")).isEqualTo("alta:drogueria-la-salud");
+        jdbc.queryForObject("SELECT set_config('app.tenant_id', '', false)", String.class);
+    }
+
+    @Test
+    @DisplayName("un restaurante sin decir flujo nace en el que su perfil trae por defecto (MESA), con mesas")
+    void elRestauranteHeredaElDefectoDelPerfil() {
+        var r = servicio.darDeAlta(conPerfil("Mesón Real", "admin@meson.co", "restaurante", null, 6));
+
+        assertThat(r.flujoDeVenta()).isEqualTo("MESA");
+        assertThat(r.modo()).isEqualTo("RESTAURANTE");
+        assertThat(r.mesasCreadas()).isEqualTo(6);
+    }
+
+    @Test
+    @DisplayName("un restaurante puede elegir RASTREADOR: el perfil lo admite")
+    void elRestaurantePuedeElegirRastreador() {
+        var r = servicio.darDeAlta(conPerfil("Plazoleta Sabor", "admin@sabor.co", "restaurante", "RASTREADOR", null));
+
+        assertThat(r.flujoDeVenta()).isEqualTo("RASTREADOR");
+        assertThat(r.mesasCreadas()).isZero();
+    }
+
+    @Test
+    @DisplayName("🔴 control negativo: una droguería NO puede nacer con mesas; el perfil no lo admite")
+    void elPerfilNoAdmiteEseFlujo() {
+        assertThatThrownBy(() -> servicio.darDeAlta(
+                conPerfil("Droguería Mesas", "admin@drogmesas.co", "drogueria", "MESA", 4)))
+                .isInstanceOf(AltaDeNegocioService.AltaInvalidaException.class)
+                .hasMessageContaining("no admite el flujo MESA");
+        assertThat(cuenta("tenants", "id = 'drogueria-mesas'")).isZero();
+    }
+
+    @Test
+    @DisplayName("🔴 control negativo: con catálogo, el alta sin perfil se rechaza y dice cuáles hay")
+    void sinPerfilSeRechaza() {
+        assertThatThrownBy(() -> servicio.darDeAlta(
+                conPerfil("Sin Perfil", "admin@sinperfil.co", null, null, null)))
+                .isInstanceOf(AltaDeNegocioService.AltaInvalidaException.class)
+                .hasMessageContaining("obligatorio")
+                .hasMessageContaining("drogueria");
+        assertThat(cuenta("tenants", "id = 'sin-perfil'")).isZero();
+    }
+
+    @Test
+    @DisplayName("un perfil que no existe se rechaza con 400")
+    void perfilInexistente() {
+        assertThatThrownBy(() -> servicio.darDeAlta(
+                conPerfil("Telepatía", "admin@telepatia.co", "telepatia", null, null)))
+                .isInstanceOf(AltaDeNegocioService.AltaInvalidaException.class)
+                .satisfies(e -> assertThat(((AltaDeNegocioService.AltaInvalidaException) e).codigo())
+                        .isEqualTo(400));
+    }
+
+    @Test
+    @DisplayName("un flujo que no está en el catálogo se rechaza, aunque el perfil sea válido")
+    void flujoInexistente() {
+        assertThatThrownBy(() -> servicio.darDeAlta(
+                conPerfil("Buffet", "admin@buffet.co", "restaurante", "BUFFET", null)))
+                .isInstanceOf(AltaDeNegocioService.AltaInvalidaException.class)
+                .hasMessageContaining("BUFFET");
+    }
+
+    @Test
+    @DisplayName("el catálogo del KAM trae cada perfil con sus flujos, y el que no tiene flujo aparece con la lista vacía")
+    void elCatalogoDelKam() {
+        var perfiles = new PerfilDelNegocio(jdbc).catalogo();
+
+        assertThat(perfiles).extracting(PerfilDelNegocio.Perfil::codigo)
+                .contains("restaurante", "drogueria", "optica");
+        var restaurante = perfiles.stream().filter(p -> p.codigo().equals("restaurante")).findFirst().orElseThrow();
+        assertThat(restaurante.flujos()).extracting(PerfilDelNegocio.FlujoAdmitido::codigo)
+                .containsExactly("MESA", "RASTREADOR");
+        assertThat(restaurante.flujos().get(0).esDefecto()).isTrue();
+        // Óptica está en el inventario pero nadie le declaró flujo en public:
+        // se ve, con la lista vacía. Visible, no escondido.
+        var optica = perfiles.stream().filter(p -> p.codigo().equals("optica")).findFirst().orElseThrow();
+        assertThat(optica.flujos()).isEmpty();
     }
 }

@@ -27,6 +27,10 @@ class SuperAdminServiceTest {
         org.mockito.Mockito.lenient().when(planRepo.findAll()).thenReturn(java.util.List.of());
         return new SuperAdminService(r, a, planRepo, new PlanCatalogService(planRepo),
                 org.mockito.Mockito.mock(org.springframework.jdbc.core.JdbcTemplate.class),
+                // V48: el catálogo de flujos y el perfil solo los usan las sedes
+                // y el alta; estos tests no los tocan.
+                org.mockito.Mockito.mock(com.suresell.orders.flujo.FlujosDeVenta.class),
+                org.mockito.Mockito.mock(PerfilDelNegocio.class),
                 SECRET, 3600);
     }
 

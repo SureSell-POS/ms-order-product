@@ -48,7 +48,10 @@ public class SuperAdminController {
             return guard;
         }
         try {
-            return ResponseEntity.ok(alta.darDeAlta(req));
+            // Quién da de alta sale del JWT del KAM: queda como responsable en
+            // el libro del perfil (V50: `asignado_por_suresell`).
+            String quien = resolver.superAdminEmail(http.getHeader("Authorization"));
+            return ResponseEntity.ok(alta.darDeAlta(req, quien));
         } catch (AltaDeNegocioService.AltaInvalidaException e) {
             return ResponseEntity.status(e.codigo()).body(Map.of("error", e.getMessage()));
         }
@@ -137,13 +140,91 @@ public class SuperAdminController {
             // Quién hace el cambio sale del JWT de super-admin, no del cuerpo:
             // así no se puede falsear desde el cliente.
             String quien = resolver.superAdminEmail(http.getHeader("Authorization"));
-            return ResponseEntity.ok(svc.setSiteMode(id, siteId, req.posMode(), quien));
+            return ResponseEntity.ok(svc.setSiteMode(id, siteId, req.pedido(), quien));
         } catch (AuthException e) {
             return err(e);
         }
     }
 
-    public record SiteModeRequest(String posMode) {
+    /**
+     * V48: el KAM nuevo manda {@code flujoDeVenta}; el viejo, {@code posMode}.
+     * Los dos se resuelven contra el catálogo.
+     */
+    public record SiteModeRequest(String posMode, String flujoDeVenta) {
+        String pedido() {
+            return flujoDeVenta != null && !flujoDeVenta.isBlank() ? flujoDeVenta : posMode;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // V48 (ola 3) — Perfil vertical, catálogos y cuentas de KAM.
+    // ------------------------------------------------------------------
+
+    /** Los perfiles verticales con los flujos que admite cada uno. Para el alta. */
+    @GetMapping("/admin/perfiles")
+    public ResponseEntity<?> perfiles(HttpServletRequest http) {
+        ResponseEntity<?> guard = requireSuper(http);
+        return guard != null ? guard : ResponseEntity.ok(svc.perfiles());
+    }
+
+    /** El catálogo de flujos de venta. */
+    @GetMapping("/admin/flujos")
+    public ResponseEntity<?> flujos(HttpServletRequest http) {
+        ResponseEntity<?> guard = requireSuper(http);
+        return guard != null ? guard : ResponseEntity.ok(svc.flujos());
+    }
+
+    /** El perfil vigente de un negocio; 200 con `asignado:false` si no tiene. */
+    @GetMapping("/admin/tenants/{id}/perfil")
+    public ResponseEntity<?> perfil(@PathVariable String id, HttpServletRequest http) {
+        ResponseEntity<?> guard = requireSuper(http);
+        if (guard != null) {
+            return guard;
+        }
+        return ResponseEntity.ok(svc.perfilVigente(id)
+                .<Map<String, Object>>map(v -> Map.of("asignado", true, "codigo", v.codigo(),
+                        "nombre", v.nombre(), "fuente", v.fuente(), "confianza", v.confianza(),
+                        "asignadoPor", v.asignadoPor(), "asignadoEn", String.valueOf(v.asignadoEn())))
+                .orElse(Map.of("asignado", false)));
+    }
+
+    public record PerfilRequest(String codigo) {
+    }
+
+    /** Cambiar el perfil. SOLO el KAM. No reconvierte el catálogo existente. */
+    @PutMapping("/admin/tenants/{id}/perfil")
+    public ResponseEntity<?> setPerfil(@PathVariable String id, @RequestBody PerfilRequest req,
+                                       HttpServletRequest http) {
+        ResponseEntity<?> guard = requireSuper(http);
+        if (guard != null) {
+            return guard;
+        }
+        try {
+            String quien = resolver.superAdminEmail(http.getHeader("Authorization"));
+            var v = svc.setPerfil(id, req.codigo(), quien);
+            return ResponseEntity.ok(Map.of("asignado", true, "codigo", v.codigo(), "nombre", v.nombre(),
+                    "fuente", v.fuente(), "confianza", v.confianza(), "asignadoPor", v.asignadoPor()));
+        } catch (AuthException e) {
+            return err(e);
+        }
+    }
+
+    public record SuperAdminRequest(String email, String password) {
+    }
+
+    /** Otra cuenta de KAM. Exige ser KAM: la primera la crea el arranque por variable. */
+    @PostMapping("/admin/super-admins")
+    public ResponseEntity<?> crearSuperAdmin(@RequestBody SuperAdminRequest req, HttpServletRequest http) {
+        ResponseEntity<?> guard = requireSuper(http);
+        if (guard != null) {
+            return guard;
+        }
+        try {
+            String quien = resolver.superAdminEmail(http.getHeader("Authorization"));
+            return ResponseEntity.status(201).body(svc.createSuperAdmin(req.email(), req.password(), quien));
+        } catch (AuthException e) {
+            return err(e);
+        }
     }
 
     // ------------------------------------------------------------------

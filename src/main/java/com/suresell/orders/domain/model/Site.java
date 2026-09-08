@@ -24,6 +24,13 @@ import lombok.NoArgsConstructor;
 @EntityListeners(com.suresell.orders.multitenant.TenantEntityListener.class)
 public class Site implements com.suresell.orders.multitenant.TenantOwned {
 
+    /**
+     * LEGADO (V48). Son los dos valores que un lector viejo de {@code posMode}
+     * entiende; los conserva la base en {@code pos_mode}, derivados del flujo.
+     * NO se usan para validar: eso lo hace el catálogo
+     * ({@code FlujosDeVenta}). Se quedan porque {@link #esRestaurante()} y los
+     * tests que garantizan el comportamiento viejo los nombran.
+     */
     public static final String MODO_PLAZOLETA = "PLAZOLETA";
     public static final String MODO_RESTAURANTE = "RESTAURANTE";
 
@@ -41,8 +48,22 @@ public class Site implements com.suresell.orders.multitenant.TenantOwned {
     @Column(nullable = false)
     private String code;
 
+    /**
+     * V48 — Lo que ve un POS sin actualizar. La base lo DERIVA de
+     * {@link #flujoDeVenta} por trigger: escribirlo aquí solo sirve para un
+     * escritor viejo, y aun así el trigger corrige el flujo.
+     */
     @Column(name = "pos_mode", nullable = false)
     private String posMode = MODO_PLAZOLETA;
+
+    /**
+     * V48 — El flujo de venta de la sede (catálogo {@code flujos_de_venta}).
+     * Es la verdad; {@code posMode} es su sombra para los clientes viejos.
+     * Quien crea una sede desde Java lo fija SIEMPRE ({@code SiteService.crear}):
+     * JPA escribe la columna aunque sea nula y el DEFAULT de la base no aplica.
+     */
+    @Column(name = "flujo_de_venta")
+    private String flujoDeVenta;
 
     @Column(nullable = false)
     private Boolean active = true;

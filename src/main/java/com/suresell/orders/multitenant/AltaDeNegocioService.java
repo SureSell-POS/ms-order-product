@@ -3,6 +3,7 @@ package com.suresell.orders.multitenant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -30,7 +31,15 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class AltaDeNegocioService {
 
-    /** Lo que el KAM manda para dar de alta. */
+    /**
+     * Lo que el KAM manda para dar de alta.
+     *
+     * <p>V48 (ola 3): {@code perfil} es el perfil vertical (obligatorio cuando
+     * la base tiene el catálogo del inventario) y {@code flujoDeVenta} el flujo
+     * de la sede principal, que tiene que ser uno de los que el perfil admite;
+     * si no viene, el que el perfil trae por defecto. {@code modo} se conserva
+     * para un KAM viejo: se resuelve contra el catálogo como cualquier flujo.
+     */
     public record Solicitud(
             String nombreNegocio,
             String emailAdmin,
@@ -40,7 +49,18 @@ public class AltaDeNegocioService {
             Integer cantidadMesas,
             String nit,
             String direccion,
-            String telefono) {}
+            String telefono,
+            String perfil,
+            String flujoDeVenta) {
+
+        /** La forma que tenía este record antes de V48: sin perfil ni flujo. */
+        public Solicitud(String nombreNegocio, String emailAdmin, String clave, String plan,
+                         String modo, Integer cantidadMesas, String nit, String direccion,
+                         String telefono) {
+            this(nombreNegocio, emailAdmin, clave, plan, modo, cantidadMesas, nit, direccion,
+                    telefono, null, null);
+        }
+    }
 
     /** Lo que se creó, para mostrárselo al KAM. */
     public record Resultado(
@@ -51,7 +71,10 @@ public class AltaDeNegocioService {
             String modo,
             long siteId,
             int mesasCreadas,
-            List<String> modulos) {}
+            List<String> modulos,
+            String perfil,
+            String flujoDeVenta,
+            boolean perfilRegistrado) {}
 
     /** El alta falló por un dato del formulario, no por un fallo del sistema. */
     public static class AltaInvalidaException extends RuntimeException {
@@ -68,12 +91,12 @@ public class AltaDeNegocioService {
     }
 
     private static final String ROL_ADMIN = "admin";
-    private static final String MODO_PLAZOLETA = "PLAZOLETA";
-    private static final String MODO_RESTAURANTE = "RESTAURANTE";
 
     private final JdbcTemplate jdbc;
     private final PasswordEncoder encoder;
     private final PlanCatalogService planes;
+    private final com.suresell.orders.flujo.FlujosDeVenta flujos;
+    private final PerfilDelNegocio perfiles;
 
     // Se crea acá y no se inyecta: el proyecto no publica un bean de
     // PasswordEncoder (AuthService también instancia el suyo). Inyectarlo hacía
@@ -82,19 +105,34 @@ public class AltaDeNegocioService {
     // El @Autowired es imprescindible teniendo dos constructores: sin él Spring
     // no sabe cuál usar, busca el vacío y el contexto no levanta.
     @org.springframework.beans.factory.annotation.Autowired
-    public AltaDeNegocioService(JdbcTemplate jdbc, PlanCatalogService planes) {
-        this(jdbc, new BCryptPasswordEncoder(), planes);
+    public AltaDeNegocioService(JdbcTemplate jdbc, PlanCatalogService planes,
+                                com.suresell.orders.flujo.FlujosDeVenta flujos,
+                                PerfilDelNegocio perfiles) {
+        this(jdbc, new BCryptPasswordEncoder(), planes, flujos, perfiles);
     }
 
     /** Para tests: permite inyectar el codificador. */
-    AltaDeNegocioService(JdbcTemplate jdbc, PasswordEncoder encoder, PlanCatalogService planes) {
+    AltaDeNegocioService(JdbcTemplate jdbc, PasswordEncoder encoder, PlanCatalogService planes,
+                         com.suresell.orders.flujo.FlujosDeVenta flujos, PerfilDelNegocio perfiles) {
         this.jdbc = jdbc;
         this.encoder = encoder;
         this.planes = planes;
+        this.flujos = flujos;
+        this.perfiles = perfiles;
     }
 
+    /** Alta sin decir quién la hace: solo para llamadores viejos y tests. */
     @Transactional
     public Resultado darDeAlta(Solicitud s) {
+        return darDeAlta(s, "kam");
+    }
+
+    /**
+     * @param quien el correo del KAM que da de alta (sale del JWT, no del
+     *              cuerpo). Queda como {@code usuario_id} en el libro del perfil.
+     */
+    @Transactional
+    public Resultado darDeAlta(Solicitud s, String quien) {
         String nombre = limpiar(s.nombreNegocio());
         String email = s.emailAdmin() == null ? "" : s.emailAdmin().trim().toLowerCase(Locale.ROOT);
         String clave = s.clave() == null ? "" : s.clave();
@@ -118,17 +156,23 @@ public class AltaDeNegocioService {
             throw new AltaInvalidaException(409, "Ese email ya está registrado en otro negocio");
         }
 
-        String modo = normalizarModo(s.modo());
         String plan = planValido(s.plan());
 
-        // Un restaurante SIN mesas no puede vender: el POS en modo Restaurante
-        // muestra el plano de mesas y estaria vacio.
+        // V48 — El perfil vertical va en el alta, no después: es lo que decide
+        // con qué rasgos nacen los insumos y qué flujos puede vender. Y el flujo
+        // de la sede tiene que ser uno de los que el perfil admite.
+        Optional<PerfilDelNegocio.Perfil> perfil = perfilElegido(s.perfil());
+        com.suresell.orders.flujo.FlujosDeVenta.Flujo flujo = flujoElegido(s, perfil);
+
+        // Una sede que abre cuenta por mesa SIN mesas no puede vender: el POS
+        // muestra el plano de mesas y estaria vacio. Que un flujo use mesas lo
+        // dice el catálogo, no el nombre del flujo.
         int mesas = 0;
-        if (MODO_RESTAURANTE.equals(modo)) {
+        if (flujo.usaMesas()) {
             mesas = s.cantidadMesas() == null ? 0 : s.cantidadMesas();
             if (mesas < 1) {
                 throw new AltaInvalidaException(400,
-                        "Un negocio en modo Restaurante necesita al menos una mesa");
+                        "El flujo " + flujo.codigo() + " abre cuenta por mesa: necesita al menos una mesa");
             }
             if (mesas > 500) {
                 throw new AltaInvalidaException(400, "El máximo es 500 mesas");
@@ -158,12 +202,13 @@ public class AltaDeNegocioService {
                 email, encoder.encode(clave), tenantId, ROL_ADMIN);
 
         // La sede se crea explicitamente y no se deja al disparador de V28: asi
-        // queda con el modo elegido desde el minuto cero. Si se dejara al
-        // disparador nacería en PLAZOLETA y un restaurante arrancaria sin mesas.
+        // queda con el flujo elegido desde el minuto cero. `pos_mode` lo deriva
+        // el trigger de V48 del catálogo; aquí no se escribe.
         Long siteId = jdbc.queryForObject(
-                "INSERT INTO sites (tenant_id, name, code, pos_mode, is_default) "
+                "INSERT INTO sites (tenant_id, name, code, flujo_de_venta, is_default) "
                         + "VALUES (?, 'Principal', 'PRINCIPAL', ?, true) RETURNING id",
-                Long.class, tenantId, modo);
+                Long.class, tenantId, flujo.codigo());
+        String modo = jdbc.queryForObject("SELECT pos_mode FROM sites WHERE id = ?", String.class, siteId);
 
         // El contador arranca en 0: la primera venta sera el folio 1.
         jdbc.update("INSERT INTO tenant_order_counters (tenant_id, site_id, last_id) VALUES (?, ?, 0) "
@@ -176,15 +221,63 @@ public class AltaDeNegocioService {
 
         List<String> modulos = new ArrayList<>(planes.modulesForPlan(plan));
 
-        return new Resultado(tenantId, nombre, email, plan, modo, siteId, mesas, modulos);
+        // El perfil queda asignado EN el alta, en la misma transacción, con la
+        // fuente y la confianza que V50 reservó para el KAM. Si la base no tiene
+        // el esquema del inventario (la suite de este servicio), no se escribe y
+        // el resultado lo dice: `perfilRegistrado = false` no es un éxito a medias
+        // silencioso, es un dato.
+        boolean perfilRegistrado = perfil.isPresent()
+                && perfiles.asignarPorElKam(tenantId, perfil.get().codigo(), quien, "alta:" + tenantId);
+
+        return new Resultado(tenantId, nombre, email, plan, modo, siteId, mesas, modulos,
+                perfil.map(PerfilDelNegocio.Perfil::codigo).orElse(null), flujo.codigo(),
+                perfilRegistrado);
     }
 
-    private String normalizarModo(String modo) {
-        String m = modo == null ? MODO_PLAZOLETA : modo.trim().toUpperCase(Locale.ROOT);
-        if (!MODO_PLAZOLETA.equals(m) && !MODO_RESTAURANTE.equals(m)) {
-            throw new AltaInvalidaException(400, "El modo debe ser PLAZOLETA o RESTAURANTE");
+    /**
+     * El perfil es obligatorio cuando hay catálogo. Sin catálogo (solo la
+     * cadena `public`) se acepta un código que tenga flujos declarados, o
+     * ninguno: no hay dónde registrarlo.
+     */
+    private Optional<PerfilDelNegocio.Perfil> perfilElegido(String codigo) {
+        boolean hayCatalogo = perfiles.hayCatalogo();
+        if (codigo == null || codigo.isBlank()) {
+            if (hayCatalogo) {
+                throw new AltaInvalidaException(400, "El perfil vertical es obligatorio. Válidos: "
+                        + String.join(" | ", perfiles.catalogo().stream()
+                                .map(PerfilDelNegocio.Perfil::codigo).toList()));
+            }
+            return Optional.empty();
         }
-        return m;
+        return Optional.of(perfiles.porCodigo(codigo).orElseThrow(() -> new AltaInvalidaException(400,
+                "El perfil '" + codigo + "' no existe. Válidos: " + String.join(" | ",
+                        perfiles.catalogo().stream().map(PerfilDelNegocio.Perfil::codigo).toList()))));
+    }
+
+    /**
+     * El flujo de la sede: lo que mande `flujoDeVenta`, o `modo` si viene de un
+     * KAM viejo, o el defecto del perfil. Siempre resuelto contra el catálogo, y
+     * siempre uno de los que el perfil admite.
+     */
+    private com.suresell.orders.flujo.FlujosDeVenta.Flujo flujoElegido(
+            Solicitud s, Optional<PerfilDelNegocio.Perfil> perfil) {
+        String pedido = s.flujoDeVenta() != null && !s.flujoDeVenta().isBlank() ? s.flujoDeVenta() : s.modo();
+        com.suresell.orders.flujo.FlujosDeVenta.Flujo flujo;
+        if (pedido == null || pedido.isBlank()) {
+            flujo = perfil.flatMap(p -> flujos.defectoDe(p.codigo())).orElseGet(flujos::defectoGlobal);
+        } else {
+            flujo = flujos.resolver(pedido).orElseThrow(() -> new AltaInvalidaException(400,
+                    "El flujo de venta '" + pedido + "' no existe. Válidos: " + flujos.nombresValidos()));
+        }
+        if (perfil.isPresent()) {
+            List<String> admitidos = perfil.get().flujos().stream()
+                    .map(PerfilDelNegocio.FlujoAdmitido::codigo).toList();
+            if (!admitidos.isEmpty() && !admitidos.contains(flujo.codigo())) {
+                throw new AltaInvalidaException(400, "El perfil '" + perfil.get().codigo()
+                        + "' no admite el flujo " + flujo.codigo() + ". Admite: " + String.join(" | ", admitidos));
+            }
+        }
+        return flujo;
     }
 
     private String planValido(String plan) {

@@ -64,6 +64,11 @@ public class SuperAdminRepository {
                         rs.getString("plan"), rs.getString("status"), rs.getInt("users")));
     }
 
+    /** V48 (ola 3): una cuenta de KAM más. El hash llega ya calculado. */
+    public void insert(String email, String passwordHash) {
+        jdbc.update("INSERT INTO super_admins (email, password_hash) VALUES (?, ?)", email, passwordHash);
+    }
+
     /** Cambia el plan de un negocio. Devuelve cuántas filas cambió (0 = no existe). */
     public int updateTenantPlan(String tenantId, String plan) {
         return jdbc.update("UPDATE tenants SET plan = ? WHERE id = ?", plan, tenantId);

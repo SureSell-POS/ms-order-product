@@ -93,6 +93,11 @@ public class OrderHandler implements OrderPort {
     private final RegistroDeIntencionDeInventario registroDeIntencion;
     /** Ola 2: el precio por cliente lo resuelve la base (V45). Va al FINAL: @RequiredArgsConstructor. */
     private final com.suresell.orders.mayorista.ResolucionDePrecios resolucionDePrecios;
+    /**
+     * V48 (ola 3): el flujo de venta de la sede decide si el rastreador es
+     * obligatorio. Va al FINAL: @RequiredArgsConstructor.
+     */
+    private final SiteService siteService;
     // N2/D2: en el perfil cloud este servicio ES la nube (no hay outbox saliente),
     // así que las órdenes nacen ya sincronizadas. Ver createOrUpdateOrder.
     @org.springframework.beans.factory.annotation.Value("${sync.cloud.enabled:false}")
@@ -161,7 +166,12 @@ public class OrderHandler implements OrderPort {
         // pedido a la mesa. Misma razón que el camino de meseros.
         boolean omitirPager = Boolean.TRUE.equals(dto.skipPagerCheck())
                 || (dto.tableSessionId() != null && !dto.tableSessionId().isBlank());
-        if (!omitirPager) {
+        // V48 — El rastreador solo existe en los flujos que lo usan. En una
+        // droguería (DIRECTO) no se exige ni se comprueba si está ocupado; si un
+        // POS viejo lo manda igual, se guarda y ya. En RASTREADOR sigue siendo
+        // obligatorio, que antes lo imponía @NotBlank para todo el mundo.
+        if (!omitirPager && siteService.flujoEfectivo().usaRastreador()) {
+            exigirRastreador(dto);
             validatePagerAvailability(dto.pagerColor(), dto.pagerNumber(), null);
         }
         // N3 — Modo Restaurante: una orden que pertenece a una cuenta de mesa nace
@@ -511,7 +521,12 @@ public class OrderHandler implements OrderPort {
                             MAX_EDIT_MINUTES),
                     "ORDER_EDIT_TIME_EXCEEDED");
         }
-        if (!(order.getPagerColor().equals(dto.pagerColor()) && order.getPagerNumber().equals(dto.pagerNumber()))) {
+        // V48: el rastreador puede ser nulo (flujos sin rastreador) y solo se
+        // comprueba su disponibilidad donde existe.
+        boolean cambioDeRastreador = !(java.util.Objects.equals(order.getPagerColor(), dto.pagerColor())
+                && java.util.Objects.equals(order.getPagerNumber(), dto.pagerNumber()));
+        if (cambioDeRastreador && siteService.flujoEfectivo().usaRastreador()) {
+            exigirRastreador(dto);
             validatePagerAvailability(dto.pagerColor(), dto.pagerNumber(), orderId);
         }
         List<OrderItem> previousItems = new ArrayList<>(order.getItems());
@@ -976,6 +991,15 @@ public class OrderHandler implements OrderPort {
         orderPayload.put("isPrinted", Boolean.TRUE.equals(order.getIsPrinted()));
         orderPayload.put("items", items);
         return orderPayload;
+    }
+
+    /** V48: en un flujo con rastreador, la orden tiene que decir cuál. */
+    private static void exigirRastreador(OrderRequestRecord dto) {
+        if (dto.pagerColor() == null || dto.pagerColor().isBlank()
+                || dto.pagerNumber() == null || dto.pagerNumber().isBlank()) {
+            throw new IllegalArgumentException(
+                    "Esta sede entrega por rastreador: pagerColor y pagerNumber son obligatorios");
+        }
     }
 
     private void validatePagerAvailability(String pagerColor, String pagerNumber, Long excludeOrderId) {

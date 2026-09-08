@@ -56,8 +56,10 @@ public class RestaurantTableController {
             return fila;
         }).toList();
 
+        var flujo = siteService.flujoEfectivo();
         return ResponseEntity.ok(Map.of(
-                "posMode", siteService.modoEfectivo(),
+                "posMode", flujo.posModeLegado(),
+                "flujoDeVenta", flujo.codigo(),
                 "tables", salida));
     }
 

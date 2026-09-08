@@ -62,6 +62,14 @@ class OrderHandlerTest {
     private com.suresell.orders.application.usecase.PagerConfigService pagerConfigService;
     /** N3/#1: el historial resuelve la mesa contra las cuentas. */
     private com.suresell.orders.infrastructure.persistence.TableSessionRepository tableSessionRepository;
+    private static SiteService siteServiceConRastreador() {
+        SiteService s = org.mockito.Mockito.mock(SiteService.class);
+        org.mockito.Mockito.lenient().when(s.flujoEfectivo()).thenReturn(
+                new com.suresell.orders.flujo.FlujosDeVenta.Flujo("RASTREADOR", "Rastreador", "",
+                        false, true, "PLAZOLETA", "PLAZOLETA", true, 3));
+        return s;
+    }
+
     @BeforeEach
     void setUp() {
         objectMapper = JsonMapper.builder().findAndAddModules().build();
@@ -106,7 +114,10 @@ class OrderHandlerTest {
                 // que por defecto no encuentra nada (mapa vacío) y deja pasar
                 // el precio del POS con origen POS; cada prueba que quiera un
                 // catálogo se lo da.
-                resolucionDePrecios);
+                resolucionDePrecios,
+                // V48: estas pruebas son del flujo de siempre (RASTREADOR):
+                // el rastreador es obligatorio y se comprueba que no esté ocupado.
+                siteServiceConRastreador());
     }
 
     private com.suresell.orders.mayorista.ResolucionDePrecios resolucionDePrecios =

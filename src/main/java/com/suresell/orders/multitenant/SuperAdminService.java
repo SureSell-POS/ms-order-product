@@ -31,6 +31,9 @@ public class SuperAdminService {
     private final PlanRepository planRepo;
     private final PlanCatalogService planes;
     private final org.springframework.jdbc.core.JdbcTemplate jdbc;
+    // V48 (ola 3): el flujo de venta y el perfil son datos; se leen de aquí.
+    private final com.suresell.orders.flujo.FlujosDeVenta flujos;
+    private final PerfilDelNegocio perfiles;
     private final SecretKey key;
     private final long ttlSeconds;
     private final BCryptPasswordEncoder encoder = new BCryptPasswordEncoder();
@@ -41,6 +44,8 @@ public class SuperAdminService {
             PlanRepository planRepo,
             PlanCatalogService planes,
             org.springframework.jdbc.core.JdbcTemplate jdbc,
+            com.suresell.orders.flujo.FlujosDeVenta flujos,
+            PerfilDelNegocio perfiles,
             @Value("${security.jwt.secret:cambia-esta-clave-en-produccion-min-32-bytes!}") String secret,
             @Value("${auth.token.ttl-seconds:43200}") long ttlSeconds) {
         this.saRepo = saRepo;
@@ -48,6 +53,8 @@ public class SuperAdminService {
         this.planRepo = planRepo;
         this.planes = planes;
         this.jdbc = jdbc;
+        this.flujos = flujos;
+        this.perfiles = perfiles;
         this.key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
         this.ttlSeconds = ttlSeconds;
     }
@@ -255,61 +262,156 @@ public class SuperAdminService {
     @org.springframework.transaction.annotation.Transactional(readOnly = true)
     public java.util.List<Map<String, Object>> getSites(String tenantId) {
         jdbc.queryForObject("SELECT set_config('app.tenant_id', ?, true)", String.class, tenantId);
-        return jdbc.queryForList(
-                "SELECT id, name, code, pos_mode, active, is_default FROM sites ORDER BY id");
+        return sedes(tenantId);
     }
 
-    /** Cambia el modo de una sede. Es potestad EXCLUSIVA del KAM: se vende, no se elige. */
+    /**
+     * El negocio va explícito en el WHERE además de en la sesión (RLS). Antes
+     * solo estaba en la sesión; con un usuario que salte RLS —el de una
+     * migración, el de un test— la consulta devolvía las sedes de TODOS los
+     * negocios sin que nada fallara.
+     */
+    private java.util.List<Map<String, Object>> sedes(String tenantId) {
+        // V48: `pos_mode` se conserva para el KAM viejo; el nuevo lee `flujo_de_venta`.
+        return jdbc.queryForList(
+                "SELECT s.id, s.name, s.code, s.pos_mode, s.flujo_de_venta, f.nombre AS flujo_nombre, "
+                        + "f.usa_mesas, f.usa_rastreador, s.active, s.is_default "
+                        + "FROM sites s JOIN flujos_de_venta f ON f.codigo = s.flujo_de_venta "
+                        + "WHERE s.tenant_id = ? ORDER BY s.id", tenantId);
+    }
+
+    /**
+     * Cambia el flujo de venta de una sede. Es potestad EXCLUSIVA del KAM: se
+     * vende, no se elige. Acepta un código del catálogo o un {@code posMode}
+     * viejo; los dos se resuelven contra {@code flujos_de_venta}. Si el negocio
+     * tiene perfil, el flujo tiene que ser uno de los que el perfil admite.
+     */
     @org.springframework.transaction.annotation.Transactional
     public java.util.List<Map<String, Object>> setSiteMode(String tenantId, Long siteId, String mode,
                                                           String quienCambia) {
-        String normalizado = mode == null ? "" : mode.trim().toUpperCase();
-        if (!"PLAZOLETA".equals(normalizado) && !"RESTAURANTE".equals(normalizado)) {
-            throw new AuthException(400, "Modo inválido. Use PLAZOLETA o RESTAURANTE");
-        }
+        com.suresell.orders.flujo.FlujosDeVenta.Flujo flujo = flujos.resolver(mode).orElseThrow(
+                () -> new AuthException(400, "Flujo de venta inválido. Use " + flujos.nombresValidos()));
         jdbc.queryForObject("SELECT set_config('app.tenant_id', ?, true)", String.class, tenantId);
 
-        String modoActual = jdbc.query(
-                "SELECT pos_mode FROM sites WHERE id = ?",
-                rs -> rs.next() ? rs.getString(1) : null, siteId);
-        if (modoActual == null) {
+        String flujoActual = jdbc.query(
+                "SELECT flujo_de_venta FROM sites WHERE id = ? AND tenant_id = ?",
+                rs -> rs.next() ? rs.getString(1) : null, siteId, tenantId);
+        if (flujoActual == null) {
             throw new AuthException(404, "No existe la sede " + siteId + " en el negocio " + tenantId);
         }
 
-        // Cambiar de modo con consumo abierto dejaría cuentas huérfanas: en
-        // Plazoleta el POS ni siquiera dibuja el plano de mesas, así que nadie
-        // podría cobrarlas. Se bloquea del lado seguro.
-        //
-        // OJO: solo bloquea si el modo CAMBIA de verdad y si hay cuentas VIVAS.
-        // Activar el modo en un negocio nuevo -que no tiene mesas abiertas
-        // porque no ha vendido nada- no se ve afectado.
-        if (!normalizado.equals(modoActual)) {
+        java.util.Optional<PerfilDelNegocio.Vigente> vigente = perfiles.vigente(tenantId);
+        if (vigente.isPresent()) {
+            java.util.List<String> admitidos = flujos.admitidosPor(vigente.get().codigo()).stream()
+                    .map(f -> f.flujo().codigo()).toList();
+            if (!admitidos.isEmpty() && !admitidos.contains(flujo.codigo())) {
+                throw new AuthException(400, "El perfil '" + vigente.get().codigo() + "' no admite el flujo "
+                        + flujo.codigo() + ". Admite: " + String.join(" | ", admitidos));
+            }
+        }
+
+        // Cambiar de flujo con consumo abierto dejaría cuentas huérfanas: sin
+        // mesas el POS ni siquiera dibuja el plano, así que nadie podría
+        // cobrarlas. Se bloquea del lado seguro. Solo si el flujo CAMBIA de
+        // verdad y hay cuentas VIVAS.
+        boolean cambia = !flujo.codigo().equals(flujoActual);
+        if (cambia) {
             List<Map<String, Object>> vivas = jdbc.queryForList(
                     "SELECT s.id, t.number AS mesa, s.status "
                             + "FROM table_sessions s JOIN restaurant_tables t ON t.id = s.table_id "
-                            + "WHERE s.status <> 'CERRADA' ORDER BY t.number");
+                            + "WHERE s.status <> 'CERRADA' AND t.tenant_id = ? ORDER BY t.number", tenantId);
             if (!vivas.isEmpty()) {
                 String mesas = vivas.stream()
                         .map(m -> String.valueOf(m.get("mesa")))
                         .collect(java.util.stream.Collectors.joining(", "));
                 throw new AuthException(409,
-                        "No se puede cambiar el modo con cuentas abiertas. "
+                        "No se puede cambiar el flujo con cuentas abiertas. "
                                 + "Cobra o cierra primero la(s) mesa(s): " + mesas);
             }
         }
 
-        int filas = jdbc.update("UPDATE sites SET pos_mode = ? WHERE id = ?", normalizado, siteId);
+        // `pos_mode` lo deriva el trigger de V48 del catálogo; aquí no se escribe.
+        int filas = jdbc.update("UPDATE sites SET flujo_de_venta = ? WHERE id = ? AND tenant_id = ?",
+                flujo.codigo(), siteId, tenantId);
         if (filas == 0) {
             throw new AuthException(404, "No existe la sede " + siteId + " en el negocio " + tenantId);
         }
 
-        // Quién y cuándo: cambiar el modo es una acción de alto impacto operativo.
-        if (!normalizado.equals(modoActual)) {
+        // Quién y cuándo: cambiar el flujo es una acción de alto impacto operativo.
+        if (cambia) {
             jdbc.update("INSERT INTO site_mode_audit (tenant_id, site_id, modo_antes, modo_despues, hecho_por) "
-                    + "VALUES (?, ?, ?, ?, ?)", tenantId, siteId, modoActual, normalizado, quienCambia);
+                    + "VALUES (?, ?, ?, ?, ?)", tenantId, siteId, flujoActual, flujo.codigo(), quienCambia);
         }
-        return jdbc.queryForList(
-                "SELECT id, name, code, pos_mode, active, is_default FROM sites ORDER BY id");
+        return sedes(tenantId);
+    }
+
+    // ------------------------------------------------------------------
+    // V48 (ola 3) — Perfil vertical desde el KAM, y catálogos.
+    // ------------------------------------------------------------------
+
+    public java.util.List<PerfilDelNegocio.Perfil> perfiles() {
+        return perfiles.catalogo();
+    }
+
+    public java.util.List<com.suresell.orders.flujo.FlujosDeVenta.Flujo> flujos() {
+        return flujos.todos();
+    }
+
+    @org.springframework.transaction.annotation.Transactional(readOnly = true)
+    public java.util.Optional<PerfilDelNegocio.Vigente> perfilVigente(String tenantId) {
+        jdbc.queryForObject("SELECT set_config('app.tenant_id', ?, true)", String.class, tenantId);
+        return perfiles.vigente(tenantId);
+    }
+
+    /**
+     * Cambia el perfil vertical de un negocio. SOLO el KAM. Es una fila nueva en
+     * un libro append-only. <b>No reconvierte nada</b>: los rasgos por defecto
+     * del perfil aplican a los insumos que se creen desde ahora; los que ya
+     * existen se quedan como están. El KAM lo lee antes de confirmar (en su
+     * pantalla), no aquí.
+     */
+    @org.springframework.transaction.annotation.Transactional
+    public PerfilDelNegocio.Vigente setPerfil(String tenantId, String codigo, String quien) {
+        if (!perfiles.hayCatalogo()) {
+            throw new AuthException(409, "Esta base no tiene el catálogo de perfiles del inventario");
+        }
+        PerfilDelNegocio.Perfil perfil = perfiles.porCodigo(codigo).orElseThrow(() -> new AuthException(400,
+                "El perfil '" + codigo + "' no existe. Válidos: " + String.join(" | ",
+                        perfiles.catalogo().stream().map(PerfilDelNegocio.Perfil::codigo).toList())));
+        Integer existe = jdbc.queryForObject("SELECT count(*) FROM tenants WHERE id = ?", Integer.class, tenantId);
+        if (existe == null || existe == 0) {
+            throw new AuthException(404, "Negocio no encontrado");
+        }
+        jdbc.queryForObject("SELECT set_config('app.tenant_id', ?, true)", String.class, tenantId);
+        perfiles.asignarPorElKam(tenantId, perfil.codigo(), quien, "kam:cambio-de-perfil");
+        return perfiles.vigente(tenantId).orElseThrow(() -> new AuthException(500,
+                "El perfil se anotó pero la vista no lo devuelve"));
+    }
+
+    // ------------------------------------------------------------------
+    // V48 (ola 3) — Más cuentas de KAM, desde el KAM. La primera la crea
+    // `KamDeArranque` por variable de entorno; las siguientes entran por aquí.
+    // ------------------------------------------------------------------
+
+    public record SuperAdminCreado(String email) {}
+
+    public SuperAdminCreado createSuperAdmin(String email, String password, String quien) {
+        String correo = email == null ? "" : email.trim().toLowerCase(java.util.Locale.ROOT);
+        if (correo.isBlank() || !correo.contains("@")) {
+            throw new AuthException(400, "El email del KAM no parece válido");
+        }
+        try {
+            ClaveDeKam.validar(password, correo);
+        } catch (IllegalArgumentException e) {
+            throw new AuthException(400, e.getMessage());
+        }
+        if (saRepo.findByEmail(correo).isPresent()) {
+            throw new AuthException(409, "Ya existe un KAM con ese email");
+        }
+        saRepo.insert(correo, encoder.encode(password));
+        org.slf4j.LoggerFactory.getLogger(SuperAdminService.class)
+                .warn("Cuenta de KAM creada: {} (por {})", correo, quien);
+        return new SuperAdminCreado(correo);
     }
 
     private String issueToken(String email) {

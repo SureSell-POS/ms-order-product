@@ -39,11 +39,18 @@ import java.util.List;
 })
 @Schema(description = "Solicitud para crear o actualizar una orden")
 public record OrderRequestRecord(
-    @NotBlank(message="El nombre/color es obligatorio") 
-    @Schema(description = "Color del pager asignado", example = "AMARILLO")
+    /**
+     * V48 — OPCIONALES desde la ola 3. El servidor los exige solo cuando el
+     * flujo de venta de la sede usa rastreador ({@code OrderHandler}); una
+     * droguería no tiene rastreadores y no tiene por qué inventar uno. Un POS
+     * viejo que los siga mandando en cualquier flujo sigue vendiendo: se
+     * aceptan y se guardan tal cual. No forman parte del hash del evento.
+     */
+    @Schema(description = "Color del pager asignado. Obligatorio solo si el flujo de la sede usa rastreador.",
+            example = "AMARILLO")
     String pagerColor, 
-    @NotBlank(message="El número es obligatorio") 
-    @Schema(description = "Número del pager asignado", example = "15")
+    @Schema(description = "Número del pager asignado. Obligatorio solo si el flujo de la sede usa rastreador.",
+            example = "15")
     String pagerNumber, 
     @Schema(description = "Lista de productos incluidos en la orden")
     List<OrderItemRequestRecord> items, 

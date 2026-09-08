@@ -19,7 +19,7 @@ import org.springframework.web.bind.annotation.*;
 @RestController
 @RequestMapping("/account/sites")
 @RequiredArgsConstructor
-@Tag(name = "Sedes", description = "Sedes y modo de POS (Plazoleta / Restaurante)")
+@Tag(name = "Sedes", description = "Sedes y flujo de venta (catálogo flujos_de_venta; posMode legado)")
 public class SiteController {
 
     private final SiteService service;
@@ -30,11 +30,21 @@ public class SiteController {
         return ResponseEntity.ok(service.listar());
     }
 
+    /**
+     * V48 — {@code posMode} y {@code restaurante} se conservan con sus valores
+     * de siempre para los POS sin actualizar. Un cliente nuevo lee
+     * {@code flujoDeVenta}, {@code usaMesas} y {@code usaRastreador}.
+     */
     @GetMapping("/mode")
-    @Operation(summary = "Modo de POS efectivo del negocio (PLAZOLETA o RESTAURANTE)")
+    @Operation(summary = "Flujo de venta efectivo del negocio (y su posMode legado)")
     public ResponseEntity<Map<String, Object>> modo() {
-        return ResponseEntity.ok(Map.of(
-                "posMode", service.modoEfectivo(),
-                "restaurante", service.enModoRestaurante()));
+        var flujo = service.flujoEfectivo();
+        Map<String, Object> r = new java.util.LinkedHashMap<>();
+        r.put("posMode", flujo.posModeLegado());
+        r.put("restaurante", flujo.usaMesas());
+        r.put("flujoDeVenta", flujo.codigo());
+        r.put("usaMesas", flujo.usaMesas());
+        r.put("usaRastreador", flujo.usaRastreador());
+        return ResponseEntity.ok(r);
     }
 }
