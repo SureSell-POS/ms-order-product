@@ -57,4 +57,13 @@ class PlanCatalogTest {
     void overridePuedeQuitarCocina() {
         assertFalse(PlanCatalog.effectiveModules("basico", Map.of("cocina", false)).contains("cocina"));
     }
+
+    @Test
+    void insumosIncluidoEnAmbosPlanes() {
+        // V47: el inventario va desde el plan más básico. Es captura de datos,
+        // no una función premium.
+        assertTrue(PlanCatalog.modulesForPlan("basico").contains("insumos"));
+        assertTrue(PlanCatalog.modulesForPlan("pro").contains("insumos"));
+        assertTrue(PlanCatalog.isKnownModule("insumos"));
+    }
 }

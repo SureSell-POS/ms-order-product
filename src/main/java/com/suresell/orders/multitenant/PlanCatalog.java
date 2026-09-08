@@ -45,19 +45,24 @@ public final class PlanCatalog {
             List.of(PANEL, ANALITICA, MENU_ADMIN, GASTOS);
 
     private static final Map<String, List<String>> PLAN_MODULES = Map.of(
-            "basico", List.of(VENTAS, HISTORIAL, CIERRE, COCINA),
-            "pro", concat(List.of(VENTAS, HISTORIAL, CIERRE, DESCUENTOS, COCINA, MESEROS), PANEL_PRO));
+            "basico", List.of(VENTAS, HISTORIAL, CIERRE, COCINA, INSUMOS),
+            "pro", concat(List.of(VENTAS, HISTORIAL, CIERRE, DESCUENTOS, COCINA, MESEROS, INSUMOS),
+                    PANEL_PRO));
 
     private static final List<String> DEFAULT =
-            concat(List.of(VENTAS, HISTORIAL, CIERRE, DESCUENTOS, COCINA, MESEROS), PANEL_PRO);
+            concat(List.of(VENTAS, HISTORIAL, CIERRE, DESCUENTOS, COCINA, MESEROS, INSUMOS),
+                    PANEL_PRO);
 
     /**
      * Todos los módulos conocidos (para validar overrides).
      *
-     * Los que NO están en ningún plan (nómina, valeras, insumos, compras,
-     * cartera, empleados) existen a propósito: se venden aparte y el KAM los
-     * activa por tenant con un override. Si no estuvieran acá,
-     * `isKnownModule` los rechazaría y no se podrían regalar.
+     * Los que NO están en ningún plan (nómina, valeras, compras, cartera,
+     * empleados) existen a propósito: se venden aparte y el KAM los activa por
+     * tenant con un override. Si no estuvieran acá, `isKnownModule` los
+     * rechazaría y no se podrían regalar.
+     *
+     * `insumos` salió de esa lista en V47: el inventario va desde el plan más
+     * básico, porque es captura de datos y no una función premium.
      */
     public static final Set<String> KNOWN = Set.of(
             VENTAS, HISTORIAL, CIERRE, DESCUENTOS, COCINA, MESEROS,
