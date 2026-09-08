@@ -38,6 +38,16 @@ public final class PlanCatalog {
     public static final String COMPRAS = "compras";
     public static final String GASTOS = "gastos";
     public static final String CARTERA = "cartera";
+    /**
+     * Ola 2 (H). Sin esta constante, `isKnownModule("mayorista")` devuelve
+     * false y `effectiveModules` DESCARTA EN SILENCIO el override del KAM: el
+     * negocio nunca recibe el módulo y las pantallas de listas de precio y
+     * clientes no se pueden abrir aunque el backend responda. Medido en
+     * staging el 2026-09-08: `qa-zeta-v38` y `qa-delta` tienen
+     * `mayorista = true` en `tenant_modules` desde el 2026-09-07 y su login
+     * devolvía `cartera` pero no `mayorista`.
+     */
+    public static final String MAYORISTA = "mayorista";
     public static final String MENU_ADMIN = "menu";
 
     /** Módulos del panel que entran en el plan `pro`. */
@@ -67,7 +77,7 @@ public final class PlanCatalog {
     public static final Set<String> KNOWN = Set.of(
             VENTAS, HISTORIAL, CIERRE, DESCUENTOS, COCINA, MESEROS,
             PANEL, ANALITICA, NOMINA, EMPLEADOS, VALERAS, INSUMOS, COMPRAS,
-            GASTOS, CARTERA, MENU_ADMIN);
+            GASTOS, CARTERA, MAYORISTA, MENU_ADMIN);
 
     private static List<String> concat(List<String> a, List<String> b) {
         List<String> out = new java.util.ArrayList<>(a);

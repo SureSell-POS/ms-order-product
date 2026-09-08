@@ -66,4 +66,13 @@ class PlanCatalogTest {
         assertTrue(PlanCatalog.modulesForPlan("pro").contains("insumos"));
         assertTrue(PlanCatalog.isKnownModule("insumos"));
     }
+
+    @Test
+    void mayoristaEsUnModuloConocidoYSePuedeRegalar() {
+        // Si no lo fuera, el override del KAM se descartaría en silencio y las
+        // pantallas de mayorista del panel no abrirían nunca.
+        assertTrue(PlanCatalog.isKnownModule("mayorista"));
+        assertFalse(PlanCatalog.modulesForPlan("basico").contains("mayorista"));
+        assertTrue(PlanCatalog.effectiveModules("basico", Map.of("mayorista", true)).contains("mayorista"));
+    }
 }
