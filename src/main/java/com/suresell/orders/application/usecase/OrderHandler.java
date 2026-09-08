@@ -91,6 +91,8 @@ public class OrderHandler implements OrderPort {
      * oscuras. Ver la clase para por qué no es una llamada al otro servicio.
      */
     private final RegistroDeIntencionDeInventario registroDeIntencion;
+    /** Ola 2: el precio por cliente lo resuelve la base (V45). Va al FINAL: @RequiredArgsConstructor. */
+    private final com.suresell.orders.mayorista.ResolucionDePrecios resolucionDePrecios;
     // N2/D2: en el perfil cloud este servicio ES la nube (no hay outbox saliente),
     // así que las órdenes nacen ya sincronizadas. Ver createOrUpdateOrder.
     @org.springframework.beans.factory.annotation.Value("${sync.cloud.enabled:false}")
@@ -244,7 +246,25 @@ public class OrderHandler implements OrderPort {
         // nace en false y el outbox la marca al confirmar la nube.
         order.setSynced(!cloudSyncEnabled);
         
-        BigDecimal subtotal = dto.items().stream()
+        // Ola 2 (mayorista, V45) e integración (V46): EL PRECIO LO PONE LA BASE
+        // EN TODA VENTA. Con cliente, su lista; sin cliente, el precio BASE del
+        // catálogo. El que mandó el POS se guarda como declarado y se compara,
+        // nunca se cobra. Antes solo se resolvía con cliente, y una venta sin
+        // cliente con precio 1 se cobraba a 1 (medido en staging). Un producto
+        // que el catálogo no conoce conserva lo declarado, con origen POS.
+        String cliente = dto.clienteDocumento() == null || dto.clienteDocumento().isBlank()
+                ? null : dto.clienteDocumento().trim();
+        java.util.Map<String, com.suresell.orders.mayorista.ResolucionDePrecios.Precio> preciosResueltos =
+                resolucionDePrecios.resolver(cliente, dto.items(), cliente != null);
+        List<OrderItemRequestRecord> lineas = resolucionDePrecios.conPrecios(dto.items(), preciosResueltos);
+        if (cliente != null) {
+            order.setClienteDocumento(cliente);
+            preciosResueltos.values().stream().map(pr -> pr.listaPrecioId()).filter(java.util.Objects::nonNull)
+                    .findFirst().ifPresent(order::setListaPrecioId);
+        } else if ("CREDITO".equals(normalizePaymentMethod(dto.paymentMethod()))) {
+            throw new IllegalArgumentException("Una venta a crédito necesita el documento del cliente.");
+        }
+        BigDecimal subtotal = lineas.stream()
                 .map(item -> item.unitPrice().multiply(BigDecimal.valueOf(item.quantity())))
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
         order.setSubtotal(subtotal);
@@ -269,7 +289,7 @@ public class OrderHandler implements OrderPort {
         savedOrder.setIdOrder(numericId);
 
         // 3. Crear y Guardar Items individualmente con el ID numérico poblado
-        List<OrderItem> items = createOrderItems(savedOrder, dto.items());
+        List<OrderItem> items = createOrderItems(savedOrder, lineas, preciosResueltos, dto.items());
         for (OrderItem item : items) {
             orderItemRepositoryPort.save(item);
         }
@@ -327,7 +347,12 @@ public class OrderHandler implements OrderPort {
      * vigente.
      */
     private Order agregarAOrdenAbierta(Order abierta, OrderRequestRecord dto) {
-        List<OrderItem> nuevos = createOrderItems(abierta, dto.items());
+        // V46: también en una ronda sobre la mesa abierta el precio lo pone la
+        // base, con la lista del cliente de esa orden si la tiene.
+        java.util.Map<String, com.suresell.orders.mayorista.ResolucionDePrecios.Precio> precios =
+                resolucionDePrecios.resolver(abierta.getClienteDocumento(), dto.items(), false);
+        List<OrderItem> nuevos = createOrderItems(abierta,
+                resolucionDePrecios.conPrecios(dto.items(), precios), precios, dto.items());
         for (OrderItem item : nuevos) {
             orderItemRepositoryPort.save(item);
         }
@@ -494,7 +519,11 @@ public class OrderHandler implements OrderPort {
         order.setPagerColor(dto.pagerColor());
         order.setPagerNumber(dto.pagerNumber());
         order.getItems().clear();
-        List<OrderItem> newItems = createOrderItems(order, dto.items());
+        // V46: editar una orden tampoco deja que el POS ponga el precio.
+        java.util.Map<String, com.suresell.orders.mayorista.ResolucionDePrecios.Precio> precios =
+                resolucionDePrecios.resolver(order.getClienteDocumento(), dto.items(), false);
+        List<OrderItem> newItems = createOrderItems(order,
+                resolucionDePrecios.conPrecios(dto.items(), precios), precios, dto.items());
         order.getItems().addAll(newItems);
         BigDecimal subtotal = order.getItems().stream()
                 .map(OrderItem::getTotalPrice)
@@ -807,7 +836,8 @@ public class OrderHandler implements OrderPort {
     }
 
     /** Medios de pago vigentes (N2/6.6: Nequi eliminado). */
-    private static final List<String> PAYMENT_METHODS = List.of("CASH", "CARD", "QR");
+    // CREDITO (ola 2): la venta entra a la cartera del cliente (trigger V45).
+    private static final List<String> PAYMENT_METHODS = List.of("CASH", "CARD", "QR", "CREDITO");
 
     /**
      * N2/6.6 — compatibilidad hacia atrás del retiro de Nequi.
@@ -867,7 +897,7 @@ public class OrderHandler implements OrderPort {
                             + "y cobra por QR.");
         }
         if (paymentMethod == null || !PAYMENT_METHODS.contains(normalizado)) {
-            throw new IllegalArgumentException("Método de pago inválido. Debe ser: CASH, CARD o QR");
+            throw new IllegalArgumentException("Método de pago inválido. Debe ser: CASH, CARD, QR o CREDITO");
         }
     }
 
@@ -963,9 +993,21 @@ public class OrderHandler implements OrderPort {
         }
     }
 
-    private List<OrderItem> createOrderItems(Order order, List<OrderItemRequestRecord> itemDtos) {
-        return itemDtos.stream().map(itemDto -> {
+    /**
+     * Con los precios resueltos por la base (ola 2): cada línea guarda de dónde
+     * salió su precio y, desde V46, también el que declaró el POS.
+     *
+     * @param itemDtos   las líneas con el precio YA resuelto (lo que se cobra)
+     * @param declarados las líneas tal como llegaron del POS, en el mismo orden
+     */
+    private List<OrderItem> createOrderItems(Order order, List<OrderItemRequestRecord> itemDtos,
+                                             java.util.Map<String, com.suresell.orders.mayorista.ResolucionDePrecios.Precio> precios,
+                                             List<OrderItemRequestRecord> declarados) {
+        return java.util.stream.IntStream.range(0, itemDtos.size()).mapToObj(i -> {
+            OrderItemRequestRecord itemDto = itemDtos.get(i);
+            com.suresell.orders.mayorista.ResolucionDePrecios.Precio resuelto = precios.get(itemDto.productId());
             OrderItem item = new OrderItem();
+            item.setPrecioDeclarado(i < declarados.size() ? declarados.get(i).unitPrice() : null);
             item.setOrder(order);
             item.setOrderId(order.getIdOrder()); // ASIGNACIÓN CRÍTICA PARA SQLITE
             item.setProductId(itemDto.productId());
@@ -974,6 +1016,10 @@ public class OrderHandler implements OrderPort {
             item.setTotalPrice(itemDto.unitPrice().multiply(BigDecimal.valueOf(itemDto.quantity())));
             item.setInstructions(itemDto.instructions());
             item.setComboGroup(itemDto.comboGroup());
+            // El precio aplicado se guarda con la venta, con su origen. POS = lo
+            // mandó el mostrador (sin cliente); LISTA/BASE = lo resolvió la base.
+            item.setPrecioOrigen(resuelto == null ? "POS" : resuelto.origen());
+            item.setListaPrecioItemId(resuelto == null ? null : resuelto.listaPrecioItemId());
             return item;
         }).toList();
     }

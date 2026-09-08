@@ -196,6 +196,16 @@ public class Order implements org.springframework.data.domain.Persistable<java.u
      * ninguno. Existe porque descartar el importe del cliente sin compararlo
      * desperdiciaba una señal que ya llegaba gratis.
      */
+    // Ola 2 (mayorista, V45): a quién se le vendió, con qué lista, y si el
+    // crédito superó el cupo. `excede_cupo` lo escribe el trigger de la base
+    // al insertar; aquí solo se lee.
+    @Column(name = "cliente_documento")
+    private String clienteDocumento;
+    @Column(name = "lista_precio_id")
+    private java.util.UUID listaPrecioId;
+    @Column(name = "excede_cupo", insertable = false, updatable = false)
+    private Boolean excedeCupo;
+
     @Column(name = "total_discrepancia")
     private BigDecimal totalDiscrepancia;
 

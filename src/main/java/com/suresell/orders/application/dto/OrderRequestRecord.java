@@ -152,7 +152,14 @@ public record OrderRequestRecord(
     @Schema(description = "V36 — Total que declara el cliente. NO se usa para calcular: el servidor "
             + "usa siempre el suyo. Solo se compara, y la diferencia se registra.",
             example = "23000.00")
-    java.math.BigDecimal totalDeclaradoPorElCliente
+    java.math.BigDecimal totalDeclaradoPorElCliente,
+    /**
+     * Ola 2 (mayorista). El documento del cliente al que se le vende. OPCIONAL:
+     * el POS de plazoleta no lo manda y sigue igual. Con cliente, el precio de
+     * cada línea lo resuelve el servidor con su lista (V45) y el del POS se
+     * descarta; y si el medio de pago es CREDITO, la venta entra a su cartera.
+     */
+    String clienteDocumento
 ) {
 
     /**
@@ -177,7 +184,7 @@ public record OrderRequestRecord(
         return new OrderRequestRecord(
                 pagerColor, pagerNumber, items, discountCode, paymentMethod, payments,
                 idempotencyKey, skipPagerCheck, tableSessionId, preparadoEnComanda,
-                null, null, null, null, null, null);
+                null, null, null, null, null, null, null);
     }
 
     /** Split de multipago: método + monto. */

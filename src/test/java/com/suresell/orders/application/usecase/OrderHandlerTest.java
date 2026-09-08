@@ -2,6 +2,7 @@ package com.suresell.orders.application.usecase;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -100,7 +101,76 @@ class OrderHandlerTest {
                 // está apagado — que es como nace. Estas pruebas comprueban la
                 // venta, y el hecho de que sigan pasando fija algo que importa:
                 // la venta NO depende del inventario para completarse.
-                org.mockito.Mockito.mock(RegistroDeIntencionDeInventario.class));
+                org.mockito.Mockito.mock(RegistroDeIntencionDeInventario.class),
+                // V46: el precio lo resuelve la base en TODA venta. Aquí un mock
+                // que por defecto no encuentra nada (mapa vacío) y deja pasar
+                // el precio del POS con origen POS; cada prueba que quiera un
+                // catálogo se lo da.
+                resolucionDePrecios);
+    }
+
+    private com.suresell.orders.mayorista.ResolucionDePrecios resolucionDePrecios =
+            org.mockito.Mockito.mock(com.suresell.orders.mayorista.ResolucionDePrecios.class);
+
+    {
+        org.mockito.Mockito.lenient().when(resolucionDePrecios.resolver(any(), any(), anyBoolean()))
+                .thenReturn(java.util.Map.of());
+        org.mockito.Mockito.lenient().when(resolucionDePrecios.conPrecios(any(), any()))
+                .thenCallRealMethod();
+    }
+
+    // --- V46: el POS no decide el precio ------------------------------------
+
+    /**
+     * El hueco medido en staging (orden 4 de qa-zeta-v38): sin cliente, una
+     * venta con precio 1 desde el POS se cobraba a 1 sobre un producto de
+     * 120.000. Con V46 el catálogo pone el precio y lo declarado se guarda al
+     * lado, para compararlo. Con el código anterior este test da total 1.
+     */
+    @Test
+    void sinClienteElPrecioLoPoneElCatalogoYLoDeclaradoSeGuardaAlLado() {
+        when(resolucionDePrecios.resolver(org.mockito.ArgumentMatchers.isNull(), any(), org.mockito.ArgumentMatchers.eq(false)))
+                .thenReturn(java.util.Map.of("101",
+                        new com.suresell.orders.mayorista.ResolucionDePrecios.Precio(
+                                BigDecimal.valueOf(120000), "BASE", null, null)));
+        OrderRequestRecord request = OrderRequestRecord.sinProcedencia(
+                "AZUL", "11",
+                List.of(new OrderItemRequestRecord("101", 1, BigDecimal.ONE, null, null)),
+                null, "CASH", null, null, null, null, null);
+        when(orderRepositoryPort.findOccupiedPagerOrder("AZUL", "11", OrderStatus.pagado))
+                .thenReturn(Optional.empty());
+        when(orderRepositoryPort.save(any(Order.class))).thenAnswer(inv -> {
+            Order o = inv.getArgument(0); o.setIdOrder(502L); return o; });
+        when(orderRepositoryPort.findNumericIdByUuid(any(java.util.UUID.class))).thenReturn(Optional.of(502L));
+        when(syncOutboxRepositoryPort.save(any(SyncOutbox.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        Order created = orderHandler.createOrUpdateOrder(request);
+
+        assertEquals(BigDecimal.valueOf(120000), created.getTotal());
+        assertEquals(BigDecimal.valueOf(120000), created.getItems().get(0).getUnitPrice());
+        assertEquals("BASE", created.getItems().get(0).getPrecioOrigen());
+        assertEquals(BigDecimal.ONE, created.getItems().get(0).getPrecioDeclarado());
+    }
+
+    /** Un producto que el catálogo no conoce conserva lo declarado, con origen POS, y la venta no se pierde. */
+    @Test
+    void sinCatalogoLaLineaConservaLoDeclaradoConOrigenPos() {
+        OrderRequestRecord request = OrderRequestRecord.sinProcedencia(
+                "AZUL", "12",
+                List.of(new OrderItemRequestRecord("999", 2, BigDecimal.valueOf(2500), null, null)),
+                null, "CASH", null, null, null, null, null);
+        when(orderRepositoryPort.findOccupiedPagerOrder("AZUL", "12", OrderStatus.pagado))
+                .thenReturn(Optional.empty());
+        when(orderRepositoryPort.save(any(Order.class))).thenAnswer(inv -> {
+            Order o = inv.getArgument(0); o.setIdOrder(503L); return o; });
+        when(orderRepositoryPort.findNumericIdByUuid(any(java.util.UUID.class))).thenReturn(Optional.of(503L));
+        when(syncOutboxRepositoryPort.save(any(SyncOutbox.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        Order created = orderHandler.createOrUpdateOrder(request);
+
+        assertEquals(BigDecimal.valueOf(5000), created.getTotal());
+        assertEquals("POS", created.getItems().get(0).getPrecioOrigen());
+        assertEquals(BigDecimal.valueOf(2500), created.getItems().get(0).getPrecioDeclarado());
     }
     @Test
     void getAllOrdersCallsProductServiceOncePerDistinctProductId() {
@@ -276,7 +346,7 @@ class OrderHandlerTest {
                 null, "MIXED",
                 List.of(new OrderRequestRecord.PaymentSplitRecord("CASH", BigDecimal.valueOf(4000)),
                         new OrderRequestRecord.PaymentSplitRecord("NEQUI", BigDecimal.valueOf(6000))),
-                null, null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null, null);
 
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
                 () -> orderHandler.createOrUpdateOrder(request));

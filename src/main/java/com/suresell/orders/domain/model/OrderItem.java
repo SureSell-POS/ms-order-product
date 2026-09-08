@@ -82,6 +82,18 @@ public class OrderItem implements org.springframework.data.domain.Persistable<ja
     private String instructions;
     @Column(name = "combo_group")
     private Integer comboGroup;
+    // Ola 2 (V45): de dónde salió el precio y qué línea versionada se aplicó.
+    // El precio aplicado se guarda con la venta y no se recalcula después.
+    @Column(name = "precio_origen")
+    private String precioOrigen;
+    @Column(name = "lista_precio_item_id")
+    private java.util.UUID listaPrecioItemId;
+
+    // Integración ola 2 (V46): el precio que MANDÓ el POS, tal cual. Se guarda
+    // para compararlo con el que resolvió el catálogo y se cobró (unit_price),
+    // nunca para cobrarlo. Igual que `orders.total_discrepancia` en la Fase 2.
+    @Column(name = "precio_declarado")
+    private BigDecimal precioDeclarado;
 
     // N3/#1 — Cocina: distinguir lo ya preparado de lo recién agregado a la mesa.
     @jakarta.persistence.Column(name = "created_at")
