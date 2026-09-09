@@ -45,10 +45,13 @@ public class VentasSinRegistrar {
                     SELECT btrim(regexp_replace(COALESCE(oi.instructions, ''), '\\s*\\[[^\\]]*\\]\\s*$', '')) AS nombre,
                            NULLIF(substring(COALESCE(oi.instructions, '') FROM '\\[([^\\]]*)\\]\\s*$'), '') AS codigo,
                            oi.unit_price AS precio,
-                           oi.created_at, oi.order_id
+                           -- Medido en staging: `order_item.created_at` llega NULL en las
+                           -- ventas reales del POS; la fecha que vale es la de la orden.
+                           COALESCE(oi.created_at, o.created_at) AS created_at, oi.order_id
                       FROM public.order_item oi
+                      JOIN public.orders o ON o.id_order = oi.order_id AND o.tenant_id = oi.tenant_id
                      WHERE oi.product_id LIKE ?
-                       AND oi.created_at >= now() - make_interval(days => ?)
+                       AND COALESCE(oi.created_at, o.created_at) >= now() - make_interval(days => ?)
                   ) lineas
                  GROUP BY nombre, codigo, precio
                  ORDER BY ultima_venta DESC""",
