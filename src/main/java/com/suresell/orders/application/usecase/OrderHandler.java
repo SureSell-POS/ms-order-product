@@ -729,7 +729,7 @@ public class OrderHandler implements OrderPort {
             return new OrderItemDto(
                     item.getProductId(),
                     productIdLong,
-                    productDetails != null ? productDetails.nameProduct() : null,
+                    nombreDeLinea(productDetails, item),
                     productDetails != null ? productDetails.categoryName() : null,
                     item.getQuantity(),
                     item.getUnitPrice());
@@ -1063,7 +1063,7 @@ public class OrderHandler implements OrderPort {
             return new OrderItemDto(
                     item.getProductId(),
                     productIdLong,
-                    productDetails != null ? productDetails.nameProduct() : null,
+                    nombreDeLinea(productDetails, item),
                     productDetails != null ? productDetails.categoryName() : null,
                     item.getQuantity(),
                     item.getUnitPrice());
@@ -1250,5 +1250,20 @@ public class OrderHandler implements OrderPort {
         } else {
             log.warn("Intento de liberar Pager {} {} fallido: No se encontró orden activa asociada.", color, number);
         }
+    }
+
+    /**
+     * El nombre que se muestra e imprime para una línea. Un producto del
+     * catálogo, el suyo. Un producto que el catálogo no conoce (V51 «vender
+     * sin registrar»: `productId` `sin-registrar:<uuid>`, nombre en
+     * `instructions`), lo que tecleó la cajera; antes salía `null` en el
+     * historial y en el ticket.
+     */
+    static String nombreDeLinea(ProductResponse productDetails, OrderItem item) {
+        if (productDetails != null && productDetails.nameProduct() != null) {
+            return productDetails.nameProduct();
+        }
+        String nota = item.getInstructions();
+        return nota == null || nota.isBlank() ? null : nota.trim();
     }
 }
