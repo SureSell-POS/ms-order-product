@@ -32,7 +32,8 @@ class SinRegistrarEnElTicketTest {
     private static OrderResponseRecord orden(OrderItemResponseRecord... items) {
         return new OrderResponseRecord(77L, null, null, LocalDateTime.of(2026, 9, 9, 8, 0),
                 new BigDecimal("3500"), new BigDecimal("3500"), "pagado", "CASH", null, null, null,
-                false, true, false, null, List.of(items), null, null, null, null);
+                false, true, false, null, List.of(items), null, null, null, null,
+                null, null, null); // recibo_estado, recibo_motivo, recibo_actualizado_at (V52)
     }
 
     private static String ticketDe(OrderResponseRecord orden) {
