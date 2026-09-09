@@ -12,18 +12,22 @@
 -- en otras tablas, y aquí se cierra igual: la fila lleva el negocio en la
 -- clave.
 --
--- LO QUE HACE
+-- LO QUE HACE, EN ESTE ORDEN (el orden importa)
 --
---   1. Da de alta, a nombre de su negocio, el terminal de toda orden que hoy
---      apunta a un terminal registrado por otro (en staging hay una, la de la
---      medición; en producción ninguna). Sin esto la FK nueva no se podría
---      crear.
+--   1. Suelta la FK vieja de `orders` (apuntaba a terminals(id), sin negocio).
 --   2. `terminals` pasa a clave primaria (tenant_id, id). El mismo UUID puede
 --      existir una vez por negocio; bajo RLS cada negocio ve la suya.
---   3. `orders.terminal_id` deja de apuntar a `terminals(id)` y pasa a
---      (tenant_id, terminal_id) -> terminals(tenant_id, id). A partir de aquí
---      NO EXISTE forma de que una orden apunte a un terminal ajeno: la base
---      lo rechaza (23503).
+--   3. Da de alta, a nombre de su negocio, el terminal de toda orden que hoy
+--      apunta a un terminal registrado por otro (en staging hay una, la de la
+--      medición; en producción ninguna). Va DESPUES del paso 2: con la clave
+--      vieja ese INSERT chocaba con `terminals_pkey`, que es exactamente lo
+--      que pasó en staging el 2026-09-09 04:33 con la primera versión de esta
+--      migración (arrancó, falló, y el servicio quedó caído hasta reparar la
+--      fila de flyway_schema_history). El test `V50RegularizaLasOrdenesTest`
+--      reproduce ese estado antes de migrar para que no vuelva a pasar.
+--   4. `orders.terminal_id` pasa a (tenant_id, terminal_id) ->
+--      terminals(tenant_id, id). A partir de aquí NO EXISTE forma de que una
+--      orden apunte a un terminal ajeno: la base lo rechaza (23503).
 --
 -- LO QUE YA ESTABA PREPARADO
 --
@@ -37,25 +41,26 @@
 -- Cambia la FK de `orders`: bloqueo exclusivo breve sobre la tabla al añadir
 -- la restriccion (valida las filas existentes). Con `lock_timeout` de 3 s,
 -- si hay una venta larga en curso la migracion falla y se reintenta, no se
--- queda esperando. Se aplica en la ventana de la ola, no como parche.
+-- queda esperando. Se aplica en la ventana de la ola, no como parche. Todo va
+-- en una transaccion: si algo falla, no queda nada a medias.
 -- =====================================================================
 
 SET lock_timeout = '3s';
 
--- 1. Los terminales que faltan a nombre de su negocio.
+-- 1. La FK vieja fuera.
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_terminal_id_fkey;
+
+-- 2. Clave primaria compuesta.
+ALTER TABLE terminals DROP CONSTRAINT IF EXISTS terminals_pkey;
+ALTER TABLE terminals ADD CONSTRAINT terminals_pkey PRIMARY KEY (tenant_id, id);
+
+-- 3. Los terminales que faltan a nombre de su negocio (ya con la clave nueva).
 INSERT INTO terminals (id, tenant_id, estado, registrado_en, ultima_conexion_en, epoch_visto)
 SELECT DISTINCT o.terminal_id, o.tenant_id, 'activo', now(), now(), 1
   FROM orders o
  WHERE o.terminal_id IS NOT NULL
    AND NOT EXISTS (SELECT 1 FROM terminals t
                     WHERE t.id = o.terminal_id AND t.tenant_id = o.tenant_id);
-
--- 2. La FK vieja (apuntaba a terminals(id), sin negocio).
-ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_terminal_id_fkey;
-
--- 3. Clave primaria compuesta.
-ALTER TABLE terminals DROP CONSTRAINT IF EXISTS terminals_pkey;
-ALTER TABLE terminals ADD CONSTRAINT terminals_pkey PRIMARY KEY (tenant_id, id);
 
 -- 4. La FK nueva: una orden solo puede apuntar a un terminal de SU negocio.
 --    MATCH SIMPLE: con terminal_id NULL (clientes viejos) no se comprueba.
