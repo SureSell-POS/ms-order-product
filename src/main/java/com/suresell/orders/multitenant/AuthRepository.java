@@ -168,8 +168,8 @@ public class AuthRepository {
 
     /**
      * Los usuarios del negocio por orden de creación. El primero es el correo
-     * principal: el del alta. La política de `users` es permisiva para
-     * `app_user` (V4), así que no hace falta negocio en sesión.
+     * principal: el del alta. Desde V39 `users` va por RLS: quien llama fija el
+     * negocio en la transacción antes.
      */
     public List<AdministradorDeLaCuenta> listAdministradores(String tenantId) {
         return jdbc.query(

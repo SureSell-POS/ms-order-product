@@ -318,7 +318,12 @@ public class AuthService {
     private static final Set<String> VALID_ROLES = Set.of("admin", "cajero");
 
     /** Lista los usuarios del tenant (sin hash). Lo usa el panel de usuarios (admin). */
+    @Transactional(readOnly = true)
     public List<AuthRepository.UserSummary> listUsers(String tenantId) {
+        // Desde V39 `users` va por RLS normal: sin negocio en la transacción el
+        // KAM (que no lleva negocio en sesión) veía una lista VACÍA en
+        // /admin/tenants/{id}. Medido en staging el 2026-09-09.
+        repo.fijarNegocioEnLaTransaccion(tenantId);
         return repo.listUsers(tenantId);
     }
 
@@ -517,7 +522,9 @@ public class AuthService {
     }
 
     /** Los usuarios del negocio por orden de creación, para la vista de cuenta del KAM. */
+    @Transactional(readOnly = true)
     public List<AuthRepository.AdministradorDeLaCuenta> administradores(String tenantId) {
+        repo.fijarNegocioEnLaTransaccion(tenantId); // RLS de `users` (V39): sin esto, vacío
         return repo.listAdministradores(tenantId);
     }
 

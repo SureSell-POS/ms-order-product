@@ -569,4 +569,14 @@ class AuthServiceTest {
         org.assertj.core.api.Assertions.assertThat(expuesto.enlace()).isNotBlank();
         org.assertj.core.api.Assertions.assertThat(expuesto.expira()).isAfter(java.time.Instant.now());
     }
+
+    @org.junit.jupiter.api.Test
+    @org.junit.jupiter.api.DisplayName("el KAM lista usuarios con el negocio fijado en la transacción (RLS de users desde V39)")
+    void listarUsuariosFijaElNegocio() {
+        AuthRepository repo = mock(AuthRepository.class);
+        AuthService svc = newService(repo);
+        svc.listUsers("t1");
+        svc.administradores("t1");
+        org.mockito.Mockito.verify(repo, org.mockito.Mockito.times(2)).fijarNegocioEnLaTransaccion("t1");
+    }
 }
