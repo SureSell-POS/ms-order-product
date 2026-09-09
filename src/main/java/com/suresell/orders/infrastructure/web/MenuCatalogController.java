@@ -16,13 +16,24 @@ public class MenuCatalogController {
     private final MenuCatalogPort menuCatalogPort;
     private final com.suresell.orders.application.usecase.CodigosDeProducto codigosDeProducto;
     private final com.suresell.orders.multitenant.JwtTenantResolver jwt;
+    private final com.suresell.orders.application.usecase.VentasSinRegistrar ventasSinRegistrar;
 
     public MenuCatalogController(MenuCatalogPort menuCatalogPort,
                                  com.suresell.orders.application.usecase.CodigosDeProducto codigosDeProducto,
-                                 com.suresell.orders.multitenant.JwtTenantResolver jwt) {
+                                 com.suresell.orders.multitenant.JwtTenantResolver jwt,
+                                 com.suresell.orders.application.usecase.VentasSinRegistrar ventasSinRegistrar) {
         this.menuCatalogPort = menuCatalogPort;
         this.codigosDeProducto = codigosDeProducto;
         this.jwt = jwt;
+        this.ventasSinRegistrar = ventasSinRegistrar;
+    }
+
+    /** V51 §4.3: lo vendido sin registrar (módulo venta_sin_registro), agrupado, para la cola del panel. */
+    @GetMapping("/sin-registrar")
+    @Operation(summary = "Productos vendidos sin registrar en los últimos días, agrupados por nombre, código y precio")
+    public List<com.suresell.orders.application.usecase.VentasSinRegistrar.Pendiente> sinRegistrar(
+            @org.springframework.web.bind.annotation.RequestParam(value = "dias", defaultValue = "30") int dias) {
+        return ventasSinRegistrar.pendientes(dias);
     }
     @GetMapping("/categories-with-products")
     @Operation(summary = "Listar categorías con sus productos")
