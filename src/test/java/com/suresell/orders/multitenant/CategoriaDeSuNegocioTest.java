@@ -16,7 +16,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * V51: un producto solo puede apuntar a una categoría de SU negocio. Antes no
+ * V53: un producto solo puede apuntar a una categoría de SU negocio. Antes no
  * había ninguna clave foránea en {@code menu_products.category_id}: el
  * aislamiento era por costumbre (segunda revisión manual de Santiago,
  * 2026-09-09).

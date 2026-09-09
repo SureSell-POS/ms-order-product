@@ -1,5 +1,5 @@
 -- =====================================================================
--- V51 -- La categoría de un producto es de su mismo negocio, y la base lo
+-- V53 -- La categoría de un producto es de su mismo negocio, y la base lo
 --        garantiza.
 --
 -- EL DEFECTO (segunda revisión manual de Santiago, 2026-09-09)
@@ -48,7 +48,7 @@ ALTER TABLE menu_products
     FOREIGN KEY (tenant_id, category_id) REFERENCES menu_categories (tenant_id, id_category);
 
 COMMENT ON CONSTRAINT fk_menu_products_categoria_del_negocio ON menu_products IS
-    'V51: la categoria de un producto es del mismo negocio que el producto. NULL sigue valiendo (producto sin categoria).';
+    'V53: la categoria de un producto es del mismo negocio que el producto. NULL sigue valiendo (producto sin categoria).';
 
 -- REVERSION (a mano, si hiciera falta):
 -- ALTER TABLE menu_products DROP CONSTRAINT fk_menu_products_categoria_del_negocio;
