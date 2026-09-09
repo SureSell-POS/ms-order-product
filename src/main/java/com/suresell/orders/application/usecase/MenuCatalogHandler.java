@@ -15,31 +15,41 @@ import org.springframework.stereotype.Service;
 public class MenuCatalogHandler implements MenuCatalogPort {
     private final ProductCatalogPort productCatalogPort;
     private final CatalogSyncService catalogSyncService;
+    /** V51: los códigos se leen con UNA consulta para todo el catálogo y se adjuntan en memoria. */
+    private final CodigosDeProducto codigosDeProducto;
     @Override
     public List<MenuCategoryResponse> getCategoriesWithProducts() {
+        java.util.Map<String, List<com.suresell.orders.application.dto.CodigoDeProductoResponse>> codigos =
+                codigosDeProducto.vigentesPorProducto();
         return productCatalogPort.findAllCategoriesWithProducts().stream()
-                .map(this::toCategoryResponse)
+                .map(c -> toCategoryResponse(c, codigos))
                 .toList();
     }
     @Override
     public List<MenuProductResponse> getProducts() {
+        java.util.Map<String, List<com.suresell.orders.application.dto.CodigoDeProductoResponse>> codigos =
+                codigosDeProducto.vigentesPorProducto();
         return productCatalogPort.findAllProducts().stream()
-                .map(this::toProductResponse)
+                .map(p -> toProductResponse(p, codigos))
                 .toList();
     }
     @Override
     public void syncCatalog() {
         catalogSyncService.syncCatalogFromCloud();
     }
-    private MenuCategoryResponse toCategoryResponse(MenuCategory category) {
+    private MenuCategoryResponse toCategoryResponse(
+            MenuCategory category,
+            java.util.Map<String, List<com.suresell.orders.application.dto.CodigoDeProductoResponse>> codigos) {
         List<MenuProductResponse> products = category.getProducts() == null
                 ? List.of()
                 : category.getProducts().stream()
-                        .map(this::toProductResponse)
+                        .map(p -> toProductResponse(p, codigos))
                         .toList();
         return new MenuCategoryResponse(category.getIdCategory(), category.getNameCategory(), products);
     }
-    private MenuProductResponse toProductResponse(MenuProduct product) {
+    private MenuProductResponse toProductResponse(
+            MenuProduct product,
+            java.util.Map<String, List<com.suresell.orders.application.dto.CodigoDeProductoResponse>> codigos) {
         String categoryId = product.getCategory() != null ? product.getCategory().getIdCategory() : null;
         String categoryName = product.getCategory() != null ? product.getCategory().getNameCategory() : null;
         return new MenuProductResponse(
@@ -48,6 +58,7 @@ public class MenuCatalogHandler implements MenuCatalogPort {
                 product.getPrice(),
                 product.getActive(),
                 categoryId,
-                categoryName);
+                categoryName,
+                codigos.getOrDefault(product.getIdProduct(), List.of()));
     }
 }
