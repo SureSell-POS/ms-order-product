@@ -38,7 +38,7 @@ public interface OrderRepositoryPort {
     Optional<LocalDateTime> findMinCreatedAt();
     Optional<Long> findMaxIdOrder();
     List<Order> findAllWithItems();
-    Page<Order> findAllOrdersOnly(String pagerColor, String pagerNumber, Long idOrder, Pageable pageable);
+    Page<Order> findAllOrdersOnly(String pagerColor, String pagerNumber, Long idOrder, String reciboEstado, Pageable pageable);
     List<Order> findOrdersAfter(Long afterId, Pageable pageable);
     List<Order> findByStatusAndPaymentMethodIsNotNullAndCreatedAtBetween(
             OrderStatus status, LocalDateTime startOfDay, LocalDateTime endOfDay);

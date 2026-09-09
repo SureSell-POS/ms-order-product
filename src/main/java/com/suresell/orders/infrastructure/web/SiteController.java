@@ -45,6 +45,8 @@ public class SiteController {
         r.put("flujoDeVenta", flujo.codigo());
         r.put("usaMesas", flujo.usaMesas());
         r.put("usaRastreador", flujo.usaRastreador());
+        // V52 — un POS viejo lo ignora; uno nuevo deja de sondear al agente si es false.
+        r.put("imprimeTirilla", service.imprimeTirillaEfectiva());
         return ResponseEntity.ok(r);
     }
 }

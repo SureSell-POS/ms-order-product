@@ -277,9 +277,33 @@ public class SuperAdminService {
         // V48: `pos_mode` se conserva para el KAM viejo; el nuevo lee `flujo_de_venta`.
         return jdbc.queryForList(
                 "SELECT s.id, s.name, s.code, s.pos_mode, s.flujo_de_venta, f.nombre AS flujo_nombre, "
-                        + "f.usa_mesas, f.usa_rastreador, s.active, s.is_default "
+                        + "f.usa_mesas, f.usa_rastreador, s.active, s.is_default, "
+                        // V52: dos nombres para el mismo dato — snake_case como sus
+                        // hermanos de esta fila, camelCase como el contrato del POS.
+                        + "s.imprime_tirilla, s.imprime_tirilla AS \"imprimeTirilla\" "
                         + "FROM sites s JOIN flujos_de_venta f ON f.codigo = s.flujo_de_venta "
                         + "WHERE s.tenant_id = ? ORDER BY s.id", tenantId);
+    }
+
+    /**
+     * V52 — «Esta sede imprime tirilla». Solo el KAM: es parte de cómo se
+     * instala el negocio, no una preferencia. Con {@code false} el POS deja de
+     * buscar el programa de impresión y no muestra la alerta roja.
+     */
+    @org.springframework.transaction.annotation.Transactional
+    public java.util.List<Map<String, Object>> setSiteImprimeTirilla(String tenantId, Long siteId,
+                                                                     Boolean imprimeTirilla) {
+        if (imprimeTirilla == null) {
+            throw new AuthException(400, "Falta imprimeTirilla (true|false)");
+        }
+        jdbc.queryForObject("SELECT set_config('app.tenant_id', ?, true)", String.class, tenantId);
+        int filas = jdbc.update(
+                "UPDATE sites SET imprime_tirilla = ? WHERE id = ? AND tenant_id = ?",
+                imprimeTirilla, siteId, tenantId);
+        if (filas == 0) {
+            throw new AuthException(404, "No existe la sede " + siteId + " en el negocio " + tenantId);
+        }
+        return sedes(tenantId);
     }
 
     /**

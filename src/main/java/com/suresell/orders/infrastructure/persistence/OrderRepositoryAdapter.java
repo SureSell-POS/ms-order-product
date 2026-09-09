@@ -91,8 +91,8 @@ public class OrderRepositoryAdapter implements OrderRepositoryPort {
         return orderRepository.findAllWithItems();
     }
     @Override
-    public Page<Order> findAllOrdersOnly(String pagerColor, String pagerNumber, Long idOrder, Pageable pageable) {
-        return orderRepository.findWithFilters(pagerColor, pagerNumber, idOrder, pageable);
+    public Page<Order> findAllOrdersOnly(String pagerColor, String pagerNumber, Long idOrder, String reciboEstado, Pageable pageable) {
+        return orderRepository.findWithFilters(pagerColor, pagerNumber, idOrder, reciboEstado, pageable);
     }
     @Override
     public List<Order> findOrdersAfter(Long afterId, Pageable pageable) {

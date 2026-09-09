@@ -158,12 +158,14 @@ public interface OrderRepository extends JpaRepository<Order, java.util.UUID> {
             WHERE (:pagerColor IS NULL OR o.pagerColor = :pagerColor)
               AND (:pagerNumber IS NULL OR o.pagerNumber = :pagerNumber)
               AND (:idOrder IS NULL OR o.idOrder = :idOrder)
+              AND (:reciboEstado IS NULL OR o.reciboEstado = :reciboEstado)
             ORDER BY o.idOrder DESC
             """)
     Page<Order> findWithFilters(
             @Param("pagerColor") String pagerColor,
             @Param("pagerNumber") String pagerNumber,
             @Param("idOrder") Long idOrder,
+            @Param("reciboEstado") String reciboEstado,
             Pageable pageable);
     @Query("SELECT o FROM Order o WHERE o.idOrder < :afterId ORDER BY o.idOrder DESC")
     List<Order> findOrdersAfter(@Param("afterId") Long afterId, Pageable pageable);

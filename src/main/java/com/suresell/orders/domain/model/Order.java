@@ -108,6 +108,19 @@ public class Order implements org.springframework.data.domain.Persistable<java.u
         @Column(name = "is_printed", nullable = false)
     private Boolean isPrinted = false;
 
+    // V52 — «Cobrado, no impreso». Estado de la TIRILLA (recibo al cliente),
+    // que NO es la comanda de `isPrinted`. Nace `no_solicitado`; el POS lo
+    // escribe con PATCH /orders/{id}/recibo o en la creación (venta offline).
+    // Valores en ReciboDeVenta (y en el CHECK ck_orders_recibo_estado).
+    @Column(name = "recibo_estado", nullable = false)
+    private String reciboEstado = ReciboDeVenta.NO_SOLICITADO;
+
+    @Column(name = "recibo_motivo")
+    private String reciboMotivo;
+
+    @Column(name = "recibo_actualizado_at")
+    private java.time.OffsetDateTime reciboActualizadoAt;
+
     // F5 A13: soft-delete por admin — las órdenes borradas desaparecen de TODAS
     // las consultas de la entidad (historial, cocina, pagers, cierres) por el
     // filtro global de abajo; el rastro queda en order_deletions.
