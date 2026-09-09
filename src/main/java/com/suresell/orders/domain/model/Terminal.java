@@ -4,6 +4,7 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EntityListeners;
 import jakarta.persistence.Id;
+import jakarta.persistence.IdClass;
 import jakarta.persistence.Table;
 import java.time.OffsetDateTime;
 import java.util.UUID;
@@ -34,6 +35,7 @@ import lombok.NoArgsConstructor;
  */
 @Entity
 @Table(name = "terminals")
+@IdClass(TerminalId.class)
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
@@ -49,6 +51,12 @@ public class Terminal implements com.suresell.orders.multitenant.TenantOwned {
     @Column(name = "id")
     private UUID id;
 
+    /**
+     * Desde V50 forma parte de la clave: el mismo UUID puede existir una vez
+     * por negocio. Lo pone {@code TenantEntityListener} al persistir, como
+     * antes; el alta automática va por SQL nativo y lo pasa a mano.
+     */
+    @Id
     @Column(name = "tenant_id")
     private String tenantId;
 

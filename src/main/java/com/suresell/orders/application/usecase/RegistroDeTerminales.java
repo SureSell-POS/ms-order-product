@@ -44,15 +44,19 @@ import org.springframework.transaction.annotation.Transactional;
  * al salir del método, ya fuera del {@code try}. La venta salía con 500 y el
  * POS la disfrazaba de «guardada offline».
  *
- * <p>Ahora el alta es un {@code INSERT … ON CONFLICT DO NOTHING}: si el UUID ya
- * es de otro negocio no pasa nada, queda un WARN con los dos datos que hacen
- * falta para entenderlo (UUID y negocio de la sesión) y la venta sigue. El
- * arreglo de fondo —que el POS genere un UUID por negocio— es del POS.
+ * <p>Se cerró en dos pasos. Primero el alta pasó a {@code INSERT … ON CONFLICT
+ * DO NOTHING}, que evita el 500 pero dejaba la orden apuntando al terminal de
+ * otro negocio (invisible, no imposible). Después, <b>V50</b>: la identidad
+ * del terminal es (negocio, UUID), la clave primaria lleva el negocio y la FK
+ * de {@code orders} es (tenant_id, terminal_id). El mismo navegador con dos
+ * cuentas tiene dos filas, cada negocio ve la suya bajo RLS, y una orden no
+ * puede apuntar fuera de su negocio: la base lo rechaza. El POS no cambia.
  *
- * <p>La degradación no es invisible: queda el WARN y, sobre todo, queda la
- * propia orden con un `terminal_id` que apunta a un terminal de otro negocio o
- * que no está en `terminals`. Esa inconsistencia es detectable con una
- * consulta, cosa que un `null` no sería.
+ * <p>La degradación (si el alta falla por otra cosa) no es invisible: queda el
+ * WARN y, sobre todo, queda la propia orden con un `terminal_id` que no está
+ * en `terminals` para su negocio… salvo que desde V50 eso ya no entra: la FK
+ * lo impide, y entonces es la venta la que falla con 422 y texto, no en
+ * silencio.
  */
 @Log4j2
 @Service
@@ -100,11 +104,11 @@ public class RegistroDeTerminales {
             log.info("Terminal {} dado de alta automaticamente (epoch {})", id, epoch);
             return;
         }
-        // 0 filas: el UUID ya está en `terminals` y no es de este negocio (si
-        // fuera de este, registrarContacto lo habría encontrado). Es el mismo
-        // navegador usado por dos cuentas. No es un error de la venta.
-        log.warn("El terminal {} ya esta registrado a nombre de otro negocio; la sesion es de '{}'. "
-                + "La venta sigue. Este POS comparte el UUID entre cuentas: al cambiar de cuenta "
-                + "deberia generar uno nuevo.", id, negocio);
+        // 0 filas: desde V50 la clave es (negocio, UUID), así que esto solo
+        // pasa si OTRA petición de este mismo negocio lo dio de alta entre el
+        // UPDATE y el INSERT. No es un error de la venta. (Antes de V50 aquí
+        // vivía el WARN de «ya está a nombre de otro negocio»; ese caso ya no
+        // existe: cada negocio tiene su fila para el mismo UUID.)
+        log.debug("Terminal {} dado de alta por otra peticion concurrente del negocio '{}'", id, negocio);
     }
 }

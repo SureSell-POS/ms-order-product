@@ -3,16 +3,17 @@ package com.suresell.orders.multitenant;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -21,11 +22,12 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 /**
  * Fase 0 (2026-09-09): el mismo navegador usado por dos negocios manda el
  * MISMO UUID de terminal, y la segunda venta salía con 500
- * ({@code duplicate key … terminals_pkey}). Este test reproduce el choque con
- * el SQL exacto que usa {@code TerminalRepository} y comprueba las dos cosas
- * que importan: el alta con {@code ON CONFLICT DO NOTHING} no revienta bajo
- * RLS, y la orden del segundo negocio se puede guardar con ese
- * {@code terminal_id}.
+ * ({@code duplicate key … terminals_pkey}). Desde V50 la identidad del
+ * terminal es (negocio, UUID): cada negocio tiene su fila y la base no admite
+ * una orden que apunte a un terminal de otro negocio.
+ *
+ * <p>Se prueba con el SQL exacto que usa {@code TerminalRepository} y por
+ * comportamiento: lo que la base acepta y lo que rechaza.
  */
 @Testcontainers
 class TerminalCompartidaEntreNegociosTest {
@@ -33,17 +35,14 @@ class TerminalCompartidaEntreNegociosTest {
     @Container
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine");
 
-    private static final String ALTA_ANTIGUA = """
+    /** El mismo SQL de {@code TerminalRepository.darDeAltaSiNoExiste}. */
+    private static final String ALTA = """
             INSERT INTO terminals (id, tenant_id, estado, registrado_en, ultima_conexion_en, epoch_visto)
             VALUES (?, ?, 'activo', ?, ?, 1)
+            ON CONFLICT (tenant_id, id) DO NOTHING
             """;
 
-    /** El mismo SQL de {@code TerminalRepository.darDeAltaSiNoExiste}. */
-    private static final String ALTA_TOLERANTE = ALTA_ANTIGUA + " ON CONFLICT (id) DO NOTHING";
-
-    private static final String CONTACTO = """
-            UPDATE terminals SET ultima_conexion_en = ? WHERE id = ?
-            """;
+    private static final String CONTACTO = "UPDATE terminals SET ultima_conexion_en = ? WHERE id = ?";
 
     @BeforeAll
     static void migrate() {
@@ -65,8 +64,8 @@ class TerminalCompartidaEntreNegociosTest {
         }
     }
 
-    private int alta(Connection c, String sql, UUID terminal, String tenant) throws SQLException {
-        try (PreparedStatement ps = c.prepareStatement(sql)) {
+    private int alta(Connection c, UUID terminal, String tenant) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(ALTA)) {
             OffsetDateTime ahora = OffsetDateTime.now();
             ps.setObject(1, terminal);
             ps.setString(2, tenant);
@@ -84,75 +83,90 @@ class TerminalCompartidaEntreNegociosTest {
         }
     }
 
-    private String duenoDe(UUID terminal) throws SQLException {
+    private int venta(Connection c, String tenant, long idOrder, UUID terminal) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "INSERT INTO orders (uuid_id, tenant_id, id_order, total, terminal_id) VALUES (?, ?, ?, ?, ?)")) {
+            ps.setObject(1, UUID.randomUUID());
+            ps.setString(2, tenant);
+            ps.setLong(3, idOrder);
+            ps.setBigDecimal(4, new BigDecimal("32000"));
+            ps.setObject(5, terminal);
+            return ps.executeUpdate();
+        }
+    }
+
+    /** Cuántas filas tiene ese UUID en `terminals`, vistas sin RLS. */
+    private int filasDe(UUID terminal) throws SQLException {
         try (Connection admin = DriverManager.getConnection(
                      POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
-             PreparedStatement ps = admin.prepareStatement("SELECT tenant_id FROM terminals WHERE id = ?")) {
+             PreparedStatement ps = admin.prepareStatement("SELECT count(*) FROM terminals WHERE id = ?")) {
             ps.setObject(1, terminal);
             try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getString(1) : null;
+                rs.next();
+                return rs.getInt(1);
             }
         }
     }
 
     @Test
-    void elAltaAntiguaReventabaConElSegundoNegocio() throws SQLException {
+    @DisplayName("el mismo UUID en dos negocios son dos filas, y cada uno encuentra la suya")
+    void dosNegociosMismoUuid() throws SQLException {
         UUID terminal = UUID.randomUUID();
         try (Connection a = appConnection()) {
             setTenant(a, "t-term-a");
-            assertThat(alta(a, ALTA_ANTIGUA, terminal, "t-term-a")).isEqualTo(1);
+            assertThat(alta(a, terminal, "t-term-a")).isEqualTo(1);
         }
         try (Connection b = appConnection()) {
             setTenant(b, "t-term-b");
-            // Bajo RLS el negocio B no ve la fila de A: el contacto no encuentra nada…
+            // Bajo RLS el negocio B no ve la fila de A: su contacto no encuentra nada…
             assertThat(contacto(b, terminal)).isZero();
-            // …y el alta de antes chocaba con la clave primaria global.
-            assertThatThrownBy(() -> alta(b, ALTA_ANTIGUA, terminal, "t-term-b"))
-                    .isInstanceOf(SQLException.class)
-                    .hasMessageContaining("terminals_pkey");
+            // …y su alta ya no choca: es SU fila.
+            assertThat(alta(b, terminal, "t-term-b")).isEqualTo(1);
+            assertThat(contacto(b, terminal)).isEqualTo(1);
         }
+        assertThat(filasDe(terminal)).isEqualTo(2);
     }
 
     @Test
-    void elAltaTolerantePermiteQueElSegundoNegocioVenda() throws SQLException {
+    @DisplayName("🔴 una orden no puede apuntar a un terminal de otro negocio: la base la rechaza")
+    void laOrdenNoPuedeApuntarFueraDeSuNegocio() throws SQLException {
         UUID terminal = UUID.randomUUID();
-        try (Connection a = appConnection()) {
-            setTenant(a, "t-term-c");
-            assertThat(alta(a, ALTA_TOLERANTE, terminal, "t-term-c")).isEqualTo(1);
+        try (Connection c = appConnection()) {
+            setTenant(c, "t-term-c");
+            assertThat(alta(c, terminal, "t-term-c")).isEqualTo(1);
         }
-        try (Connection b = appConnection()) {
-            setTenant(b, "t-term-d");
-            // 0 filas, sin excepción: el terminal sigue siendo de C.
-            assertThat(alta(b, ALTA_TOLERANTE, terminal, "t-term-d")).isZero();
-            assertThat(duenoDe(terminal)).isEqualTo("t-term-c");
-
-            // Y la venta de D con ese terminal_id entra: la FK apunta a una fila
-            // que existe (aunque D no la vea), que es lo que V35 prometió.
-            try (PreparedStatement ps = b.prepareStatement(
-                    "INSERT INTO orders (uuid_id, tenant_id, id_order, total, terminal_id) VALUES (?, ?, ?, ?, ?)")) {
-                ps.setObject(1, UUID.randomUUID());
-                ps.setString(2, "t-term-d");
-                ps.setLong(3, 1);
-                ps.setBigDecimal(4, new java.math.BigDecimal("32000"));
-                ps.setObject(5, terminal);
-                assertThat(ps.executeUpdate()).isEqualTo(1);
-            }
-            try (Statement s = b.createStatement();
-                 ResultSet rs = s.executeQuery("SELECT count(*) FROM orders WHERE terminal_id = '" + terminal + "'")) {
-                rs.next();
-                assertThat(rs.getInt(1)).isEqualTo(1);
-            }
+        try (Connection d = appConnection()) {
+            setTenant(d, "t-term-d");
+            // El terminal existe (para C), pero D no lo ha registrado: antes de
+            // V50 esta venta entraba apuntando a la fila de C.
+            assertThatThrownBy(() -> venta(d, "t-term-d", 1, terminal))
+                    .isInstanceOf(SQLException.class)
+                    .hasMessageContaining("fk_orders_terminal_del_negocio");
+            // En cuanto D lo registra a su nombre, vende.
+            assertThat(alta(d, terminal, "t-term-d")).isEqualTo(1);
+            assertThat(venta(d, "t-term-d", 1, terminal)).isEqualTo(1);
         }
     }
 
     @Test
+    @DisplayName("el mismo negocio no duplica su terminal; el segundo alta devuelve 0 sin excepción")
     void elMismoNegocioNoDuplicaSuTerminal() throws SQLException {
         UUID terminal = UUID.randomUUID();
         try (Connection a = appConnection()) {
             setTenant(a, "t-term-e");
-            assertThat(alta(a, ALTA_TOLERANTE, terminal, "t-term-e")).isEqualTo(1);
-            assertThat(alta(a, ALTA_TOLERANTE, terminal, "t-term-e")).isZero();
+            assertThat(alta(a, terminal, "t-term-e")).isEqualTo(1);
+            assertThat(alta(a, terminal, "t-term-e")).isZero();
             assertThat(contacto(a, terminal)).isEqualTo(1);
+        }
+        assertThat(filasDe(terminal)).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("una orden sin terminal (cliente viejo) sigue entrando")
+    void sinTerminalSigueEntrando() throws SQLException {
+        try (Connection f = appConnection()) {
+            setTenant(f, "t-term-f");
+            assertThat(venta(f, "t-term-f", 1, null)).isEqualTo(1);
         }
     }
 }
