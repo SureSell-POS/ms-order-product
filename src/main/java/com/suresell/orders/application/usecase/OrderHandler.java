@@ -1179,9 +1179,16 @@ public class OrderHandler implements OrderPort {
     }
 
     private OrderItemResponseRecord toOrderItemResponseRecord(OrderItem item, Map<String, String> productNames) {
+        // V51: un producto que el catálogo no conoce («sin registrar») lleva el
+        // nombre tecleado en `instructions`; antes aquí salía el productId.
+        String nombre = productNames.get(item.getProductId());
+        if (nombre == null) {
+            String nota = item.getInstructions();
+            nombre = nota == null || nota.isBlank() ? item.getProductId() : nota.trim();
+        }
         return new OrderItemResponseRecord(
                 item.getProductId(),
-                productNames.getOrDefault(item.getProductId(), item.getProductId()),
+                nombre,
                 item.getQuantity(),
                 item.getUnitPrice(),
                 item.getTotalPrice(),

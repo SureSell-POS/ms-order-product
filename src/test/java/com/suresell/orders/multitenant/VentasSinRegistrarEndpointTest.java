@@ -94,6 +94,12 @@ class VentasSinRegistrarEndpointTest {
                 .andExpect(jsonPath("$[?(@.nombre == 'Galleta importada')].precio").value(3500.0))
                 .andExpect(jsonPath("$[?(@.nombre == 'Bolsa hielo')].veces").value(1));
 
+        // Y al leer la orden, la línea sin registrar sale con el nombre tecleado, no con el id.
+        mockMvc.perform(get("/orders/9003").header("Authorization", bearer(TENANT)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].productId").value("sin-registrar:a3"))
+                .andExpect(jsonPath("$.items[0].nameProduct").value("Bolsa hielo"));
+
         mockMvc.perform(get("/api/menu/sin-registrar?dias=7").header("Authorization", bearer(OTRO)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$", hasSize(1)))
