@@ -59,6 +59,14 @@ public class SiteService {
         return flujos.defectoGlobal();
     }
 
+    /**
+     * V52 — ¿La sede efectiva imprime tirilla? Sin sede, sí: es lo que siempre
+     * fue, y un negocio que imprime no puede dejar de hacerlo por falta de fila.
+     */
+    public boolean imprimeTirillaEfectiva() {
+        return sedePorDefecto().map(s -> !Boolean.FALSE.equals(s.getImprimeTirilla())).orElse(true);
+    }
+
     /** Modo efectivo para los lectores viejos ({@code posMode}). Sale del catálogo. */
     public String modoEfectivo() {
         return flujoEfectivo().posModeLegado();

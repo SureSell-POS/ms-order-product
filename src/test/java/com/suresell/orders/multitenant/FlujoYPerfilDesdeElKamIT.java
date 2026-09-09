@@ -94,6 +94,29 @@ class FlujoYPerfilDesdeElKamIT {
     }
 
     @Test
+    @DisplayName("V52 — el KAM apaga «esta sede imprime tirilla»: nace en true, queda en false, y una sede ajena es 404")
+    void elKamApagaLaTirillaDeUnaSede() {
+        List<Map<String, Object>> sedes = kam.getSites(tenant);
+        assertThat(sedes.get(0).get("imprime_tirilla")).isEqualTo(true);
+        assertThat(sedes.get(0).get("imprimeTirilla")).isEqualTo(true);
+
+        sedes = kam.setSiteImprimeTirilla(tenant, sede, false);
+        assertThat(sedes.get(0).get("imprime_tirilla")).isEqualTo(false);
+        assertThat(jdbc.queryForObject("SELECT imprime_tirilla FROM sites WHERE id = ?", Boolean.class, sede))
+                .isFalse();
+
+        sedes = kam.setSiteImprimeTirilla(tenant, sede, true);
+        assertThat(sedes.get(0).get("imprimeTirilla")).isEqualTo(true);
+
+        assertThatThrownBy(() -> kam.setSiteImprimeTirilla(tenant, sede + 9999, false))
+                .isInstanceOf(AuthException.class)
+                .hasMessageContaining("No existe la sede");
+        assertThatThrownBy(() -> kam.setSiteImprimeTirilla(tenant, sede, null))
+                .isInstanceOf(AuthException.class)
+                .hasMessageContaining("imprimeTirilla");
+    }
+
+    @Test
     @DisplayName("🔴 control negativo: el KAM no puede poner a un restaurante en DIRECTO; su perfil no lo admite")
     void elPerfilAcotaLoQueElKamPuedePoner() {
         assertThatThrownBy(() -> kam.setSiteMode(tenant, sede, "DIRECTO", "kam@suresell.com.co"))

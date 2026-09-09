@@ -46,6 +46,13 @@ public record OrderResponseRecord(
             + "El historial NO debe deducirlo de pagerNumber: ahí no viaja la mesa.", example = "12")
     Integer tableNumber,
     @Schema(description = "Etiqueta opcional de la mesa", example = "Terraza")
-    String tableLabel
+    String tableLabel,
+    @Schema(description = "V52 — Estado de la TIRILLA (no de la comanda): no_solicitado | enviado | "
+            + "confirmado | no_impreso | descartado", example = "no_impreso")
+    String reciboEstado,
+    @Schema(description = "V52 — Por qué no salió la tirilla (solo con no_impreso)", example = "agente_apagado")
+    String reciboMotivo,
+    @Schema(description = "V52 — Última vez que cambió el estado de la tirilla")
+    java.time.OffsetDateTime reciboActualizadoAt
 ) {
 }

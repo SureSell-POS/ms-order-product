@@ -1,6 +1,7 @@
 package com.suresell.orders.infrastructure.web;
 import com.suresell.orders.application.dto.OrderRequestRecord;
 import com.suresell.orders.application.dto.OrderResponseRecord;
+import com.suresell.orders.application.dto.ReciboResponse;
 import com.suresell.orders.application.dto.PageResponse;
 import com.suresell.orders.application.dto.PagerAvailabilityResponse;
 import com.suresell.orders.domain.model.Order;
@@ -64,6 +65,7 @@ public class OrderController {
             @RequestParam(required = false) String pagerColor,
             @RequestParam(required = false) String pagerNumber,
             @RequestParam(required = false) Long orderId,
+            @RequestParam(required = false) String reciboEstado,
             @RequestParam(required = false) Long afterId) {
         int safeSize = Math.min(Math.max(size, 1), MAX_PAGE_SIZE);
         if (afterId != null) {
@@ -78,7 +80,9 @@ public class OrderController {
         }
         String filterColor = (pagerColor == null || pagerColor.isEmpty() || pagerColor.equalsIgnoreCase("Todos")) ? null : pagerColor;
         String filterNumber = (pagerNumber == null || pagerNumber.isEmpty()) ? null : pagerNumber;
-        Page<OrderResponseRecord> ordersPage = orderPort.getAllOrdersPaginated(filterColor, filterNumber, orderId, page, safeSize);
+        // V52 — «Sin tirilla»: el POS lista las ventas cobradas cuya tirilla no salió.
+        String filterRecibo = (reciboEstado == null || reciboEstado.isBlank()) ? null : reciboEstado;
+        Page<OrderResponseRecord> ordersPage = orderPort.getAllOrdersPaginated(filterColor, filterNumber, orderId, filterRecibo, page, safeSize);
         return ResponseEntity.ok(PageResponse.from(ordersPage));
     }
     @GetMapping("/{orderId}")
@@ -95,6 +99,25 @@ public class OrderController {
         OrderResponseRecord updatedOrder = orderPort.applyDiscountToOrder(orderId, discountCode);
         return ResponseEntity.ok(updatedOrder);
     }
+
+    /**
+     * V52 — «Cobrado, no impreso». La venta ya se cobró; esto dice qué pasó con
+     * su TIRILLA. No bloquea nada, no toca cocina: {@code mark-as-printed} es la
+     * comanda y sigue siendo otro documento.
+     */
+    @PatchMapping("/{orderId}/recibo")
+    @Operation(summary = "Estado de la tirilla de una venta cobrada",
+            description = "estado: no_solicitado | enviado | confirmado | no_impreso | descartado. "
+                    + "motivo (solo con no_impreso): agente_apagado | navegador_pide_permiso | agente_no_responde | "
+                    + "impresora_sin_conexion | en_cola | error_agente | dialogo_cancelado")
+    public ResponseEntity<ReciboResponse> actualizarRecibo(@PathVariable Long orderId,
+                                                           @RequestBody ReciboRequest req) {
+        return ResponseEntity.ok(orderPort.actualizarRecibo(orderId, req == null ? null : req.estado(),
+                req == null ? null : req.motivo()));
+    }
+
+    /** Cuerpo de {@code PATCH /orders/{id}/recibo}. */
+    public record ReciboRequest(String estado, String motivo) {}
 
     @PatchMapping("/{orderId}/mark-as-printed")
     @Operation(summary = "Marcar orden como IMPRESA", description = "Cambia el estado de la orden a 'impreso' localmente y sincroniza con AWS para que la cocina no la duplique.")
