@@ -64,10 +64,12 @@ class VentasSinRegistrarEndpointTest {
     }
 
     private void linea(Statement s, String tenant, long orden, String productId, String instrucciones, int precio) throws Exception {
-        s.execute("INSERT INTO orders (uuid_id, tenant_id, id_order, total) VALUES ('" + UUID.randomUUID()
-                + "','" + tenant + "'," + orden + "," + precio + ") ON CONFLICT DO NOTHING");
-        s.execute("INSERT INTO order_item (uuid_id, tenant_id, order_id, product_id, quantity, unit_price, total_price, instructions, created_at, precio_origen) "
-                + "VALUES ('" + UUID.randomUUID() + "','" + tenant + "'," + orden + ",'" + productId + "',1," + precio + "," + precio
+        // La orden y su línea van unidas por el UUID además del número (así las lee la entidad).
+        UUID uuid = UUID.nameUUIDFromBytes((tenant + "-" + orden).getBytes(StandardCharsets.UTF_8));
+        s.execute("INSERT INTO orders (uuid_id, tenant_id, id_order, total, status, payment_method) VALUES ('" + uuid
+                + "','" + tenant + "'," + orden + "," + precio + ",'pagado','CASH') ON CONFLICT DO NOTHING");
+        s.execute("INSERT INTO order_item (uuid_id, tenant_id, order_id, order_uuid_id, product_id, quantity, unit_price, total_price, instructions, created_at, precio_origen) "
+                + "VALUES ('" + UUID.randomUUID() + "','" + tenant + "'," + orden + ",'" + uuid + "','" + productId + "',1," + precio + "," + precio
                 + "," + (instrucciones == null ? "NULL" : "'" + instrucciones + "'") + ", now(), 'POS')");
     }
 

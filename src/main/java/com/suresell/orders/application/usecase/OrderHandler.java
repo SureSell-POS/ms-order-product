@@ -1182,7 +1182,9 @@ public class OrderHandler implements OrderPort {
         // V51: un producto que el catálogo no conoce («sin registrar») lleva el
         // nombre tecleado en `instructions`; antes aquí salía el productId.
         String nombre = productNames.get(item.getProductId());
-        if (nombre == null) {
+        // `buildProductNameCacheByIds` pone el propio id como nombre cuando el
+        // catálogo no lo conoce: ese caso es el «sin registrar».
+        if (nombre == null || nombre.equals(item.getProductId())) {
             String nota = item.getInstructions();
             nombre = nota == null || nota.isBlank() ? item.getProductId() : nota.trim();
         }
