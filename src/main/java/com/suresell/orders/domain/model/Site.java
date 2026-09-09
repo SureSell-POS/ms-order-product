@@ -71,6 +71,15 @@ public class Site implements com.suresell.orders.multitenant.TenantOwned {
     @Column(name = "is_default", nullable = false)
     private Boolean isDefault = false;
 
+    /**
+     * V52 — ¿Esta sede imprime tirilla? Con {@code false} el POS no busca el
+     * programa de impresión, no muestra alerta y la venta nace
+     * {@code no_solicitado}. Lo cambia el KAM. Nace en {@code true}: ningún
+     * negocio que hoy imprime deja de hacerlo por esta columna.
+     */
+    @Column(name = "imprime_tirilla", nullable = false)
+    private Boolean imprimeTirilla = true;
+
     public boolean esRestaurante() {
         return MODO_RESTAURANTE.equalsIgnoreCase(posMode);
     }

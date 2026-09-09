@@ -183,6 +183,24 @@ public class SuperAdminController {
         }
     }
 
+    /** V52 — «Esta sede imprime tirilla». SOLO el KAM. */
+    @PutMapping("/admin/tenants/{id}/sites/{siteId}/imprime-tirilla")
+    public ResponseEntity<?> setSiteImprimeTirilla(@PathVariable String id, @PathVariable Long siteId,
+                                                   @RequestBody ImprimeTirillaRequest req,
+                                                   HttpServletRequest http) {
+        ResponseEntity<?> guard = requireSuper(http);
+        if (guard != null) {
+            return guard;
+        }
+        try {
+            return ResponseEntity.ok(svc.setSiteImprimeTirilla(id, siteId, req == null ? null : req.imprimeTirilla()));
+        } catch (AuthException e) {
+            return err(e);
+        }
+    }
+
+    public record ImprimeTirillaRequest(Boolean imprimeTirilla) {}
+
     /**
      * V48: el KAM nuevo manda {@code flujoDeVenta}; el viejo, {@code posMode}.
      * Los dos se resuelven contra el catálogo.

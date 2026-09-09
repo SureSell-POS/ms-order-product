@@ -9,7 +9,7 @@ import java.util.List;
 public interface OrderPort {
     Order createOrUpdateOrder(OrderRequestRecord dto);
     List<OrderResponseRecord> getAllOrders();
-    Page<OrderResponseRecord> getAllOrdersPaginated(String pagerColor, String pagerNumber, Long idOrder, int page, int size);
+    Page<OrderResponseRecord> getAllOrdersPaginated(String pagerColor, String pagerNumber, Long idOrder, String reciboEstado, int page, int size);
     List<OrderResponseRecord> getAllOrdersKeyset(Long afterId, int size);
     OrderResponseRecord getOrderById(Long orderId);
     void updateOrder(Long orderId, OrderRequestRecord dto);
@@ -18,5 +18,7 @@ public interface OrderPort {
     PagerAvailabilityResponse getPagerAvailability();
     void markAsDeliveredLocally(Long orderId);
     void markAsPrinted(Long orderId);
+    /** V52 — estado de la TIRILLA de una venta cobrada. */
+    com.suresell.orders.application.dto.ReciboResponse actualizarRecibo(Long orderId, String estado, String motivo);
     void releasePager(String color, String number);
 }

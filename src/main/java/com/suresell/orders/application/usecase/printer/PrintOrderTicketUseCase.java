@@ -65,10 +65,17 @@ public class PrintOrderTicketUseCase {
             if (order.items() != null) {
                 for (OrderItemResponseRecord item : order.items()) {
                     pos.boldOn(bos);
-                    pos.textLn(bos, String.format(" %-4d %s", item.quantity(), item.nameProduct()));
+                    // V51: un producto que el catálogo no conoce («sin registrar») no
+                    // tiene nombre en el catálogo; el que tecleó la cajera va en
+                    // `instructions`. Antes aquí salía "null".
+                    boolean sinNombre = item.nameProduct() == null || item.nameProduct().isBlank();
+                    String nombre = sinNombre && item.instructions() != null && !item.instructions().isBlank()
+                            ? item.instructions().trim()
+                            : item.nameProduct();
+                    pos.textLn(bos, String.format(" %-4d %s", item.quantity(), nombre));
                     pos.boldOff(bos);
 
-                    if (item.instructions() != null && !item.instructions().isBlank()) {
+                    if (!sinNombre && item.instructions() != null && !item.instructions().isBlank()) {
                         pos.textLn(bos, "      * " + item.instructions());
                     }
                 }

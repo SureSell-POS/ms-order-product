@@ -12,6 +12,8 @@ import com.suresell.orders.domain.model.SyncOutbox;
 import com.suresell.orders.domain.model.Order;
 import com.suresell.orders.domain.model.OrderDeliveryTracking;
 import com.suresell.orders.domain.model.OrderEditHistory;
+import com.suresell.orders.domain.model.ReciboDeVenta;
+import com.suresell.orders.application.dto.ReciboResponse;
 import com.suresell.orders.domain.model.OrderItem;
 import com.suresell.orders.domain.model.OrderStatus;
 import com.suresell.orders.domain.port.out.SyncOutboxRepositoryPort;
@@ -315,6 +317,16 @@ public class OrderHandler implements OrderPort {
         // liberar, porque la cocina nunca vio esa orden en pantalla.
         boolean yaPreparado = Boolean.TRUE.equals(dto.preparadoEnComanda());
 
+        // V52 — Una venta hecha sin red trae ya el estado de su tirilla (se
+        // intentó imprimir en el momento, con o sin éxito). Sin el campo, la
+        // orden nace `no_solicitado`, que es lo que siempre fue: la app de
+        // meseros y los POS viejos no cambian de comportamiento.
+        if (dto.reciboEstado() != null && !dto.reciboEstado().isBlank()) {
+            savedOrder.setReciboEstado(ReciboDeVenta.exigirEstado(dto.reciboEstado()));
+            savedOrder.setReciboMotivo(ReciboDeVenta.normalizarMotivo(dto.reciboMotivo()));
+            savedOrder.setReciboActualizadoAt(java.time.OffsetDateTime.now());
+        }
+
         OrderDeliveryTracking tracking = new OrderDeliveryTracking();
         tracking.setOrder(savedOrder);
         tracking.setOrderId(numericId);
@@ -456,9 +468,10 @@ public class OrderHandler implements OrderPort {
     }
 
     @Override
-    public Page<OrderResponseRecord> getAllOrdersPaginated(String pagerColor, String pagerNumber, Long idOrder, int page, int size) {
+    public Page<OrderResponseRecord> getAllOrdersPaginated(String pagerColor, String pagerNumber, Long idOrder,
+                                                           String reciboEstado, int page, int size) {
         Pageable pageable = PageRequest.of(page, size);
-        Page<Order> ordersPage = orderRepositoryPort.findAllOrdersOnly(pagerColor, pagerNumber, idOrder, pageable);
+        Page<Order> ordersPage = orderRepositoryPort.findAllOrdersOnly(pagerColor, pagerNumber, idOrder, reciboEstado, pageable);
         if (ordersPage.isEmpty()) {
             return Page.empty(pageable);
         }
@@ -729,7 +742,7 @@ public class OrderHandler implements OrderPort {
             return new OrderItemDto(
                     item.getProductId(),
                     productIdLong,
-                    productDetails != null ? productDetails.nameProduct() : null,
+                    nombreDeLinea(productDetails, item),
                     productDetails != null ? productDetails.categoryName() : null,
                     item.getQuantity(),
                     item.getUnitPrice());
@@ -802,6 +815,29 @@ public class OrderHandler implements OrderPort {
         orderRepositoryPort.save(order);
         log.info("Orden #{} marcada como ENTREGADA y Pager liberado MANUALMENTE (Acción de Cajero).", orderId);
         saveTrackingToOutbox(tracking);
+    }
+
+    /**
+     * V52 — «Cobrado, no impreso». El POS dice qué pasó con la TIRILLA de una
+     * venta ya cobrada. Solo escribe: no toca el outbox ni la cola de cocina
+     * (eso es {@link #markAsPrinted}, que es otro documento). Una orden de otro
+     * negocio no existe para esta sesión (RLS) y responde 404.
+     */
+    @Override
+    @Transactional
+    public ReciboResponse actualizarRecibo(Long orderId, String estado, String motivo) {
+        String estadoValido = ReciboDeVenta.exigirEstado(estado);
+        String motivoValido = ReciboDeVenta.normalizarMotivo(motivo);
+        Order order = orderRepositoryPort.findById(orderId)
+                .orElseThrow(() -> new RuntimeException("Orden no encontrada con ID: " + orderId));
+        order.setReciboEstado(estadoValido);
+        order.setReciboMotivo(ReciboDeVenta.NO_IMPRESO.equals(estadoValido) ? motivoValido : null);
+        order.setReciboActualizadoAt(java.time.OffsetDateTime.now());
+        orderRepositoryPort.save(order);
+        log.info("Orden #{}: tirilla -> {}{}", orderId, estadoValido,
+                order.getReciboMotivo() == null ? "" : " (" + order.getReciboMotivo() + ")");
+        return new ReciboResponse(order.getIdOrder(), order.getReciboEstado(),
+                order.getReciboMotivo(), order.getReciboActualizadoAt());
     }
 
     @Override
@@ -1063,7 +1099,7 @@ public class OrderHandler implements OrderPort {
             return new OrderItemDto(
                     item.getProductId(),
                     productIdLong,
-                    productDetails != null ? productDetails.nameProduct() : null,
+                    nombreDeLinea(productDetails, item),
                     productDetails != null ? productDetails.categoryName() : null,
                     item.getQuantity(),
                     item.getUnitPrice());
@@ -1175,13 +1211,25 @@ public class OrderHandler implements OrderPort {
                 order.getWaiterId(),
                 order.getWaiterId() == null ? null : waiterNames.get(order.getWaiterId()),
                 mesa == null ? null : mesa.numero(),
-                mesa == null ? null : mesa.etiqueta());
+                mesa == null ? null : mesa.etiqueta(),
+                order.getReciboEstado(),
+                order.getReciboMotivo(),
+                order.getReciboActualizadoAt());
     }
 
     private OrderItemResponseRecord toOrderItemResponseRecord(OrderItem item, Map<String, String> productNames) {
+        // V51: un producto que el catálogo no conoce («sin registrar») lleva el
+        // nombre tecleado en `instructions`; antes aquí salía el productId.
+        String nombre = productNames.get(item.getProductId());
+        // `buildProductNameCacheByIds` pone el propio id como nombre cuando el
+        // catálogo no lo conoce: ese caso es el «sin registrar».
+        if (nombre == null || nombre.equals(item.getProductId())) {
+            String nota = item.getInstructions();
+            nombre = nota == null || nota.isBlank() ? item.getProductId() : nota.trim();
+        }
         return new OrderItemResponseRecord(
                 item.getProductId(),
-                productNames.getOrDefault(item.getProductId(), item.getProductId()),
+                nombre,
                 item.getQuantity(),
                 item.getUnitPrice(),
                 item.getTotalPrice(),
@@ -1250,5 +1298,20 @@ public class OrderHandler implements OrderPort {
         } else {
             log.warn("Intento de liberar Pager {} {} fallido: No se encontró orden activa asociada.", color, number);
         }
+    }
+
+    /**
+     * El nombre que se muestra e imprime para una línea. Un producto del
+     * catálogo, el suyo. Un producto que el catálogo no conoce (V51 «vender
+     * sin registrar»: `productId` `sin-registrar:<uuid>`, nombre en
+     * `instructions`), lo que tecleó la cajera; antes salía `null` en el
+     * historial y en el ticket.
+     */
+    static String nombreDeLinea(ProductResponse productDetails, OrderItem item) {
+        if (productDetails != null && productDetails.nameProduct() != null) {
+            return productDetails.nameProduct();
+        }
+        String nota = item.getInstructions();
+        return nota == null || nota.isBlank() ? null : nota.trim();
     }
 }

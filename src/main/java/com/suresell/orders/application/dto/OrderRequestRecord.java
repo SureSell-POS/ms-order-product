@@ -166,7 +166,20 @@ public record OrderRequestRecord(
      * cada línea lo resuelve el servidor con su lista (V45) y el del POS se
      * descarta; y si el medio de pago es CREDITO, la venta entra a su cartera.
      */
-    String clienteDocumento
+    String clienteDocumento,
+
+    /**
+     * V52 — «Cobrado, no impreso». OPCIONALES. Una venta hecha sin red se
+     * intentó imprimir en el momento; al sincronizar trae el resultado para que
+     * la tirilla que no salió no se pierda de vista. Sin ellos la orden nace
+     * {@code no_solicitado}: los POS viejos y la app de meseros siguen igual.
+     * Valores en {@link com.suresell.orders.domain.model.ReciboDeVenta}.
+     */
+    @Schema(description = "V52 — Estado de la tirilla al crear la venta (venta offline): "
+            + "enviado | confirmado | no_impreso | descartado", example = "no_impreso")
+    String reciboEstado,
+    @Schema(description = "V52 — Motivo si la tirilla no salió", example = "agente_apagado")
+    String reciboMotivo
 ) {
 
     /**
@@ -191,7 +204,7 @@ public record OrderRequestRecord(
         return new OrderRequestRecord(
                 pagerColor, pagerNumber, items, discountCode, paymentMethod, payments,
                 idempotencyKey, skipPagerCheck, tableSessionId, preparadoEnComanda,
-                null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null);
     }
 
     /** Split de multipago: método + monto. */

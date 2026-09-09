@@ -110,6 +110,22 @@ public class GlobalExceptionHandler {
     }
 
     /** Un dato que no vale. El texto lo escribió quien validó, para una persona. */
+    /** V51: un campo del cuerpo de un código no vale. 400 con `campo`, el contrato de A/B/C. */
+    @ExceptionHandler(com.suresell.orders.application.usecase.CodigosDeProducto.CampoInvalido.class)
+    public ResponseEntity<Map<String, String>> handleCampoInvalido(
+            com.suresell.orders.application.usecase.CodigosDeProducto.CampoInvalido ex) {
+        Map<String, String> m = cuerpo("CAMPO_INVALIDO", ex.getMessage());
+        m.put("campo", ex.campo());
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(m);
+    }
+
+    /** V51: el producto al que se le quiere poner un código no está en este negocio. */
+    @ExceptionHandler(com.suresell.orders.application.usecase.CodigosDeProducto.ProductoInexistente.class)
+    public ResponseEntity<Map<String, String>> handleProductoInexistente(
+            com.suresell.orders.application.usecase.CodigosDeProducto.ProductoInexistente ex) {
+        return respuesta(HttpStatus.NOT_FOUND, "NO_EXISTE", ex.getMessage());
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Map<String, String>> handleIllegalArgumentException(IllegalArgumentException ex) {
         logger.info("Dato rechazado: {}", ex.getMessage());

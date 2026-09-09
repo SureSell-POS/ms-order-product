@@ -1,5 +1,4 @@
-# =====================================================================
-# MIGRACIONES DE ms-order-product-mt
+# ==============================================================# MIGRACIONES DE ms-order-product-mt
 #
 # Este archivo existe por dos accidentes reales, no por burocracia.
 #
@@ -26,8 +25,7 @@
 # `build/MIGRACIONES.txt.nuevo`. Se copia encima de este. Ese paso manual es
 # a proposito: sellar una migracion tiene que ser un acto consciente.
 #
-# =====================================================================
-
+# ==============================================================
 # RANGOS RESERVADOS -- no se solapan, y toda migracion cae en uno.
 # Al sumar una persona o una vertical a este servicio, se le reserva su rango
 # AQUI antes de que escriba la primera migracion.
@@ -85,4 +83,6 @@
 48	6c30d6850c441e50e097ea16c30c332519751896a36567687d3f8f9f68d4cfd8	V48__el_flujo_de_venta_es_un_dato.sql
 49	071b36c5d7e2937052803ac3e6a9522c037b216bcd1a2a60be5b98bbc3f952d7	V49__waiters_commission_percentage_que_faltaba_en_staging.sql
 50	4c31c8a5aec9a47e8c893cb6fc1767d0ff6fb0715075ae952978d51750fa226a	V50__el_terminal_es_del_negocio.sql
+51	d77000c3b48a2d3f0130e5250946371c8181f6aaa4083f235a1bed3fd4b3a160	V51__codigos_de_producto.sql
+52	09890a6f82d45b9081e8cddbf3546702432233be6bda05d0afa8e57bb185940f	V52__cobrado_no_impreso.sql
 53	7e9d0e4c006785b46b004678b1636e36a34233782dc002d9c957e05f5100218a	V53__la_categoria_de_un_producto_es_de_su_negocio.sql
