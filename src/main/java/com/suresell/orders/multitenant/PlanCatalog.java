@@ -57,6 +57,16 @@ public final class PlanCatalog {
      */
     public static final String PRODUCCION = "produccion";
 
+    /**
+     * V51 (venta rápida). «Vender sin registrar»: la caja acepta un producto
+     * que el catálogo no conoce, con nombre y precio tecleados, y lo deja en
+     * cola para registrarlo después. Es la misma puerta por la que se vendió
+     * sin catálogo antes; visible es mejor que silenciosa, pero ENCENDERLA es
+     * decisión de Santiago negocio a negocio: fuera de todo plan, nace apagada,
+     * el KAM la activa por override como `produccion`.
+     */
+    public static final String VENTA_SIN_REGISTRO = "venta_sin_registro";
+
     /** Módulos del panel que entran en el plan `pro`. */
     private static final List<String> PANEL_PRO =
             List.of(PANEL, ANALITICA, MENU_ADMIN, GASTOS);
@@ -84,7 +94,7 @@ public final class PlanCatalog {
     public static final Set<String> KNOWN = Set.of(
             VENTAS, HISTORIAL, CIERRE, DESCUENTOS, COCINA, MESEROS,
             PANEL, ANALITICA, NOMINA, EMPLEADOS, VALERAS, INSUMOS, COMPRAS,
-            GASTOS, CARTERA, MAYORISTA, MENU_ADMIN, PRODUCCION);
+            GASTOS, CARTERA, MAYORISTA, MENU_ADMIN, PRODUCCION, VENTA_SIN_REGISTRO);
 
     private static List<String> concat(List<String> a, List<String> b) {
         List<String> out = new java.util.ArrayList<>(a);
