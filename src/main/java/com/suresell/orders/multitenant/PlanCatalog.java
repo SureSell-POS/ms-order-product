@@ -49,6 +49,13 @@ public final class PlanCatalog {
      */
     public static final String MAYORISTA = "mayorista";
     public static final String MENU_ADMIN = "menu";
+    /**
+     * Ola 4 (A, a pedido de B). Producción es una capacidad del NEGOCIO, no de
+     * la vertical: la activa el KAM por override, como `mayorista`. Sin la
+     * constante, el override se descartaba en silencio (misma lección de
+     * `MAYORISTA`). Fuera de todo plan por defecto a propósito.
+     */
+    public static final String PRODUCCION = "produccion";
 
     /** Módulos del panel que entran en el plan `pro`. */
     private static final List<String> PANEL_PRO =
@@ -77,7 +84,7 @@ public final class PlanCatalog {
     public static final Set<String> KNOWN = Set.of(
             VENTAS, HISTORIAL, CIERRE, DESCUENTOS, COCINA, MESEROS,
             PANEL, ANALITICA, NOMINA, EMPLEADOS, VALERAS, INSUMOS, COMPRAS,
-            GASTOS, CARTERA, MAYORISTA, MENU_ADMIN);
+            GASTOS, CARTERA, MAYORISTA, MENU_ADMIN, PRODUCCION);
 
     private static List<String> concat(List<String> a, List<String> b) {
         List<String> out = new java.util.ArrayList<>(a);

@@ -152,7 +152,7 @@ public class SuperAdminService {
             PlanCatalog.PANEL, PlanCatalog.ANALITICA, PlanCatalog.MENU_ADMIN,
             PlanCatalog.GASTOS, PlanCatalog.NOMINA, PlanCatalog.EMPLEADOS,
             PlanCatalog.VALERAS, PlanCatalog.INSUMOS, PlanCatalog.COMPRAS,
-            PlanCatalog.CARTERA);
+            PlanCatalog.CARTERA, PlanCatalog.PRODUCCION);
 
     private static final Map<String, String> ETIQUETAS = Map.ofEntries(
             Map.entry(PlanCatalog.VENTAS, "Ventas (POS)"),
@@ -170,7 +170,8 @@ public class SuperAdminService {
             Map.entry(PlanCatalog.VALERAS, "Valeras"),
             Map.entry(PlanCatalog.INSUMOS, "Insumos"),
             Map.entry(PlanCatalog.COMPRAS, "Compras"),
-            Map.entry(PlanCatalog.CARTERA, "Cartera"));
+            Map.entry(PlanCatalog.CARTERA, "Cartera"),
+            Map.entry(PlanCatalog.PRODUCCION, "Producción (recetas de lo que se prepara)"));
 
     /** Crea un plan. El id es el slug con el que se guarda en `tenants.plan`. */
     public PlanRepository.Plan createPlan(String id, String name, String description,

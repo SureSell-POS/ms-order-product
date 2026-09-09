@@ -4,6 +4,8 @@ import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -17,6 +19,16 @@ import java.util.Optional;
  */
 @Component
 public class JwtTenantResolver {
+
+    private static final Logger log = LoggerFactory.getLogger(JwtTenantResolver.class);
+
+    private static String primeraLinea(String m) {
+        if (m == null) {
+            return "";
+        }
+        int corte = m.indexOf('\n');
+        return (corte < 0 ? m : m.substring(0, corte)).trim();
+    }
 
     private final SecretKey key;
 
@@ -85,6 +97,12 @@ public class JwtTenantResolver {
             return Optional.of(Jwts.parser().verifyWith(key).build()
                     .parseSignedClaims(token).getPayload());
         } catch (JwtException | IllegalArgumentException e) {
+            // El 401 que costó diez minutos: al usuario se le dice «sesión
+            // inválida» (a propósito ambiguo: no se le cuenta a un atacante si
+            // la firma o la fecha), pero al log SÍ se le cuenta por qué. Sin el
+            // token, que es un secreto.
+            log.warn("Token rechazado ({}): {}", e.getClass().getSimpleName(),
+                    primeraLinea(e.getMessage()));
             return Optional.empty();
         }
     }

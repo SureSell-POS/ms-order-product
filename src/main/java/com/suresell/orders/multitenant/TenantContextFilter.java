@@ -1,5 +1,8 @@
 package com.suresell.orders.multitenant;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -24,6 +27,9 @@ import java.util.Optional;
 @Component
 @Profile("cloud")
 public class TenantContextFilter extends OncePerRequestFilter {
+
+    private static final Logger log = LoggerFactory.getLogger(TenantContextFilter.class);
+
 
     private final JwtTenantResolver resolver;
 
@@ -59,6 +65,13 @@ public class TenantContextFilter extends OncePerRequestFilter {
             throws ServletException, IOException {
         Optional<String> tenant = resolver.resolveTenant(req.getHeader("Authorization"));
         if (tenant.isEmpty()) {
+            // Al cliente, ambiguo a propósito. Al log, el motivo: si no vino
+            // cabecera lo dice aquí; si vino y no vale, JwtTenantResolver ya
+            // dejó el porqué en la línea anterior.
+            String cabecera = req.getHeader("Authorization");
+            log.warn("401 en {} {}: {}", req.getMethod(), req.getRequestURI(),
+                    cabecera == null || cabecera.isBlank() ? "sin cabecera Authorization"
+                            : "token rechazado (ver la linea anterior)");
             res.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Token de tenant ausente o inválido");
             return;
         }
