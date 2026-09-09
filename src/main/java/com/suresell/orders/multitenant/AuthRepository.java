@@ -163,6 +163,23 @@ public class AuthRepository {
                 tenantId);
     }
 
+    /** Un usuario de la cuenta tal como lo ve el KAM (ola 4): con cuándo se creó. */
+    public record AdministradorDeLaCuenta(String email, String rol, boolean activo, java.time.Instant creadoEn) {}
+
+    /**
+     * Los usuarios del negocio por orden de creación. El primero es el correo
+     * principal: el del alta. La política de `users` es permisiva para
+     * `app_user` (V4), así que no hace falta negocio en sesión.
+     */
+    public List<AdministradorDeLaCuenta> listAdministradores(String tenantId) {
+        return jdbc.query(
+                "SELECT email, role, status, created_at FROM users WHERE tenant_id = ? ORDER BY created_at, id",
+                (rs, i) -> new AdministradorDeLaCuenta(rs.getString("email"), rs.getString("role"),
+                        "active".equalsIgnoreCase(rs.getString("status")),
+                        rs.getTimestamp("created_at").toInstant()),
+                tenantId);
+    }
+
     /** Overrides de módulos del tenant (F3, Inc.2). */
     public List<ModuleOverride> getOverrides(String tenantId) {
         return jdbc.query(

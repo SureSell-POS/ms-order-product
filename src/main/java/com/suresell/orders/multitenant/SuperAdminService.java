@@ -92,6 +92,40 @@ public class SuperAdminService {
                 cfg, users);
     }
 
+    // ---------- La cuenta del negocio, vista por el KAM (ola 4) ----------
+
+    public record Administrador(String email, String rol, boolean activo, java.time.Instant creadoEn) {}
+
+    /**
+     * Lo que el KAM ve al entrar a un negocio: el correo con el que se creó (el
+     * primer usuario), los administradores con su estado, y el estado de la
+     * cuenta. Nada de hashes ni de tokens.
+     */
+    public record Cuenta(String tenantId, String nombre, String estado, String correoPrincipal,
+                         java.time.Instant creadoEn, List<Administrador> administradores) {}
+
+    public Cuenta cuenta(String tenantId) {
+        authService.getModuleConfig(tenantId); // 404 si no existe
+        var item = saRepo.listTenants().stream().filter(t -> t.id().equals(tenantId)).findFirst();
+        List<Administrador> admins = authService.administradores(tenantId).stream()
+                .map(a -> new Administrador(a.email(), a.rol(), a.activo(), a.creadoEn()))
+                .toList();
+        // El correo principal es el del alta: el primero por fecha de creación.
+        var principal = admins.stream().findFirst();
+        return new Cuenta(tenantId,
+                item.map(SuperAdminRepository.TenantListItem::name).orElse(tenantId),
+                item.map(SuperAdminRepository.TenantListItem::status).orElse("active"),
+                principal.map(Administrador::email).orElse(null),
+                principal.map(Administrador::creadoEn).orElse(null),
+                admins);
+    }
+
+    /** El KAM restablece la clave de un administrador del negocio. Ver {@code AuthService.restablecerPorElKam}. */
+    public AuthService.EnvioDeReset restablecerClave(String tenantId, String email, String kam) {
+        authService.getModuleConfig(tenantId); // 404 si no existe
+        return authService.restablecerPorElKam(tenantId, email, kam);
+    }
+
     public void setPlan(String tenantId, String plan) {
         String p = plan == null ? "" : plan.trim().toLowerCase();
         // Se valida contra el catálogo REAL: con un Set quemado, un plan creado

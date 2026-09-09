@@ -513,4 +513,60 @@ class AuthServiceTest {
                 () -> newService(repo).resetPassword("tok", "123"));
         assertEquals(400, ex.status());
     }
+
+    // ----------------------------------------------------------------- ola 4
+
+    @org.junit.jupiter.api.Test
+    @org.junit.jupiter.api.DisplayName("el KAM no puede pedir un reset para un correo de OTRO negocio, y el 404 no distingue")
+    void kamNoRestableceCorreoDeOtroNegocio() {
+        AuthRepository repo = mock(AuthRepository.class);
+        when(repo.buscarUsuarioParaLogin("u@x.co")).thenReturn(Optional.of(
+                new AuthRepository.UsuarioParaLogin("u@x.co", "otro", "hash", "admin", true)));
+
+        AuthException ex = assertThrows(AuthException.class,
+                () -> newService(repo).restablecerPorElKam("t1", "u@x.co", "kam@suresell.com.co"));
+        org.assertj.core.api.Assertions.assertThat(ex.status()).isEqualTo(404);
+        org.assertj.core.api.Assertions.assertThat(ex.getMessage()).doesNotContain("otro");
+        org.mockito.Mockito.verify(repo, org.mockito.Mockito.never())
+                .insertReset(anyString(), anyString(), anyString(), org.mockito.ArgumentMatchers.any());
+    }
+
+    @org.junit.jupiter.api.Test
+    @org.junit.jupiter.api.DisplayName("un cajero no es administrador: el KAM no le restablece la clave por aquí")
+    void kamSoloRestableceAdministradores() {
+        AuthRepository repo = mock(AuthRepository.class);
+        when(repo.buscarUsuarioParaLogin("c@x.co")).thenReturn(Optional.of(
+                new AuthRepository.UsuarioParaLogin("c@x.co", "t1", "hash", "cajero", true)));
+
+        AuthException ex = assertThrows(AuthException.class,
+                () -> newService(repo).restablecerPorElKam("t1", "c@x.co", "kam@suresell.com.co"));
+        org.assertj.core.api.Assertions.assertThat(ex.status()).isEqualTo(404);
+    }
+
+    @org.junit.jupiter.api.Test
+    @org.junit.jupiter.api.DisplayName("sin proveedor de correo el KAM recibe la verdad: no se envió; el enlace solo si el entorno lo expone")
+    void kamSinProveedorRecibeLaVerdad() throws Exception {
+        AuthRepository repo = mock(AuthRepository.class);
+        when(repo.buscarUsuarioParaLogin("a@x.co")).thenReturn(Optional.of(
+                new AuthRepository.UsuarioParaLogin("a@x.co", "t1", "hash", "admin", true)));
+        AuthService svc = newService(repo);
+        // En pruebas los @Value de campo no se inyectan: el TTL sería 0.
+        var ttl = AuthService.class.getDeclaredField("resetTtlMinutes");
+        ttl.setAccessible(true);
+        ttl.setLong(svc, 30);
+
+        AuthService.EnvioDeReset sinExponer = svc.restablecerPorElKam("t1", "a@x.co", "kam@suresell.com.co");
+        org.assertj.core.api.Assertions.assertThat(sinExponer.enviado()).isFalse();
+        org.assertj.core.api.Assertions.assertThat(sinExponer.enlace()).isNull();
+        org.mockito.Mockito.verify(repo).insertReset(anyString(), org.mockito.ArgumentMatchers.eq("a@x.co"),
+                org.mockito.ArgumentMatchers.eq("t1"), org.mockito.ArgumentMatchers.any());
+
+        var campo = AuthService.class.getDeclaredField("resetExposeLink");
+        campo.setAccessible(true);
+        campo.setBoolean(svc, true);
+        AuthService.EnvioDeReset expuesto = svc.restablecerPorElKam("t1", "a@x.co", "kam@suresell.com.co");
+        org.assertj.core.api.Assertions.assertThat(expuesto.enviado()).isFalse();
+        org.assertj.core.api.Assertions.assertThat(expuesto.enlace()).isNotBlank();
+        org.assertj.core.api.Assertions.assertThat(expuesto.expira()).isAfter(java.time.Instant.now());
+    }
 }

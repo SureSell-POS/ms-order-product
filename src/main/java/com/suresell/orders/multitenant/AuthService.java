@@ -32,6 +32,8 @@ import java.util.Set;
 @Profile("cloud")
 public class AuthService {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(AuthService.class);
+
     private static final String DEFAULT_PLAN = "pro";
     private static final String ADMIN_ROLE = "admin";
 
@@ -476,9 +478,19 @@ public class AuthService {
     }
 
     /** Envía el email de reset vía la Edge Function de Supabase (si está configurada). */
-    private void sendResetEmail(String to, String link) {
+    /** Qué pasó con el correo de reset. Antes se tiraba: el KAM y el log creían que salía. */
+    public enum CorreoDeReset { ENVIADO, SIN_PROVEEDOR, FALLO }
+
+    /**
+     * Manda el correo de reset y DICE qué pasó. Sigue siendo best-effort (un
+     * fallo no rompe el flujo público), pero ya no es mudo: el código de
+     * respuesta del proveedor y la excepción quedan en el log (WARN), y quien
+     * llama sabe si salió. Hasta la ola 4 esto descartaba la respuesta y vaciaba
+     * la excepción: «Reset de contraseña del POS silencioso».
+     */
+    CorreoDeReset sendResetEmail(String to, String link) {
         if (isBlank(resetEdgeUrl)) {
-            return; // sin proveedor configurado: staging usa expose-link
+            return CorreoDeReset.SIN_PROVEEDOR; // staging usa expose-link
         }
         try {
             String body = "{\"to\":" + jsonStr(to) + ",\"link\":" + jsonStr(link) + "}";
@@ -489,11 +501,71 @@ public class AuthService {
                     .timeout(java.time.Duration.ofSeconds(8))
                     .POST(java.net.http.HttpRequest.BodyPublishers.ofString(body))
                     .build();
-            java.net.http.HttpClient.newHttpClient()
-                    .send(req, java.net.http.HttpResponse.BodyHandlers.discarding());
+            var res = java.net.http.HttpClient.newHttpClient()
+                    .send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+            if (res.statusCode() >= 200 && res.statusCode() < 300) {
+                return CorreoDeReset.ENVIADO;
+            }
+            log.warn("El proveedor de correo respondio {} al reset de {}: {}", res.statusCode(), to,
+                    res.body() == null ? "" : res.body().lines().findFirst().orElse(""));
+            return CorreoDeReset.FALLO;
         } catch (Exception e) {
-            /* best-effort: un fallo de email no rompe el flujo */
+            log.warn("No se pudo mandar el correo de reset a {}: {} {}", to,
+                    e.getClass().getSimpleName(), e.getMessage());
+            return CorreoDeReset.FALLO;
         }
+    }
+
+    /** Los usuarios del negocio por orden de creación, para la vista de cuenta del KAM. */
+    public List<AuthRepository.AdministradorDeLaCuenta> administradores(String tenantId) {
+        return repo.listAdministradores(tenantId);
+    }
+
+    /** Lo que el KAM recibe al pedir un reset para un administrador (ola 4). */
+    public record EnvioDeReset(boolean enviado, String enlace, Instant expira, String motivo) {}
+
+    /**
+     * El KAM restablece la clave de un administrador de un negocio, con el mismo
+     * mecanismo que «olvidé mi clave»: token de un solo uso, con vencimiento,
+     * por correo. Sin clave temporal: una clave que viaja por chat es una clave
+     * que alguien más ve.
+     *
+     * <p>Devuelve la verdad: si el correo salió, si no hay proveedor (staging;
+     * entonces el enlace viene en la respuesta para que el KAM lo entregue) o si
+     * el proveedor falló (sin enlace: se reintenta cuando el correo funcione).
+     * El correo tiene que ser de un administrador DE ESE negocio; si no, 404 con
+     * un texto que no distingue «no existe» de «es de otro negocio».
+     *
+     * <p>Deja huella: quién (KAM), a quién, en qué negocio y qué pasó.
+     */
+    @Transactional
+    public EnvioDeReset restablecerPorElKam(String tenantId, String email, String kam) {
+        if (isBlank(tenantId) || isBlank(email)) {
+            throw new AuthException(400, "Negocio y correo son requeridos");
+        }
+        var user = repo.buscarUsuarioParaLogin(email.trim())
+                .filter(u -> tenantId.equals(u.tenantId()))
+                .filter(u -> "admin".equalsIgnoreCase(u.rol()))
+                .orElseThrow(() -> new AuthException(404,
+                        "No hay un administrador con ese correo en este negocio."));
+        String token = randomToken();
+        Instant expires = Instant.now().plus(resetTtlMinutes, ChronoUnit.MINUTES);
+        repo.fijarNegocioEnLaTransaccion(user.tenantId());
+        repo.insertReset(sha256(token), user.email(), user.tenantId(), expires);
+        String link = buildResetLink(token);
+        CorreoDeReset correo = sendResetEmail(user.email(), link);
+        log.info("El KAM {} pidio restablecer la clave de {} en el negocio {}: correo {}",
+                kam, user.email(), user.tenantId(), correo);
+        return switch (correo) {
+            case ENVIADO -> new EnvioDeReset(true, resetExposeLink ? link : null, expires,
+                    "Correo enviado a " + user.email() + ".");
+            case SIN_PROVEEDOR -> new EnvioDeReset(false, resetExposeLink ? link : null, expires,
+                    resetExposeLink
+                            ? "Sin proveedor de correo en este entorno: entrega el enlace tú."
+                            : "Sin proveedor de correo en este entorno y sin permiso para exponer el enlace.");
+            case FALLO -> new EnvioDeReset(false, null, expires,
+                    "El proveedor de correo fallo; queda en el registro. Vuelve a intentarlo.");
+        };
     }
 
     private static String jsonStr(String s) {

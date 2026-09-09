@@ -87,4 +87,37 @@ class SuperAdminServiceTest {
                 () -> svc(r, mock(AuthService.class)).setPlan("nope", "pro"));
         assertEquals(404, ex.status());
     }
+
+    // ----------------------------------------------------------------- ola 4
+
+    @org.junit.jupiter.api.Test
+    void laCuentaDiceElCorreoPrincipalYLosAdministradores() {
+        SuperAdminRepository r = mock(SuperAdminRepository.class);
+        AuthService a = mock(AuthService.class);
+        java.time.Instant alta = java.time.Instant.parse("2026-09-01T10:00:00Z");
+        org.mockito.Mockito.when(a.administradores("t1")).thenReturn(java.util.List.of(
+                new AuthRepository.AdministradorDeLaCuenta("dueno@x.co", "admin", true, alta),
+                new AuthRepository.AdministradorDeLaCuenta("socio@x.co", "admin", false, alta.plusSeconds(60)),
+                new AuthRepository.AdministradorDeLaCuenta("caja@x.co", "cajero", true, alta.plusSeconds(120))));
+
+        SuperAdminService.Cuenta c = svc(r, a).cuenta("t1");
+
+        org.assertj.core.api.Assertions.assertThat(c.correoPrincipal()).isEqualTo("dueno@x.co");
+        org.assertj.core.api.Assertions.assertThat(c.creadoEn()).isEqualTo(alta);
+        org.assertj.core.api.Assertions.assertThat(c.administradores()).hasSize(3);
+        org.assertj.core.api.Assertions.assertThat(c.administradores().get(1).activo()).isFalse();
+        org.assertj.core.api.Assertions.assertThat(c.estado()).isEqualTo("active");
+    }
+
+    @org.junit.jupiter.api.Test
+    void restablecerClaveDelegaConElKamQueLoPidio() {
+        SuperAdminRepository r = mock(SuperAdminRepository.class);
+        AuthService a = mock(AuthService.class);
+        var envio = new AuthService.EnvioDeReset(true, null, java.time.Instant.now(), "Correo enviado.");
+        org.mockito.Mockito.when(a.restablecerPorElKam("t1", "dueno@x.co", "kam@suresell.com.co")).thenReturn(envio);
+
+        org.assertj.core.api.Assertions.assertThat(svc(r, a).restablecerClave("t1", "dueno@x.co", "kam@suresell.com.co"))
+                .isSameAs(envio);
+        org.mockito.Mockito.verify(a).getModuleConfig("t1");
+    }
 }

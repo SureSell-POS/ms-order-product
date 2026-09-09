@@ -85,6 +85,43 @@ public class SuperAdminController {
         }
     }
 
+    /**
+     * Ola 4: la cuenta del negocio como la ve el KAM (correo principal,
+     * administradores con estado, estado de la cuenta). Sin hashes ni tokens.
+     */
+    @GetMapping("/admin/tenants/{id}/cuenta")
+    public ResponseEntity<?> cuenta(@PathVariable String id, HttpServletRequest http) {
+        ResponseEntity<?> guard = requireSuper(http);
+        if (guard != null) {
+            return guard;
+        }
+        try {
+            return ResponseEntity.ok(svc.cuenta(id));
+        } catch (AuthException e) {
+            return err(e);
+        }
+    }
+
+    /**
+     * Ola 4: el KAM restablece la clave de un administrador con el flujo de
+     * reset que ya existe (token de un solo uso, con vencimiento, por correo).
+     * No hay clave temporal. Deja huella en el log con quién lo pidió.
+     */
+    @PostMapping("/admin/tenants/{id}/administradores/{email}/restablecer-clave")
+    public ResponseEntity<?> restablecerClave(@PathVariable String id, @PathVariable String email,
+                                              HttpServletRequest http) {
+        ResponseEntity<?> guard = requireSuper(http);
+        if (guard != null) {
+            return guard;
+        }
+        try {
+            String quien = resolver.superAdminEmail(http.getHeader("Authorization"));
+            return ResponseEntity.ok(svc.restablecerClave(id, email, quien));
+        } catch (AuthException e) {
+            return err(e);
+        }
+    }
+
     @PutMapping("/admin/tenants/{id}/plan")
     public ResponseEntity<?> setPlan(@PathVariable String id, @RequestBody PlanRequest req,
                                      HttpServletRequest http) {
