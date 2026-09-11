@@ -124,11 +124,11 @@ public class RegistroRapidoEnCaja {
         // 2 · El PIN es la puerta (403).
         if (!sites.tienePinRegistro()) {
             throw new PinRechazado("SIN_PIN",
-                    "El administrador aún no configuró el PIN de registro (panel → Caja).");
+                    "El administrador aún no configuró la clave para registrar desde la caja (panel → Caja).");
         }
         if (!sites.pinRegistroCorrecto(cuerpo.pin())) {
             limite.anotarFallo(tenant);
-            throw new PinRechazado("PIN_INCORRECTO", "PIN incorrecto.");
+            throw new PinRechazado("PIN_INCORRECTO", "Clave incorrecta.");
         }
         limite.reiniciar(tenant);
 
@@ -345,7 +345,7 @@ public class RegistroRapidoEnCaja {
     /** 409 {@code LIMITE_DIARIO}. */
     public static class LimiteDiario extends RuntimeException {
         public LimiteDiario(int max) {
-            super("Hoy ya se registraron " + max + " productos desde la caja.");
+            super("Hoy ya se registraron " + max + " desde la caja, que es el máximo del día. Mañana se puede de nuevo; mientras, créalo en el panel.");
         }
     }
 

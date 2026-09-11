@@ -301,7 +301,7 @@ class RegistroRapidoEnCajaTest {
         assertThat(tercero.getResponse().getStatus()).isEqualTo(409);
         JsonNode e = leer(tercero);
         assertThat(e.get("codigo").asText()).isEqualTo("LIMITE_DIARIO");
-        assertThat(e.get("mensaje").asText()).isEqualTo("Hoy ya se registraron 2 productos desde la caja.");
+        assertThat(e.get("mensaje").asText()).isEqualTo("Hoy ya se registraron 2 desde la caja, que es el máximo del día. Mañana se puede de nuevo; mientras, créalo en el panel.");
         assertThat(contar("SELECT count(*) FROM codigos_de_producto WHERE codigo = '1003'")).isZero();
     }
 

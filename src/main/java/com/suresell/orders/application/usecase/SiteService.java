@@ -117,7 +117,7 @@ public class SiteService {
                 sede.setPinRegistroCajaHash(null);
             } else {
                 if (limpio.length() < 4 || limpio.length() > 12) {
-                    throw new CodigosDeProducto.CampoInvalido("pin", "El PIN tiene que tener entre 4 y 12 caracteres.");
+                    throw new CodigosDeProducto.CampoInvalido("pin", "La clave tiene que tener entre 4 y 12 caracteres.");
                 }
                 sede.setPinRegistroCajaHash(codificadorDePin.encode(limpio));
             }
