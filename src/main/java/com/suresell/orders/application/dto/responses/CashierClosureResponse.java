@@ -9,6 +9,10 @@ import java.util.Map;
  * cobrar al dividir cuentas de mesa entre comensales — se reporta como línea
  * propia porque un descuadre silencioso rompería la promesa de un cierre
  * auditable al peso.
+ *
+ * <p>{@code turno} (V55, aditivo): el número del turno que acaba de cerrarse.
+ * {@code baseToKeep} es el eco de la base usada: la declarada por el cajero,
+ * o la {@code base_caja} del negocio, o 0.
  */
 public record CashierClosureResponse(
         String status,
@@ -16,5 +20,6 @@ public record CashierClosureResponse(
         Map<String, BigDecimal> shortages,
         BigDecimal baseToKeep,
         BigDecimal amountToDeposit,
-        BigDecimal roundingAdjustment
+        BigDecimal roundingAdjustment,
+        Integer turno
 ) {}

@@ -39,8 +39,23 @@ public class DailyClosure implements Persistable<UUID>, com.suresell.orders.mult
     @Column(name = "closing_time")
     private LocalDateTime closingTime;
 
-    @Column(name = "closure_date", unique = true)
+    /**
+     * V55: ya no es único. Un cierre es un turno y un día tiene los que haga
+     * falta; la unicidad es (negocio, fecha, turno) y la pone la base.
+     */
+    @Column(name = "closure_date")
     private LocalDate closureDate;
+
+    /**
+     * V55: número del turno dentro del día (1, 2, 3…). Lo calcula el servidor
+     * al cerrar: el último turno de hoy + 1. Las filas anteriores a V55 son
+     * turno 1. El {@code ColumnDefault} es para el perfil local (SQLite con
+     * {@code ddl-auto: update}), que no puede añadir una columna NOT NULL sin
+     * valor por defecto a una tabla con filas; en Postgres la pone V55.
+     */
+    @org.hibernate.annotations.ColumnDefault("1")
+    @Column(name = "turno", nullable = false)
+    private Integer turno = 1;
 
     @Column(name = "total_expected_cash", precision = 15, scale = 2)
     private BigDecimal totalExpectedCash;

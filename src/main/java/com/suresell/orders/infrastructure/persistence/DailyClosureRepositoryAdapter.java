@@ -3,6 +3,7 @@ import com.suresell.orders.domain.model.DailyClosure;
 import com.suresell.orders.domain.port.out.DailyClosureRepositoryPort;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -29,5 +30,13 @@ public class DailyClosureRepositoryAdapter implements DailyClosureRepositoryPort
     @Override
     public List<DailyClosure> findAllClosuresOrderByDateDesc() {
         return dailyClosureRepository.findAllClosuresOrderByDateDesc();
+    }
+    @Override
+    public int countClosuresOn(LocalDate closureDate) {
+        return dailyClosureRepository.countByClosureDate(closureDate);
+    }
+    @Override
+    public int ultimoTurnoDel(LocalDate closureDate) {
+        return dailyClosureRepository.ultimoTurnoDelDia(closureDate);
     }
 }

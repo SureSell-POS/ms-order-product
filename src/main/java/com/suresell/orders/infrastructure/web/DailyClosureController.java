@@ -50,28 +50,20 @@ public class DailyClosureController {
             throw new RuntimeException("Error al generar preview de cierre: " + e.getMessage());
         }
     }
+    /**
+     * V55 — Un cierre es un turno; el día admite los que haga falta. Ya no hay
+     * «la caja de hoy ya fue cerrada» ni {@code alreadyClosed}: si dos
+     * terminales cierran el mismo turno a la vez, el caso de uso traduce el
+     * choque de unicidad a {@code TurnoYaCerradoException} y el
+     * {@code GlobalExceptionHandler} lo devuelve como 409 con el texto del contrato.
+     */
     @PostMapping
-    @Operation(summary = "Ejecutar cierre de caja físico")
-    public ResponseEntity<?> executeClosure(
+    @Operation(summary = "Cerrar el turno de caja",
+            description = "`turno` lo calcula el servidor. `baseForNextDay` opcional (≥ 0); sin él, base_caja del negocio; sin ella, 0.")
+    public ResponseEntity<CashierClosureResponse> executeClosure(
             @Valid @RequestBody ExecuteClosureRequest request,
             @RequestHeader(value = "X-User-Name", defaultValue = "System") String userName) {
-        try {
-            CashierClosureResponse response = executeDailyClosureUseCase.execute(request, userName);
-            return ResponseEntity.ok(response);
-        } catch (org.springframework.dao.DataIntegrityViolationException e) {
-            // N2 — La caja de hoy YA está cerrada (índice único por tenant+fecha).
-            // Antes esto salía como 500 "Internal Server Error" y el cajero no
-            // sabía si el cierre había quedado bien o no; en realidad el primero
-            // sí se guardó y este era un segundo intento.
-            String detalle = String.valueOf(e.getMostSpecificCause().getMessage());
-            if (detalle.contains("uq_daily_closures_tenant_date")) {
-                return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of(
-                        "error", "La caja de hoy ya fue cerrada. El cierre anterior quedó "
-                               + "guardado; revísalo en el historial de cierres.",
-                        "alreadyClosed", true));
-            }
-            throw e;
-        }
+        return ResponseEntity.ok(executeDailyClosureUseCase.execute(request, userName));
     }
     @ExceptionHandler(value = {MethodArgumentNotValidException.class})
     public ResponseEntity<Map<String, Object>> handleValidationExceptions(MethodArgumentNotValidException ex) {

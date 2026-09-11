@@ -35,10 +35,10 @@ class FinanceReferenceTest {
         assertEquals(0, cash.calculateTotalCash(sample).compareTo(new BigDecimal("992100")));
     }
 
-    @Test
-    void baseDiaSiguiente_referencia() {
-        assertEquals(0, cash.calculateBaseForNextDay(sample).compareTo(new BigDecimal("502100")));
-    }
+    // `baseDiaSiguiente_referencia` se fue con `calculateBaseForNextDay` (V55):
+    // la base ya no se calcula por denominaciones; la configura el negocio
+    // (`sites.base_caja`) y la declara el cajero al cerrar. Si el motor TS
+    // conserva su vector de base, ya no tiene contraparte en Java.
 
     @Test
     void descuentos_referencia() {

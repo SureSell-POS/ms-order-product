@@ -59,10 +59,16 @@ public class GlobalExceptionHandler {
     private static final String REGLA_INCUMPLIDA = "23514";
     private static final String NO_NULO = "23502";
 
+    /**
+     * {@code message} y {@code mensaje} llevan el mismo texto: el panel y el
+     * POS leen los dos (el inventario siempre dijo {@code mensaje}; el contrato
+     * de la caja por turnos, V55, también). Aditivo.
+     */
     private static Map<String, String> cuerpo(String codigo, String mensaje) {
         Map<String, String> m = new LinkedHashMap<>();
         m.put("error", codigo);
         m.put("message", mensaje);
+        m.put("mensaje", mensaje);
         return m;
     }
 
@@ -124,6 +130,87 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Map<String, String>> handleProductoInexistente(
             com.suresell.orders.application.usecase.CodigosDeProducto.ProductoInexistente ex) {
         return respuesta(HttpStatus.NOT_FOUND, "NO_EXISTE", ex.getMessage());
+    }
+
+    // ---- V55: caja por turnos y registro en caja -------------------------
+
+    /**
+     * Dos cierres del mismo turno a la vez. El contrato pide el texto en
+     * {@code error} (es lo que el POS ya pintaba) y sin {@code alreadyClosed};
+     * {@code codigo} lleva el identificador estable.
+     */
+    @ExceptionHandler(TurnoYaCerradoException.class)
+    public ResponseEntity<Map<String, String>> handleTurnoYaCerrado(TurnoYaCerradoException ex) {
+        logger.info("Rechazo de negocio (TURNO_YA_CERRADO): {}", ex.getMessage());
+        Map<String, String> m = cuerpo(ex.getMessage(), ex.getMessage());
+        m.put("codigo", "TURNO_YA_CERRADO");
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(m);
+    }
+
+    @ExceptionHandler(SoloAdministradorException.class)
+    public ResponseEntity<Map<String, String>> handleSoloAdministrador(SoloAdministradorException ex) {
+        logger.info("Rechazo por rol: {}", ex.getMessage());
+        Map<String, String> m = cuerpo("SOLO_ADMINISTRADOR", ex.getMessage());
+        m.put("codigo", "SOLO_ADMINISTRADOR");
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(m);
+    }
+
+    @ExceptionHandler(com.suresell.orders.application.usecase.RegistroRapidoEnCaja.PinRechazado.class)
+    public ResponseEntity<Map<String, String>> handlePinRechazado(
+            com.suresell.orders.application.usecase.RegistroRapidoEnCaja.PinRechazado ex) {
+        logger.info("Registro en caja rechazado ({}): {}", ex.codigo(), ex.getMessage());
+        Map<String, String> m = cuerpo(ex.codigo(), ex.getMessage());
+        m.put("codigo", ex.codigo());
+        m.put("campo", "pin");
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(m);
+    }
+
+    /** El código ya es de otro producto: va con su id para que el POS lo añada sin otra llamada. */
+    @ExceptionHandler(com.suresell.orders.application.usecase.RegistroRapidoEnCaja.CodigoYaExiste.class)
+    public ResponseEntity<Map<String, String>> handleCodigoYaExiste(
+            com.suresell.orders.application.usecase.RegistroRapidoEnCaja.CodigoYaExiste ex) {
+        logger.info("Registro en caja: código ya existente ({})", ex.productoId());
+        Map<String, String> m = cuerpo("YA_EXISTE", ex.getMessage());
+        m.put("codigo", "YA_EXISTE");
+        m.put("campo", "codigo");
+        m.put("productoId", ex.productoId());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(m);
+    }
+
+    @ExceptionHandler(com.suresell.orders.application.usecase.RegistroRapidoEnCaja.LimiteDiario.class)
+    public ResponseEntity<Map<String, String>> handleLimiteDiario(
+            com.suresell.orders.application.usecase.RegistroRapidoEnCaja.LimiteDiario ex) {
+        logger.info("Registro en caja: {}", ex.getMessage());
+        Map<String, String> m = cuerpo("LIMITE_DIARIO", ex.getMessage());
+        m.put("codigo", "LIMITE_DIARIO");
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(m);
+    }
+
+    /**
+     * 5 claves incorrectas en 10 minutos para el negocio. El texto va en
+     * {@code error} y en {@code mensaje} (lo pidió así la coordinación, igual
+     * que el 409 del turno); {@code codigo} es el identificador estable y
+     * {@code Retry-After} dice cuántos segundos faltan para el siguiente intento.
+     */
+    @ExceptionHandler(com.suresell.orders.application.usecase.LimiteDeClavesDeRegistro.DemasiadosIntentos.class)
+    public ResponseEntity<Map<String, String>> handleDemasiadosIntentos(
+            com.suresell.orders.application.usecase.LimiteDeClavesDeRegistro.DemasiadosIntentos ex) {
+        logger.warn("Registro en caja bloqueado por claves incorrectas ({} s de espera)", ex.segundos());
+        Map<String, String> m = cuerpo(ex.getMessage(), ex.getMessage());
+        m.put("codigo", "DEMASIADOS_INTENTOS");
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .header(org.springframework.http.HttpHeaders.RETRY_AFTER, String.valueOf(ex.segundos()))
+                .body(m);
+    }
+
+    @ExceptionHandler(com.suresell.orders.application.usecase.RegistroRapidoEnCaja.CategoriaInexistente.class)
+    public ResponseEntity<Map<String, String>> handleCategoriaInexistente(
+            com.suresell.orders.application.usecase.RegistroRapidoEnCaja.CategoriaInexistente ex) {
+        logger.info("Registro en caja: {}", ex.getMessage());
+        Map<String, String> m = cuerpo("CATEGORIA_INEXISTENTE", ex.getMessage());
+        m.put("codigo", "CATEGORIA_INEXISTENTE");
+        m.put("campo", "categoriaId");
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(m);
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

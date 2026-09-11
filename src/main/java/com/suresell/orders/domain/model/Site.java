@@ -80,6 +80,40 @@ public class Site implements com.suresell.orders.multitenant.TenantOwned {
     @Column(name = "imprime_tirilla", nullable = false)
     private Boolean imprimeTirilla = true;
 
+    // ------------------------------------------------------------------
+    // V55 — Configuración de caja. Vive en la sede por defecto del negocio
+    // hasta que el cierre sea por sede.
+    // ------------------------------------------------------------------
+
+    /**
+     * Cuánto deja el negocio en caja para la siguiente apertura. El sistema
+     * NO la calcula por denominaciones: la configura el administrador y el
+     * cajero la ve precargada al cerrar. {@code null} = sin configurar (0).
+     */
+    @Column(name = "base_caja", precision = 15, scale = 2)
+    private java.math.BigDecimal baseCaja;
+
+    /**
+     * Hash BCrypt del PIN que autoriza registrar productos desde la caja.
+     * Nunca se devuelve al cliente; {@code null} = la caja no registra.
+     *
+     * <p>{@code @JsonIgnore} no es decoración: {@code GET /account/sites}
+     * serializa la entidad entera para CUALQUIER sesión del negocio, cajeros
+     * incluidos. Sin él, el hash viajaría a la caja que el PIN tiene que frenar.
+     */
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    @Column(name = "pin_registro_caja_hash")
+    private String pinRegistroCajaHash;
+
+    /** Tope de productos registrados desde la caja por día (hora de Bogotá). */
+    @org.hibernate.annotations.ColumnDefault("30")
+    @Column(name = "max_registros_caja_por_dia", nullable = false)
+    private Integer maxRegistrosCajaPorDia = 30;
+
+    public boolean tienePinRegistro() {
+        return pinRegistroCajaHash != null && !pinRegistroCajaHash.isBlank();
+    }
+
     public boolean esRestaurante() {
         return MODO_RESTAURANTE.equalsIgnoreCase(posMode);
     }

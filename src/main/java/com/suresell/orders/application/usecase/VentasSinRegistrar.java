@@ -19,6 +19,10 @@ import java.util.Map;
  * veces · la última el …». Es lo que el panel lista para registrarlos; el
  * botón «Registrar» (alta única de B) queda documentado como siguiente paso.
  * Una consulta agrupada; el aislamiento lo pone RLS.
+ *
+ * <p>Desde V55 excluye las líneas cuyo código ya es un código vigente de un
+ * producto del negocio (antes lo filtraba el panel a mano). La forma de la
+ * respuesta no cambia.
  */
 @Service
 public class VentasSinRegistrar {
@@ -53,6 +57,14 @@ public class VentasSinRegistrar {
                      WHERE oi.product_id LIKE ?
                        AND COALESCE(oi.created_at, o.created_at) >= now() - make_interval(days => ?)
                   ) lineas
+                 -- Fuera lo que ya tiene dueño: si el código leído es hoy un código
+                 -- VIGENTE de un producto del negocio (V51; RLS acota al negocio),
+                 -- ese pendiente ya se resolvió —en la caja (registro rápido, V55)
+                 -- o en el panel— y la cola no lo vuelve a ofrecer. Un código
+                 -- retirado no cuenta: ya no es de nadie. Sin código, se queda.
+                 WHERE NOT EXISTS (
+                       SELECT 1 FROM public.codigos_de_producto c
+                        WHERE c.codigo = lineas.codigo AND c.retirado_en IS NULL)
                  GROUP BY nombre, codigo, precio
                  ORDER BY ultima_venta DESC""",
                 (rs, i) -> new Pendiente(

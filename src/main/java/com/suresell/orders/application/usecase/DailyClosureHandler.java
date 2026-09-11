@@ -30,6 +30,8 @@ implements DailyClosurePort {
     private final OrderRepositoryPort orderRepositoryPort;
     private final com.suresell.orders.domain.port.out.SyncOutboxRepositoryPort syncOutboxRepositoryPort;
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+    /** V55: `base_caja` del negocio para `baseInicial` y `baseSugerida`. */
+    private final SiteService siteService;
     private static final String PAYMENT_CASH = "CASH";
     private static final String PAYMENT_CARD = "CARD";
     private static final String PAYMENT_NEQUI = "NEQUI";
@@ -56,7 +58,19 @@ implements DailyClosurePort {
         BigDecimal totalCash = BigDecimal.ZERO;
         BigDecimal totalCard = BigDecimal.ZERO;
         BigDecimal totalQr = BigDecimal.ZERO;
-        BigDecimal baseBalance = cierreAnterior.map(DailyClosure::getBaseBalanceForNextDay).orElse(BigDecimal.ZERO);
+        // V55: con lo que arrancó este turno —la base que dejó el cierre
+        // anterior (también si fue hoy); si no hay, la configurada; si no, 0.
+        // Y lo que se precarga como base a dejar: siempre la configurada.
+        Optional<BigDecimal> baseConfigurada = siteService.baseCajaConfigurada();
+        BigDecimal baseBalance = cierreAnterior
+                .map(DailyClosure::getBaseBalanceForNextDay)
+                .orElseGet(() -> baseConfigurada.orElse(BigDecimal.ZERO));
+        BigDecimal baseSugerida = baseConfigurada.orElse(BigDecimal.ZERO);
+        // El turno que se va a cerrar sale de la MISMA cuenta que usará el
+        // cierre (`ExecuteDailyClosureUseCase`): el último turno de hoy + 1.
+        LocalDate hoy = LocalDate.now(BOGOTA_ZONE);
+        int cierresHoy = this.closureRepositoryPort.countClosuresOn(hoy);
+        int turno = this.closureRepositoryPort.ultimoTurnoDel(hoy) + 1;
         for (Object[] result : results) {
             String paymentMethod = (String)result[0];
             BigDecimal sumTotal = result[1] == null ? BigDecimal.ZERO : (BigDecimal) result[1];
@@ -102,7 +116,12 @@ implements DailyClosurePort {
                 totalQr,
                 totalExpected,
                 baseBalance,
-                "Preview de cierre generado correctamente para el d\u00eda actual.");
+                "Preview de cierre generado correctamente para el d\u00eda actual.",
+                turno,
+                cierresHoy,
+                ventanaDesde,
+                baseBalance,
+                baseSugerida);
     }
     @Transactional
     public ClosureResponse executeClosure(ClosureRequest request) {
@@ -203,10 +222,11 @@ implements DailyClosurePort {
             default -> "Cierre ejecutado";
         };
     }
-    public DailyClosureHandler(DailyClosureRepositoryPort closureRepositoryPort, OrderRepositoryPort orderRepositoryPort, com.suresell.orders.domain.port.out.SyncOutboxRepositoryPort syncOutboxRepositoryPort, com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
+    public DailyClosureHandler(DailyClosureRepositoryPort closureRepositoryPort, OrderRepositoryPort orderRepositoryPort, com.suresell.orders.domain.port.out.SyncOutboxRepositoryPort syncOutboxRepositoryPort, com.fasterxml.jackson.databind.ObjectMapper objectMapper, SiteService siteService) {
         this.closureRepositoryPort = closureRepositoryPort;
         this.orderRepositoryPort = orderRepositoryPort;
         this.syncOutboxRepositoryPort = syncOutboxRepositoryPort;
         this.objectMapper = objectMapper;
+        this.siteService = siteService;
     }
 }

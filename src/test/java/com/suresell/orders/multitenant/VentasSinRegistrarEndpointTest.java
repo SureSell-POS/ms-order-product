@@ -109,4 +109,47 @@ class VentasSinRegistrarEndpointTest {
                 .andExpect(jsonPath("$", hasSize(1)))
                 .andExpect(jsonPath("$[0].nombre").value("Ajeno"));
     }
+
+    @Test
+    @DisplayName("🔴 V55: fuera las líneas cuyo código ya es un código vigente de un producto del negocio; el retirado, el ajeno y el sin código se quedan")
+    void fueraLoQueYaTieneDuenno() throws Exception {
+        String negocio = "codigos-sin-registrar";
+        String ajeno = "otro-codigos-sin-registrar";
+        try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
+             Statement s = c.createStatement()) {
+            for (String t : new String[]{negocio, ajeno}) {
+                s.execute("INSERT INTO tenants (id, name, plan) VALUES ('" + t + "','S','pro') ON CONFLICT (id) DO NOTHING");
+                s.execute("INSERT INTO menu_products (id_product, tenant_id, name_product, price, active) VALUES ('P-" + t
+                        + "','" + t + "','Registrado',3500,true)");
+            }
+            // Ya registrado en este negocio (vigente): sale de la cola.
+            s.execute("INSERT INTO codigos_de_producto (tenant_id, codigo, producto_id, fuente) VALUES ('"
+                    + negocio + "','7700000000011','P-" + negocio + "','pos')");
+            // Retirado en este negocio: ya no es de nadie, se queda.
+            s.execute("INSERT INTO codigos_de_producto (tenant_id, codigo, producto_id, fuente, retirado_en) VALUES ('"
+                    + negocio + "','7700000000028','P-" + negocio + "','panel', now())");
+            // Vigente pero en OTRO negocio: no cuenta para este.
+            s.execute("INSERT INTO codigos_de_producto (tenant_id, codigo, producto_id, fuente) VALUES ('"
+                    + ajeno + "','7700000000035','P-" + ajeno + "','panel')");
+
+            linea(s, negocio, 9101, "sin-registrar:c1", "Ya registrado [7700000000011]", 3500);
+            linea(s, negocio, 9102, "sin-registrar:c2", "Retirado [7700000000028]", 3500);
+            linea(s, negocio, 9103, "sin-registrar:c3", "De otro negocio [7700000000035]", 3500);
+            linea(s, negocio, 9104, "sin-registrar:c4", "Sin codigo", 3500);
+        }
+
+        mockMvc.perform(get("/api/menu/sin-registrar").header("Authorization", bearer(negocio)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(3)))
+                .andExpect(jsonPath("$[?(@.nombre == 'Ya registrado')]", hasSize(0)))
+                .andExpect(jsonPath("$[?(@.nombre == 'Retirado')].codigo").value("7700000000028"))
+                .andExpect(jsonPath("$[?(@.nombre == 'De otro negocio')].codigo").value("7700000000035"))
+                .andExpect(jsonPath("$[?(@.nombre == 'Sin codigo')].veces").value(1))
+                // La forma de siempre, campo por campo.
+                .andExpect(jsonPath("$[0].nombre").exists())
+                .andExpect(jsonPath("$[0].precio").exists())
+                .andExpect(jsonPath("$[0].veces").exists())
+                .andExpect(jsonPath("$[0].ultimaVenta").exists())
+                .andExpect(jsonPath("$[0].ultimaOrden").exists());
+    }
 }

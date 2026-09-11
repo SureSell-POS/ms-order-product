@@ -85,15 +85,19 @@ class VentanaDelCierreDeCajaTest {
         when(conciliadorDeQr.resolver(any(), any(), any()))
                 .thenAnswer(inv -> ResultadoQr.manual(inv.getArgument(1), inv.getArgument(2)));
 
+        // V55: sin base configurada en el negocio (lo de antes: base 0).
+        SiteService siteService = Mockito.mock(SiteService.class);
+        when(siteService.baseCajaConfigurada()).thenReturn(Optional.empty());
+
         useCase = new ExecuteDailyClosureUseCase(
                 orderRepository, closureRepository, new CashflowCalculator(), new ObjectMapper(),
                 outbox, Mockito.mock(DailyPaymentRecordService.class), orderPaymentRepository,
-                tableSessionService, conciliadorDeQr);
+                tableSessionService, conciliadorDeQr, siteService);
     }
 
     private ExecuteClosureRequest peticion(CashCountDetail conteo, String sellerId) {
         return new ExecuteClosureRequest(conteo, null, BigDecimal.ZERO, BigDecimal.ZERO,
-                BigDecimal.ZERO, "notas", sellerId, List.of());
+                BigDecimal.ZERO, "notas", sellerId, List.of(), null);
     }
 
     /** El cierre anterior, con la hora a la que se cerró y la base que dejó. */
@@ -170,7 +174,7 @@ class VentanaDelCierreDeCajaTest {
         useCase.execute(peticion(CONTEO_REAL, "Cajero 1"), "Cajero 1");
 
         ArgumentCaptor<DailyClosure> guardado = ArgumentCaptor.forClass(DailyClosure.class);
-        verify(closureRepository).save(guardado.capture());
+        verify(closureRepository).saveAndFlush(guardado.capture());
 
         assertThat(guardado.getValue().getOpeningTime()).isEqualTo(cerroA);
         // La base del cierre anterior se suma al efectivo esperado: 100.000 de
@@ -192,9 +196,10 @@ class VentanaDelCierreDeCajaTest {
                 .hasMessageContaining("ceros");
 
         // Lo que de verdad importa no es la excepción: es que no quede la fila.
-        // Con ella guardada, el cierre real de la tarde ya no cabe —el índice
-        // único es (negocio, fecha)— y la base del día siguiente queda en 0.
-        verify(closureRepository, never()).save(any());
+        // Hasta V55, con ella guardada el cierre real de la tarde ya no cabía
+        // —el índice único era (negocio, fecha)—; hoy sigue dejando un turno
+        // basura en el historial y la base del siguiente turno en 0.
+        verify(closureRepository, never()).saveAndFlush(any());
         verify(outbox, never()).save(any());
     }
 
@@ -213,7 +218,7 @@ class VentanaDelCierreDeCajaTest {
         assertThatThrownBy(() -> useCase.execute(peticion(CONTEO_EN_CEROS, "Cajero 1"), "Cajero 1"))
                 .isInstanceOf(IllegalStateException.class);
 
-        verify(closureRepository, never()).save(any());
+        verify(closureRepository, never()).saveAndFlush(any());
     }
 
     @Test
@@ -230,6 +235,65 @@ class VentanaDelCierreDeCajaTest {
         assertThat(ventanaUsada())
                 .as("un sellerId que no existe en ningún cierre daba 'desde medianoche'")
                 .isEqualTo(cerroA);
+    }
+
+    @Test
+    @DisplayName("V55: el turno es el último de hoy + 1, y la ventana sigue saliendo del cierre anterior aunque sea de hoy")
+    void elTurnoEsElUltimoDeHoyMasUno() {
+        // Tres turnos ya cerrados hoy; el anterior cerró hace un rato, HOY.
+        LocalDateTime cerroHoy = ZonaHoraria.ahora().minusMinutes(5);
+        when(closureRepository.findFirstByOrderByClosingTimeDesc())
+                .thenReturn(Optional.of(cierreAnterior(cerroHoy, new BigDecimal("120000"))));
+        when(closureRepository.ultimoTurnoDelDia(any())).thenReturn(3);
+
+        var respuesta = useCase.execute(peticion(CONTEO_REAL, "Cajero 1"), "Cajero 1");
+
+        ArgumentCaptor<DailyClosure> guardado = ArgumentCaptor.forClass(DailyClosure.class);
+        verify(closureRepository).saveAndFlush(guardado.capture());
+        assertThat(guardado.getValue().getTurno()).isEqualTo(4);
+        assertThat(respuesta.turno()).isEqualTo(4);
+        assertThat(ventanaUsada()).isEqualTo(cerroHoy);
+    }
+
+    @Test
+    @DisplayName("V55: si otra terminal cerró ese mismo turno a la vez, sale TurnoYaCerradoException (409), no un 500")
+    void elChoqueDeTurnoEsUnConflictoLegible() {
+        when(closureRepository.findFirstByOrderByClosingTimeDesc()).thenReturn(Optional.empty());
+        when(closureRepository.saveAndFlush(any())).thenThrow(new org.springframework.dao.DataIntegrityViolationException(
+                "could not execute statement",
+                new RuntimeException("ERROR: duplicate key value violates unique constraint "
+                        + "\"uq_daily_closures_tenant_date_turno\"")));
+
+        assertThatThrownBy(() -> useCase.execute(peticion(CONTEO_REAL, "Cajero 1"), "Cajero 1"))
+                .isInstanceOf(com.suresell.orders.shared.exception.TurnoYaCerradoException.class)
+                .hasMessage("Ese turno ya se cerró; recarga para ver el turno actual");
+        verify(outbox, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("V55: el 409 del turno lleva el texto del contrato en `error` y no lleva `alreadyClosed`")
+    void elCuerpoDelChoqueDeTurno() {
+        var r = new com.suresell.orders.shared.exception.GlobalExceptionHandler()
+                .handleTurnoYaCerrado(new com.suresell.orders.shared.exception.TurnoYaCerradoException());
+        assertThat(r.getStatusCode().value()).isEqualTo(409);
+        assertThat(r.getBody())
+                .containsEntry("error", "Ese turno ya se cerró; recarga para ver el turno actual")
+                .containsEntry("mensaje", "Ese turno ya se cerró; recarga para ver el turno actual")
+                .containsEntry("codigo", "TURNO_YA_CERRADO")
+                .doesNotContainKey("alreadyClosed");
+    }
+
+    @Test
+    @DisplayName("V55: una base negativa es un 400 con campo, y no se guarda nada")
+    void laBaseNegativaNoPasa() {
+        when(closureRepository.findFirstByOrderByClosingTimeDesc()).thenReturn(Optional.empty());
+        ExecuteClosureRequest conBaseNegativa = new ExecuteClosureRequest(CONTEO_REAL, null, BigDecimal.ZERO,
+                BigDecimal.ZERO, BigDecimal.ZERO, "notas", "Cajero 1", List.of(), new BigDecimal("-1"));
+
+        assertThatThrownBy(() -> useCase.execute(conBaseNegativa, "Cajero 1"))
+                .isInstanceOf(CodigosDeProducto.CampoInvalido.class)
+                .satisfies(e -> assertThat(((CodigosDeProducto.CampoInvalido) e).campo()).isEqualTo("baseForNextDay"));
+        verify(closureRepository, never()).saveAndFlush(any());
     }
 
     @Test

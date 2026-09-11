@@ -28,6 +28,8 @@ public class SiteService {
 
     private final SiteRepository repository;
     private final FlujosDeVenta flujos;
+    /** V55: un PIN nuevo del administrador borra los fallos acumulados del negocio. */
+    private final LimiteDeClavesDeRegistro limiteDeClaves;
 
     public List<Site> listar() {
         return repository.findAllByOrderByIdAsc();
@@ -65,6 +67,95 @@ public class SiteService {
      */
     public boolean imprimeTirillaEfectiva() {
         return sedePorDefecto().map(s -> !Boolean.FALSE.equals(s.getImprimeTirilla())).orElse(true);
+    }
+
+    // ------------------------------------------------------------------
+    // V55 — Configuración de caja: base, PIN de registro y tope diario.
+    // Vive en la sede por defecto hasta que el cierre sea por sede.
+    // ------------------------------------------------------------------
+
+    /** Lo que ve el administrador. El PIN nunca viaja: solo si hay uno. */
+    public record ConfiguracionDeCaja(java.math.BigDecimal baseCaja, boolean tienePin,
+                                      int maxRegistrosCajaPorDia) {
+    }
+
+    /** Lo que cambia el administrador. Un campo nulo se deja como estaba; {@code pin = ""} lo quita. */
+    public record CambioDeCaja(java.math.BigDecimal baseCaja, String pin, Integer maxRegistrosCajaPorDia) {
+    }
+
+    /** El mismo BCrypt de las contraseñas ({@code AuthService}, {@code AltaDeNegocioService}). */
+    private final org.springframework.security.crypto.password.PasswordEncoder codificadorDePin =
+            new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder();
+
+    public static final int MAX_REGISTROS_POR_DEFECTO = 30;
+
+    public ConfiguracionDeCaja configuracionDeCaja() {
+        Optional<Site> sede = sedePorDefecto();
+        return new ConfiguracionDeCaja(
+                sede.map(Site::getBaseCaja).orElse(null),
+                sede.map(Site::tienePinRegistro).orElse(false),
+                sede.map(Site::getMaxRegistrosCajaPorDia).orElse(MAX_REGISTROS_POR_DEFECTO));
+    }
+
+    /**
+     * Cambia la configuración de caja de la sede por defecto. Valida con
+     * {@code campo} para que el panel pinte el error junto al input.
+     */
+    @Transactional
+    public ConfiguracionDeCaja configurarCaja(CambioDeCaja cambio) {
+        Site sede = sedePorDefecto().orElseThrow(() -> new IllegalStateException(
+                "El negocio no tiene sede por defecto: no hay dónde guardar la configuración de caja."));
+        if (cambio.baseCaja() != null) {
+            if (cambio.baseCaja().signum() < 0) {
+                throw new CodigosDeProducto.CampoInvalido("baseCaja", "La base de caja no puede ser negativa.");
+            }
+            sede.setBaseCaja(cambio.baseCaja());
+        }
+        if (cambio.pin() != null) {
+            String limpio = cambio.pin().trim();
+            if (limpio.isEmpty()) {
+                sede.setPinRegistroCajaHash(null);
+            } else {
+                if (limpio.length() < 4 || limpio.length() > 12) {
+                    throw new CodigosDeProducto.CampoInvalido("pin", "El PIN tiene que tener entre 4 y 12 caracteres.");
+                }
+                sede.setPinRegistroCajaHash(codificadorDePin.encode(limpio));
+            }
+            // Poner, cambiar o quitar el PIN es «el administrador revisó la
+            // clave»: la salida que ofrece el 429 DEMASIADOS_INTENTOS.
+            limiteDeClaves.reiniciar(sede.getTenantId());
+        }
+        if (cambio.maxRegistrosCajaPorDia() != null) {
+            if (cambio.maxRegistrosCajaPorDia() < 1 || cambio.maxRegistrosCajaPorDia() > 1000) {
+                throw new CodigosDeProducto.CampoInvalido("maxRegistrosCajaPorDia",
+                        "El máximo de registros por día tiene que estar entre 1 y 1000.");
+            }
+            sede.setMaxRegistrosCajaPorDia(cambio.maxRegistrosCajaPorDia());
+        }
+        repository.save(sede);
+        return new ConfiguracionDeCaja(sede.getBaseCaja(), sede.tienePinRegistro(), sede.getMaxRegistrosCajaPorDia());
+    }
+
+    /** {@code base_caja} de la sede por defecto, o vacío si no está configurada (o no hay sede). */
+    public Optional<java.math.BigDecimal> baseCajaConfigurada() {
+        return sedePorDefecto().map(Site::getBaseCaja);
+    }
+
+    public boolean tienePinRegistro() {
+        return sedePorDefecto().map(Site::tienePinRegistro).orElse(false);
+    }
+
+    /** ¿El PIN tecleado (o escaneado) es el del negocio? Sin PIN configurado, nunca. */
+    public boolean pinRegistroCorrecto(String tecleado) {
+        Optional<Site> sede = sedePorDefecto();
+        if (sede.isEmpty() || !sede.get().tienePinRegistro() || tecleado == null) {
+            return false;
+        }
+        return codificadorDePin.matches(tecleado.trim(), sede.get().getPinRegistroCajaHash());
+    }
+
+    public int maxRegistrosCajaPorDia() {
+        return sedePorDefecto().map(Site::getMaxRegistrosCajaPorDia).orElse(MAX_REGISTROS_POR_DEFECTO);
     }
 
     /** Modo efectivo para los lectores viejos ({@code posMode}). Sale del catálogo. */

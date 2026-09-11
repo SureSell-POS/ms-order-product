@@ -67,7 +67,7 @@ class SiteServiceTest {
     @BeforeEach
     void setUp() {
         catalogo(flujos);
-        service = new SiteService(repository, flujos);
+        service = new SiteService(repository, flujos, new LimiteDeClavesDeRegistro(java.time.Clock.systemUTC()));
     }
 
     private Site sede(String flujo) {

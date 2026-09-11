@@ -43,6 +43,8 @@ public class ExecuteDailyClosureUseCase {
     private final TableSessionService tableSessionService;
     // V34: resuelve el QR contra ms-core-app diciendo SIEMPRE de dónde salió.
     private final ConciliadorDeQr conciliadorDeQr;
+    // V55: la base de caja configurada por el negocio (`sites.base_caja`).
+    private final SiteService siteService;
 
     public ExecuteDailyClosureUseCase(OrderRepository orderRepository, DailyClosureRepository closureRepository,
                                     CashflowCalculator cashflowCalculator, ObjectMapper objectMapper,
@@ -50,7 +52,8 @@ public class ExecuteDailyClosureUseCase {
                                     DailyPaymentRecordService dailyPaymentRecordService,
                                     com.suresell.orders.infrastructure.persistence.OrderPaymentRepository orderPaymentRepository,
                                     TableSessionService tableSessionService,
-                                    ConciliadorDeQr conciliadorDeQr) {
+                                    ConciliadorDeQr conciliadorDeQr,
+                                    SiteService siteService) {
         this.orderRepository = orderRepository;
         this.closureRepository = closureRepository;
         this.cashflowCalculator = cashflowCalculator;
@@ -60,6 +63,7 @@ public class ExecuteDailyClosureUseCase {
         this.orderPaymentRepository = orderPaymentRepository;
         this.tableSessionService = tableSessionService;
         this.conciliadorDeQr = conciliadorDeQr;
+        this.siteService = siteService;
     }
 
     @Transactional
@@ -77,7 +81,18 @@ public class ExecuteDailyClosureUseCase {
                     mesasAbiertas.size(), detalle));
         }
         BigDecimal calculatedTotalCash = cashflowCalculator.calculateTotalCash(request.cashDetail());
-        BigDecimal calculatedBase = cashflowCalculator.calculateBaseForNextDay(request.cashDetail());
+
+        // V55 — La base del turno siguiente la DECLARA el cajero (precargada
+        // con la del negocio), no la calcula el sistema por denominaciones.
+        // Orden: lo que vino en la petición; si no, `base_caja` de la sede por
+        // defecto; si tampoco, 0. Negativa no vale: es un dato de entrada.
+        if (request.baseForNextDay() != null && request.baseForNextDay().signum() < 0) {
+            throw new CodigosDeProducto.CampoInvalido("baseForNextDay",
+                    "La base que dejas para el siguiente turno no puede ser negativa.");
+        }
+        BigDecimal calculatedBase = request.baseForNextDay() != null
+                ? request.baseForNextDay()
+                : siteService.baseCajaConfigurada().orElse(BigDecimal.ZERO);
 
         // Un cierre con el formulario entero en ceros no es un cierre: es un
         // envío accidental. Pasó en shark-burger el 2026-08-31 a las 09:30,
@@ -85,9 +100,10 @@ public class ExecuteDailyClosureUseCase {
         // parecen fallos del sistema y no lo son:
         //
         //   1. El cierre de verdad, por la tarde, ya no cabía. El índice único
-        //      es (negocio, fecha): solo hay un cierre por día natural, y el
-        //      cupo se lo había quemado la fila basura. El mensaje que sale
-        //      —"la caja de hoy ya fue cerrada"— es correcto y engañoso a la vez.
+        //      era (negocio, fecha): solo había un cierre por día natural, y el
+        //      cupo se lo había quemado la fila basura. (Desde V55 la unicidad
+        //      es por turno y ya no bloquea el día, pero un turno en ceros sigue
+        //      siendo basura en el historial y rompe la base del siguiente.)
         //   2. La base del día siguiente quedó en 0 y se propagó, porque sale
         //      del último cierre por `closing_time`.
         //
@@ -100,9 +116,8 @@ public class ExecuteDailyClosureUseCase {
         if (calculatedTotalCash.signum() == 0 && contadoTarjeta.signum() == 0 && contadoQr.signum() == 0) {
             throw new IllegalStateException(
                     "El conteo está en ceros: no hay efectivo, ni tarjeta, ni QR. "
-                    + "Un cierre así no describe ninguna caja, y ocuparía el único "
-                    + "cierre que admite el día. Cuenta al menos la base que quedó "
-                    + "en la gaveta y vuelve a intentarlo.");
+                    + "Un cierre así no describe ninguna caja. Cuenta al menos la "
+                    + "base que quedó en la gaveta y vuelve a intentarlo.");
         }
 
         LocalDateTime closingTime = LocalDateTime.now(BOGOTA_ZONE);
@@ -122,10 +137,20 @@ public class ExecuteDailyClosureUseCase {
         // cierre anterior" dan casi lo mismo y el defecto es invisible. En
         // cuanto se salta un día, las ventas de ese día no entran en NINGÚN
         // cierre: pasó el viernes 2026-08-28 con $1.920.600.
+        //
+        // V55: el cierre anterior es EL ÚLTIMO POR `closing_time`, sin filtrar
+        // por fecha. Con varios turnos al día, el segundo turno arranca donde
+        // cerró el primero, aunque haya sido hace una hora.
         Optional<DailyClosure> cierreAnterior = closureRepository.findFirstByOrderByClosingTimeDesc();
         LocalDateTime openingTime = cierreAnterior
                 .map(DailyClosure::getClosingTime)
                 .orElseGet(() -> ZonaHoraria.hoy().atStartOfDay());
+
+        // V55: el turno lo calcula el servidor: el último turno de hoy + 1 (MAX
+        // y no COUNT: ver `ultimoTurnoDelDia`). Si dos terminales cierran a la
+        // vez el mismo turno, la base lo rechaza
+        // (`uq_daily_closures_tenant_date_turno`) y sale como 409.
+        int turno = closureRepository.ultimoTurnoDelDia(closingTime.toLocalDate()) + 1;
 
         List<Object[]> totals = orderRepository.sumTotalsByPaymentMethodAndSeller(
                 openingTime,
@@ -155,9 +180,11 @@ public class ExecuteDailyClosureUseCase {
                 .add(expected.getOrDefault("CARD", BigDecimal.ZERO))
                 .add(expected.getOrDefault("QR", BigDecimal.ZERO));
 
+        // Con lo que arrancó este turno: la base que dejó el cierre anterior;
+        // sin cierre anterior, la configurada por el negocio; sin ella, 0.
         BigDecimal previousBase = cierreAnterior
                 .map(DailyClosure::getBaseBalanceForNextDay)
-                .orElse(BigDecimal.ZERO);
+                .orElseGet(() -> siteService.baseCajaConfigurada().orElse(BigDecimal.ZERO));
 
         BigDecimal salesCash = expected.getOrDefault("CASH", BigDecimal.ZERO);
 
@@ -216,7 +243,7 @@ public class ExecuteDailyClosureUseCase {
         BigDecimal roundingAdjustment = tableSessionService.ajustePorRedondeoEntre(openingTime, closingTime);
 
         DailyClosure savedClosure = saveClosureAudit(request, expected, totalDifference, openingTime, closingTime,
-                userName, calculatedTotalCash, calculatedBase, diffCash, diffCard, diffNequi, diffQr, previousBase, pureSales, resultadoQr, totalPettyCashExpenses);
+                userName, calculatedTotalCash, calculatedBase, diffCash, diffCard, diffNequi, diffQr, previousBase, pureSales, resultadoQr, totalPettyCashExpenses, turno);
 
         saveClosureToOutbox(savedClosure);
 
@@ -237,7 +264,8 @@ public class ExecuteDailyClosureUseCase {
                 shortages,
                 calculatedBase,
                 amountToDeposit,
-                roundingAdjustment
+                roundingAdjustment,
+                turno
         );
     }
 
@@ -266,7 +294,8 @@ public class ExecuteDailyClosureUseCase {
                                   BigDecimal previousBase,
                                   BigDecimal pureSales,
                                   ResultadoQr resultadoQr,
-                                  BigDecimal pettyCashExpenses
+                                  BigDecimal pettyCashExpenses,
+                                  int turno
                                           ) {
 
         DailyClosure entity = new DailyClosure();
@@ -274,6 +303,7 @@ public class ExecuteDailyClosureUseCase {
         entity.setOpeningTime(openingTime);
         entity.setClosingTime(closingTime);
         entity.setClosureDate(closingTime.toLocalDate());
+        entity.setTurno(turno);
         entity.setUserName(userName);
         entity.setNotes(request.notes());
         entity.setBaseBalanceForNextDay(calculatedBase != null ? calculatedBase : BigDecimal.ZERO);
@@ -346,7 +376,18 @@ public class ExecuteDailyClosureUseCase {
         } catch (Exception e) {
             log.warn("No se pudo imprimir la entidad en el log", e);
         }
-        closureRepository.save(entity);
+        // Se vacía a la base AQUÍ y no al confirmar la transacción: si el
+        // turno ya se cerró, el choque de unicidad tiene que salir dentro de
+        // este método, donde se puede traducir a un 409 legible.
+        try {
+            closureRepository.saveAndFlush(entity);
+        } catch (org.springframework.dao.DataIntegrityViolationException e) {
+            String detalle = String.valueOf(e.getMostSpecificCause().getMessage());
+            if (detalle.contains("uq_daily_closures_tenant_date_turno")) {
+                throw new com.suresell.orders.shared.exception.TurnoYaCerradoException();
+            }
+            throw e;
+        }
 
         return entity;
     }

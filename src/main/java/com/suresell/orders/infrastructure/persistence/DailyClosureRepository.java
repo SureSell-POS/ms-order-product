@@ -1,5 +1,6 @@
 package com.suresell.orders.infrastructure.persistence;
 import com.suresell.orders.domain.model.DailyClosure;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
@@ -30,4 +31,24 @@ extends JpaRepository<DailyClosure, UUID> {
      * silenciosamente el segundo caso.
      */
     Optional<DailyClosure> findFirstByOrderByClosingTimeDesc();
+
+    /**
+     * V55: cuántos cierres lleva el día ({@code cierresHoy} del preview). RLS
+     * acota al negocio; no hace falta {@code tenant_id} en el WHERE.
+     */
+    int countByClosureDate(LocalDate closureDate);
+
+    /**
+     * V55: el último turno cerrado en el día, 0 si ninguno. El turno que se va
+     * a cerrar es este + 1.
+     *
+     * <p>MAX y no COUNT a propósito. Mientras no se borre ningún cierre dan lo
+     * mismo, pero la receta para un cierre en ceros ya guardado es BORRAR la
+     * fila ({@code cierre-en-ceros-bloquea-el-dia}): con turnos 1 y 2 y el 1
+     * borrado, COUNT + 1 volvería a dar 2, chocaría con la unicidad
+     * (negocio, fecha, turno) y el día quedaría sin poder cerrarse — el mismo
+     * bloqueo que V55 viene a quitar. MAX + 1 da 3 y sigue.
+     */
+    @Query("SELECT COALESCE(MAX(dc.turno), 0) FROM DailyClosure dc WHERE dc.closureDate = :fecha")
+    int ultimoTurnoDelDia(@Param("fecha") LocalDate fecha);
 }

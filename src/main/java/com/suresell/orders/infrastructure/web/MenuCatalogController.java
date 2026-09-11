@@ -17,18 +17,54 @@ public class MenuCatalogController {
     private final com.suresell.orders.application.usecase.CodigosDeProducto codigosDeProducto;
     private final com.suresell.orders.multitenant.JwtTenantResolver jwt;
     private final com.suresell.orders.application.usecase.VentasSinRegistrar ventasSinRegistrar;
+    private final com.suresell.orders.application.usecase.RegistroRapidoEnCaja registroRapido;
 
     public MenuCatalogController(MenuCatalogPort menuCatalogPort,
                                  com.suresell.orders.application.usecase.CodigosDeProducto codigosDeProducto,
                                  com.suresell.orders.multitenant.JwtTenantResolver jwt,
-                                 com.suresell.orders.application.usecase.VentasSinRegistrar ventasSinRegistrar) {
+                                 com.suresell.orders.application.usecase.VentasSinRegistrar ventasSinRegistrar,
+                                 com.suresell.orders.application.usecase.RegistroRapidoEnCaja registroRapido) {
         this.menuCatalogPort = menuCatalogPort;
         this.codigosDeProducto = codigosDeProducto;
         this.jwt = jwt;
         this.ventasSinRegistrar = ventasSinRegistrar;
+        this.registroRapido = registroRapido;
     }
 
-    /** V51 §4.3: lo vendido sin registrar (módulo venta_sin_registro), agrupado, para la cola del panel. */
+    /**
+     * V55 — Registrar un producto desde la caja con el código que acaba de
+     * leer el lector. Devuelve el MISMO producto que el catálogo
+     * ({@code categories-with-products}) para que el POS lo meta al índice
+     * sin traducir. Códigos: 201; 409 YA_EXISTE (con productoId); 403
+     * PIN_INCORRECTO o SIN_PIN; 409 LIMITE_DIARIO; 400 con campo.
+     */
+    @PostMapping("/products/registro-rapido")
+    @Operation(summary = "Registrar un producto desde la caja (nombre, precio, código, PIN)",
+            description = "201 con el producto del catálogo; 409 YA_EXISTE + productoId; 403 PIN_INCORRECTO | SIN_PIN; 409 LIMITE_DIARIO; 400 con campo.")
+    @org.springframework.web.bind.annotation.ResponseStatus(org.springframework.http.HttpStatus.CREATED)
+    public MenuProductResponse registroRapido(
+            @org.springframework.web.bind.annotation.RequestBody
+            com.suresell.orders.application.dto.RegistroRapidoRequest cuerpo,
+            @org.springframework.web.bind.annotation.RequestHeader(value = "Authorization", required = false)
+            String authorization) {
+        return registroRapido.registrar(cuerpo, usuario(authorization));
+    }
+
+    /**
+     * V55 — Los productos que nacieron en la caja (registro rápido), para la
+     * pastilla «Registrado en la caja · falta enlazar» del panel. Solo
+     * lectura, lo más reciente primero, máximo 200.
+     */
+    @GetMapping("/products/registrados-en-caja")
+    @Operation(summary = "Productos registrados desde la caja (creado_en_caja_en no nulo), lo más reciente primero, máx. 200")
+    public List<com.suresell.orders.application.usecase.RegistroRapidoEnCaja.RegistradoEnCaja> registradosEnCaja() {
+        return registroRapido.registradosEnCaja();
+    }
+
+    /**
+     * V51 §4.3: lo vendido sin registrar (módulo venta_sin_registro), agrupado, para la cola del panel.
+     * V55: sin las líneas cuyo código ya es un código vigente de un producto del negocio.
+     */
     @GetMapping("/sin-registrar")
     @Operation(summary = "Productos vendidos sin registrar en los últimos días, agrupados por nombre, código y precio")
     public List<com.suresell.orders.application.usecase.VentasSinRegistrar.Pendiente> sinRegistrar(
