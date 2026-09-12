@@ -46,4 +46,14 @@ public class OrderEditHistory implements com.suresell.orders.multitenant.TenantO
     @jakarta.persistence.Column(name = "edited_by")
     private Long editedBy;
 
+    /**
+     * V57 — Que cupon se aplico, en las filas {@code DISCOUNT_APPLIED}. Antes
+     * un descuento cambiaba el total de una venta sin escribir una sola fila;
+     * ahora escribe en esta misma tabla y esta columna es lo unico del
+     * descuento que no cabia en el modelo de una edicion de items. Nula en las
+     * ediciones normales: ahi no hubo cupon.
+     */
+    @jakarta.persistence.Column(name = "discount_code")
+    private String discountCode;
+
 }

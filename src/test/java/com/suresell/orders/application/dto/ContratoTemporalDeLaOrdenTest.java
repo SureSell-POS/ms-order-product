@@ -91,6 +91,49 @@ class ContratoTemporalDeLaOrdenTest {
         }
 
         @Test
+        @DisplayName("🔴 un campo que el POS YA manda no puede tumbar la venta: facturaElectronica")
+        void loQueElPosYaMandaNoTumbaLaVenta() throws Exception {
+            // 2026-09-11: el POS empezo a mandar `facturaElectronica` al marcar
+            // «Requiere factura electronica» y este DTO no lo declaraba. Con
+            // FAIL_ON_UNKNOWN_PROPERTIES eso no es «se ignora»: es 400, la venta
+            // no se crea, y el outbox del POS marca los 4xx como FAILED
+            // definitivo — esa venta no se sincroniza nunca. Medido el
+            // 2026-09-12 antes de arreglarlo.
+            //
+            // Este test es la guarda para que no vuelva a pasar con el
+            // siguiente campo: lo que el POS manda hoy se declara aqui.
+            String conFactura = PAYLOAD_DEL_POS_ACTUAL.strip().replaceFirst("\\}\\s*$", """
+                    ,"facturaElectronica":{"nombre":"Distribuciones del Valle SAS",
+                     "documento":"901234567-8","correo":"facturacion@distrivalle.co",
+                     "telefono":"3001234567"}}""");
+
+            OrderRequestRecord dto = mapper.readValue(conFactura, OrderRequestRecord.class);
+
+            assertThat(dto.facturaElectronica()).isNotNull();
+            assertThat(dto.facturaElectronica().nombre()).isEqualTo("Distribuciones del Valle SAS");
+            assertThat(dto.facturaElectronica().documento()).isEqualTo("901234567-8");
+            assertThat(dto.facturaElectronica().correo()).isEqualTo("facturacion@distrivalle.co");
+            assertThat(dto.facturaElectronica().telefono()).isEqualTo("3001234567");
+            // Y lo de siempre sigue igual: aceptar el campo nuevo no cambia la venta.
+            assertThat(dto.paymentMethod()).isEqualTo("CASH");
+            assertThat(dto.totalDeclaradoPorElCliente()).isEqualByComparingTo("25000");
+        }
+
+        @Test
+        @DisplayName("el telefono de la factura es opcional, igual que en el POS")
+        void elTelefonoDeLaFacturaEsOpcional() throws Exception {
+            String sinTelefono = """
+                    {"pagerColor":"AZUL","pagerNumber":"3","items":[],"paymentMethod":"CASH",
+                     "facturaElectronica":{"nombre":"Ana Perez","documento":"1090123456",
+                     "correo":"ana@correo.co"}}
+                    """;
+            OrderRequestRecord dto = mapper.readValue(sinTelefono, OrderRequestRecord.class);
+
+            assertThat(dto.facturaElectronica().nombre()).isEqualTo("Ana Perez");
+            assertThat(dto.facturaElectronica().telefono()).isNull();
+        }
+
+        @Test
         @DisplayName("`createdAt` del POS actual SÍ se aprovecha: puebla ocurridoEn")
         void elCreatedAtDelPosSeAprovecha() throws Exception {
             OrderRequestRecord dto = mapper.readValue(PAYLOAD_DEL_POS_ACTUAL, OrderRequestRecord.class);

@@ -226,6 +226,13 @@ public class OrderHandler implements OrderPort {
         order.setRegistradoEn(registradoEn);
         order.setOcurridoEn(dto.ocurridoEn());   // nulo si el cliente no la manda
 
+        // V58 — A nombre de quien hay que emitir, si el cajero marco factura.
+        // Se guarda tal cual llego: el servidor no lo interpreta ni lo valida
+        // mas de lo que ya lo valido el POS. Hoy no se emite nada; esto es lo
+        // que faltaria el dia que se emita, y antes de V58 se perdia (peor: el
+        // cuerpo entero se rechazaba con 400 y la venta ni se creaba).
+        order.setFacturaElectronica(serializarFactura(dto.facturaElectronica()));
+
         java.util.UUID terminal = parsearTerminal(dto.terminalId());
         order.setTerminalId(terminal);
         if (terminal != null) {
@@ -523,8 +530,36 @@ public class OrderHandler implements OrderPort {
     public void updateOrder(Long orderId, OrderRequestRecord dto) {
         Order order = orderRepositoryPort.findById(orderId)
                 .orElseThrow(() -> new RuntimeException("Orden no encontrada con ID: " + orderId));
+        // ------------------------------------------------------------------
+        // UNA VENTA YA COBRADA NO SE EDITA (2026-09-12).
+        //
+        // Hasta hoy el unico freno era el reloj: 7 minutos desde `created_at`,
+        // sin mirar el estado ni si la caja ya cerro. Eso dejaba que CUALQUIERA
+        // —el endpoint tampoco exigia rol— le cambiara los items y el total a
+        // una venta ya cobrada, y que una venta de las 21:58 se editara a las
+        // 22:05 con el cierre de las 22:00 ya guardado y sin enterarse.
+        //
+        // La regla ahora es de ESTADO y no de tiempo: se edita mientras la
+        // orden esta `abierta` (consumo en curso de una mesa); en cuanto esta
+        // `pagado`, no. Corregir una venta cobrada es el camino de ANULACION,
+        // que se disena aparte y deja su propio rastro contable.
+        // ------------------------------------------------------------------
+        if (OrderStatus.pagado.equals(order.getStatus())) {
+            throw new OrderEditNotAllowedException(
+                    String.format(
+                            "La orden #%d ya esta cobrada y no se puede editar. Si hay que corregirla, "
+                            + "pidele a un administrador que la anule; editarla dejaria el cierre de caja "
+                            + "diciendo otra cosa",
+                            orderId),
+                    "ORDEN_YA_COBRADA");
+        }
         LocalDateTime now = LocalDateTime.now(BOGOTA_ZONE);
         long minutesSinceCreation = ChronoUnit.MINUTES.between(order.getCreatedAt(), now);
+        // La ventana de 7 minutos sobrevive SOLO para las ordenes abiertas: es
+        // el freno que ya habia y quitarlo no era parte del encargo. Ojo si
+        // aparece una queja de restaurante: una mesa abierta hace mas de 7
+        // minutos tampoco se puede corregir por aqui (las rondas nuevas SI
+        // entran, van por POST /orders/create con `tableSessionId`).
         if (minutesSinceCreation > MAX_EDIT_MINUTES) {
             throw new OrderEditNotAllowedException(
                     String.format(
@@ -552,6 +587,27 @@ public class OrderHandler implements OrderPort {
                 resolucionDePrecios.resolver(order.getClienteDocumento(), dto.items(), false);
         List<OrderItem> newItems = createOrderItems(order,
                 resolucionDePrecios.conPrecios(dto.items(), precios), precios, dto.items());
+        // ------------------------------------------------------------------
+        // POR QUE LAS LINEAS SE GUARDAN UNA A UNA Y LA ORDEN NO SE SALVA.
+        //
+        // Esto devolvia 500 SIEMPRE contra Postgres —«Unable to find OrderItem
+        // with id ...»— y nadie lo habia visto porque NINGUN test tocaba
+        // `PUT /orders/{id}`. La causa: `Order.items` es `@OneToMany` con
+        // `orphanRemoval` y SIN cascade, asi que las lineas nuevas no se
+        // persisten por la coleccion; y `save(order)` sobre una entidad ya
+        // gestionada es un merge que intenta resolver por id unas OrderItem
+        // recien creadas (su UUID lo pone el cliente) que todavia no estan en
+        // la base. Merge las busca, no las encuentra, y revienta.
+        //
+        // La forma que ya usaba el resto del servicio para lo mismo es
+        // `agregarAOrdenAbierta`: guardar cada linea por su repositorio. Y la
+        // orden no necesita save: esta gestionada dentro de la transaccion, asi
+        // que los setters de arriba se escriben solos al hacer flush. El
+        // `clear()` de mas arriba borra las viejas por `orphanRemoval`.
+        // ------------------------------------------------------------------
+        for (OrderItem item : newItems) {
+            orderItemRepositoryPort.save(item);
+        }
         order.getItems().addAll(newItems);
         BigDecimal subtotal = order.getItems().stream()
                 .map(OrderItem::getTotalPrice)
@@ -559,8 +615,7 @@ public class OrderHandler implements OrderPort {
         order.setSubtotal(subtotal);
         BigDecimal total = applyDiscountIfPresent(order, dto.discountCode(), subtotal);
         order.setTotal(total);
-        Order savedOrder = orderRepositoryPort.save(order);
-        saveOrderCreatedOutbox(savedOrder, savedOrder.getDeliveryTracking());
+        saveOrderCreatedOutbox(order, order.getDeliveryTracking());
         saveEditHistory(orderId, previousItems, order.getItems(), previousTotal, order.getTotal());
     }
 
@@ -589,6 +644,27 @@ public class OrderHandler implements OrderPort {
                     dtoRef(), declarado, calculado, diferencia);
         }
         return diferencia;
+    }
+
+    /**
+     * El cliente de la factura, a JSON para la columna JSONB.
+     *
+     * <p>Si la serializacion fallara —cuatro cadenas, no deberia—, la venta
+     * sigue: se registra sin el dato y queda en el log. Es la misma regla que
+     * el terminal malformado y la autoria irresoluble: un problema de
+     * facturacion de manana no puede impedir cobrar hoy.
+     */
+    private String serializarFactura(OrderRequestRecord.FacturaElectronicaRecord factura) {
+        if (factura == null) {
+            return null;
+        }
+        try {
+            return objectMapper.writeValueAsString(factura);
+        } catch (JsonProcessingException e) {
+            log.warn("No se pudo guardar el cliente de la factura electronica ({}). "
+                    + "La venta se registra sin el.", e.getClass().getSimpleName());
+            return null;
+        }
     }
 
     /** Solo para el mensaje del log; la orden aun no tiene numero asignado. */
@@ -701,7 +777,32 @@ public class OrderHandler implements OrderPort {
         }
     }
 
+    /**
+     * Rastro de un descuento aplicado sobre una orden ya guardada.
+     *
+     * <p>Va a la MISMA tabla que las ediciones y con la misma forma —quien,
+     * cuando, que habia y que quedo— para que el panel no tenga que aprender un
+     * sitio nuevo donde mirar. Lo que no encajaba en el modelo era el codigo del
+     * cupon: lo trae V57 en {@code discount_code}. Las cantidades quedan nulas a
+     * proposito: un descuento no mueve unidades, y un 0 ahi diria que si.
+     */
+    private void saveDiscountHistory(Long orderId, String codigo, BigDecimal oldTotal, BigDecimal newTotal) {
+        OrderEditHistory history = new OrderEditHistory();
+        history.setOrderId(orderId);
+        history.setEditType("DISCOUNT_APPLIED");
+        history.setDiscountCode(codigo);
+        history.setOldTotal(oldTotal);
+        history.setNewTotal(newTotal);
+        history.setEditedAt(LocalDateTime.now(BOGOTA_ZONE));
+        history.setEditedBy(usuarioDeLaPeticion.id().orElse(null));
+        OrderEditHistory savedHistory = orderEditHistoryRepository.save(history);
+        saveEditHistoryToOutbox(savedHistory);
+    }
+
     private void saveEditHistoryToOutbox(OrderEditHistory history) {
+        if (history == null) {
+            return;
+        }
         try {
             Map<String, Object> payload = new HashMap<>();
             payload.put("eventType", "EDIT_HISTORY_CREATED");
@@ -731,6 +832,8 @@ public class OrderHandler implements OrderPort {
             throw new IllegalStateException("La orden ya tiene un descuento aplicado: " + order.getDiscountCode());
         }
         BigDecimal subtotal = order.getSubtotal();
+        // El total de ANTES, para que el rastro pueda decir que habia y que quedo.
+        BigDecimal totalAnterior = order.getTotal();
         Map<String, ProductResponse> productCache = buildProductCache(order.getItems());
         List<OrderItemDto> itemsForDiscount = order.getItems().stream().map(item -> {
             ProductResponse productDetails = productCache.get(item.getProductId());
@@ -769,6 +872,17 @@ public class OrderHandler implements OrderPort {
                 savedOrder.getDiscountAmount(),
                 savedOrder.getTotal());
         discountService.linkOrderWithCoupon(linkCommand);
+        // ------------------------------------------------------------------
+        // EL DESCUENTO DEJA RASTRO (2026-09-12).
+        //
+        // Este endpoint cambiaba el total de una venta y no escribia una sola
+        // fila: ni quien, ni cuando, ni cuanto era antes. Una edicion normal
+        // si lo hacia (`saveEditHistory`), asi que el camino mas barato para
+        // mover dinero sin que se notara era justamente este. Ahora escribe en
+        // `order_edit_history` lo mismo que una edicion, mas el codigo del
+        // cupon (columna `discount_code`, V57).
+        // ------------------------------------------------------------------
+        saveDiscountHistory(orderId, savedOrder.getDiscountCode(), totalAnterior, savedOrder.getTotal());
         return toOrderResponseRecord(savedOrder, buildProductNameCache(savedOrder.getItems()));
     }
 

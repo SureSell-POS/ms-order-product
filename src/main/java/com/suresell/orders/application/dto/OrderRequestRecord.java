@@ -179,7 +179,27 @@ public record OrderRequestRecord(
             + "enviado | confirmado | no_impreso | descartado", example = "no_impreso")
     String reciboEstado,
     @Schema(description = "V52 — Motivo si la tirilla no salió", example = "agente_apagado")
-    String reciboMotivo
+    String reciboMotivo,
+
+    /**
+     * V58 — A nombre de quién hay que emitir la factura electrónica.
+     *
+     * <p>OPCIONAL, y lo era ya de hecho: el POS lleva mandándolo desde el
+     * 2026-09-11 al marcar «Requiere factura electrónica», y este DTO no lo
+     * declaraba. Con {@code FAIL_ON_UNKNOWN_PROPERTIES} eso no era «se ignora»
+     * sino <b>400 y venta no creada</b> — y el outbox del POS trata los 4xx
+     * como definitivos, así que esa venta no se sincronizaba nunca. Es el mismo
+     * defecto que la cabecera de este archivo cuenta con {@code createdAt},
+     * repetido: por eso ahora se declara y <b>se guarda</b>.
+     *
+     * <p>No se valida más de lo que ya valida el POS: aquí un dato incompleto
+     * es un problema de facturación de mañana, y rechazar la venta de hoy por
+     * eso sería cambiar un problema pequeño por uno grande. Hoy <b>no se emite
+     * nada</b>: esto solo deja escrito a quién habría que emitirle.
+     */
+    @Schema(description = "V58 — Cliente de la factura electrónica. Opcional; se guarda tal cual "
+            + "con la orden. No se emite nada todavía.")
+    FacturaElectronicaRecord facturaElectronica
 ) {
 
     /**
@@ -204,10 +224,19 @@ public record OrderRequestRecord(
         return new OrderRequestRecord(
                 pagerColor, pagerNumber, items, discountCode, paymentMethod, payments,
                 idempotencyKey, skipPagerCheck, tableSessionId, preparadoEnComanda,
-                null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null);
     }
 
     /** Split de multipago: método + monto. */
     public record PaymentSplitRecord(String method, java.math.BigDecimal amount) {
+    }
+
+    /**
+     * V58 — Cliente de la factura electrónica, exactamente con los cuatro
+     * campos del formulario del POS ({@code models/api.models.ts:60-67}).
+     * {@code telefono} es opcional allí y lo es aquí.
+     */
+    public record FacturaElectronicaRecord(String nombre, String documento, String correo,
+                                           String telefono) {
     }
 }

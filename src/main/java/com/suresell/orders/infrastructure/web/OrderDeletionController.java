@@ -147,8 +147,32 @@ public class OrderDeletionController {
         }
         String by = resolver.resolveSubject(http.getHeader("Authorization")).orElse("admin");
         LocalDateTime now = LocalDateTime.now(BOGOTA_ZONE);
+
+        // ------------------------------------------------------------------
+        // POR QUE ESTO SE LEE AQUI Y NO ANTES (2026-09-12).
+        //
+        // La fila de auditoria se construia SIN `order_uuid_id`, y esa columna
+        // es `UUID NOT NULL` (V15:15, y la entidad la mapea nullable = false).
+        // Resultado: restore() fallaba SIEMPRE, en el INSERT, con la orden ya
+        // restaurada y la transaccion revertida. Nadie lo habia visto porque
+        // no tenia ni un test.
+        //
+        // La orden no se puede leer ANTES del UPDATE —el @SQLRestriction de la
+        // entidad esconde las borradas—, pero DESPUES si: ya no tiene
+        // `deleted_at`. Por eso el orden es restaurar, leer, auditar. Si por lo
+        // que sea no aparece, se revierte todo: una restauracion sin rastro es
+        // exactamente lo que esta auditoria existe para impedir.
+        // ------------------------------------------------------------------
+        Order restaurada = orderRepository.findByIdOrder(idOrder)
+                .orElseThrow(() -> new IllegalStateException(
+                        "La orden #" + idOrder + " se restauro pero no se pudo leer para dejar "
+                        + "rastro; no se restaura sin auditoria"));
+
         OrderDeletion audit = new OrderDeletion();
+        audit.setOrderUuidId(restaurada.getUuidId());
         audit.setIdOrder(idOrder);
+        audit.setTotal(restaurada.getTotal());
+        audit.setPaymentMethod(restaurada.getPaymentMethod());
         audit.setReason("RESTAURADA: " + (request != null && request.reason() != null
                 ? request.reason().trim() : "sin motivo"));
         audit.setDeletedBy(by);

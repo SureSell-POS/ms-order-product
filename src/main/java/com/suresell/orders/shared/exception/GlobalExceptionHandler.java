@@ -109,10 +109,19 @@ public class GlobalExceptionHandler {
         return respuesta(HttpStatus.CONFLICT, ex.getFlag(), ex.getMessage());
     }
 
+    /**
+     * Rechazo al editar una orden: {@code ORDEN_YA_COBRADA} (ya se cobro; el
+     * camino es la anulacion) o {@code ORDER_EDIT_TIME_EXCEEDED} (orden abierta
+     * fuera de la ventana). Lleva el identificador estable en {@code error} y
+     * tambien en {@code codigo}, que es el nombre que leen el POS y el panel
+     * desde la ola 4.
+     */
     @ExceptionHandler(OrderEditNotAllowedException.class)
     public ResponseEntity<Map<String, String>> handleOrderEditNotAllowedException(OrderEditNotAllowedException ex) {
         logger.info("Rechazo de negocio ({}): {}", ex.getErrorCode(), ex.getMessage());
-        return respuesta(HttpStatus.FORBIDDEN, ex.getErrorCode(), ex.getMessage());
+        Map<String, String> m = cuerpo(ex.getErrorCode(), ex.getMessage());
+        m.put("codigo", ex.getErrorCode());
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(m);
     }
 
     /** Un dato que no vale. El texto lo escribió quien validó, para una persona. */

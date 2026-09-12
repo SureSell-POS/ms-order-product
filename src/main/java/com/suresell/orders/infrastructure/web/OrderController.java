@@ -8,9 +8,12 @@ import com.suresell.orders.domain.model.Order;
 import com.suresell.orders.domain.model.OrderEditHistory;
 import com.suresell.orders.domain.port.in.OrderPort;
 import com.suresell.orders.infrastructure.web.adapter.OrderRequestWebAdapter;
+import com.suresell.orders.multitenant.JwtTenantResolver;
+import com.suresell.orders.shared.exception.SoloAdministradorException;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import java.util.List;
 import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
@@ -27,9 +30,34 @@ public class OrderController {
     private static final int MAX_PAGE_SIZE = 50;
     private final OrderPort orderPort;
     private final OrderRequestWebAdapter orderRequestWebAdapter;
-    public OrderController(OrderPort orderPort, OrderRequestWebAdapter orderRequestWebAdapter) {
+    /**
+     * El rol sale del JWT, igual que en {@code OrderDeletionController} — aqui
+     * no hay Spring Security y cada endpoint que quiso comprobar el rol lo lee
+     * a mano. Eran siete sitios y este controlador no era ninguno de ellos,
+     * aunque es el que cambia el importe de una venta.
+     */
+    private final JwtTenantResolver resolver;
+    public OrderController(OrderPort orderPort, OrderRequestWebAdapter orderRequestWebAdapter,
+                           JwtTenantResolver resolver) {
         this.orderPort = orderPort;
         this.orderRequestWebAdapter = orderRequestWebAdapter;
+        this.resolver = resolver;
+    }
+
+    /**
+     * Lo que toca dinero es de administrador (2026-09-12).
+     *
+     * <p>Se lee el claim {@code role} del JWT, que es el patron de
+     * {@code OrderDeletionController:75}. El rechazo va por
+     * {@link SoloAdministradorException} para que el cuerpo salga con el
+     * contrato de errores del servicio ({@code error}, {@code mensaje},
+     * {@code codigo}) y no como un Map suelto.
+     */
+    private void exigirAdministrador(HttpServletRequest http, String queCosa) {
+        String role = resolver.resolveRole(http.getHeader("Authorization")).orElse("");
+        if (!"admin".equalsIgnoreCase(role)) {
+            throw new SoloAdministradorException(queCosa);
+        }
     }
     @GetMapping("/pager-availability")
     @Operation(summary = "Obtener disponibilidad de pagers", description = "Lista los pagers disponibles y ocupados (Amarillo y Azul del 1 al 16).")
@@ -49,10 +77,16 @@ public class OrderController {
         return ResponseEntity.status(HttpStatus.CREATED).body(body);
     }
     @PutMapping("/{orderId}")
-    @Operation(summary = "Editar orden")
+    @Operation(summary = "Editar orden (solo administrador, y solo si sigue abierta)",
+            description = "403 `SOLO_ADMINISTRADOR` si el JWT no es de un administrador; "
+                    + "403 `ORDEN_YA_COBRADA` si la orden ya se cobro (ahi el camino es la anulacion, "
+                    + "no la edicion); 403 `ORDER_EDIT_TIME_EXCEEDED` si la orden abierta lleva mas de "
+                    + "7 minutos.")
     public ResponseEntity<Map<String, String>> updateOrder(
             @Parameter(description = "ID de la orden") @PathVariable Long orderId,
-            @RequestBody Map<String, Object> payload) {
+            @RequestBody Map<String, Object> payload,
+            HttpServletRequest http) {
+        exigirAdministrador(http, "editar una orden");
         OrderRequestRecord dto = orderRequestWebAdapter.normalize(payload);
         orderPort.updateOrder(orderId, dto);
         return ResponseEntity.ok(Map.of("message", "Orden actualizada con éxito"));
@@ -92,10 +126,15 @@ public class OrderController {
         return ResponseEntity.ok(order);
     }
     @PatchMapping("/{orderId}/apply-discount")
-    @Operation(summary = "Aplicar cupón de descuento a orden")
+    @Operation(summary = "Aplicar cupón de descuento a orden (solo administrador)",
+            description = "Cambia el TOTAL de una venta: exige rol `admin` en el JWT (403 "
+                    + "`SOLO_ADMINISTRADOR` si no) y deja fila en `order_edit_history` con quien, "
+                    + "cuando, el total de antes y el de despues (V57).")
     public ResponseEntity<OrderResponseRecord> applyDiscountToOrder(
             @Parameter(description = "ID de la orden") @PathVariable Long orderId,
-            @RequestParam String discountCode) {
+            @RequestParam String discountCode,
+            HttpServletRequest http) {
+        exigirAdministrador(http, "aplicar un descuento a una orden");
         OrderResponseRecord updatedOrder = orderPort.applyDiscountToOrder(orderId, discountCode);
         return ResponseEntity.ok(updatedOrder);
     }

@@ -357,7 +357,8 @@ class OrderHandlerTest {
                 null, "MIXED",
                 List.of(new OrderRequestRecord.PaymentSplitRecord("CASH", BigDecimal.valueOf(4000)),
                         new OrderRequestRecord.PaymentSplitRecord("NEQUI", BigDecimal.valueOf(6000))),
-                null, null, null, null, null, null, null, null, null, null, null, null, null);
+                // V58: el ultimo es `facturaElectronica`, que esta venta no pide.
+                null, null, null, null, null, null, null, null, null, null, null, null, null, null);
 
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
                 () -> orderHandler.createOrUpdateOrder(request));

@@ -233,6 +233,21 @@ public class Order implements org.springframework.data.domain.Persistable<java.u
     @Column(name = "created_by")
     private Long createdBy;
 
+    /**
+     * V58 — Cliente de la factura electrónica, como JSON tal y como lo mandó el
+     * POS: {@code { nombre, documento, correo, telefono? }}. NULL = esta venta
+     * no pidió factura.
+     *
+     * <p>Se guarda como texto y la columna es JSONB: el servidor no interpreta
+     * estos datos —hoy no se emite nada—, solo los conserva para el día que la
+     * emisión exista. Cuando exista, el documento emitido (CUFE, número,
+     * estado) será otra tabla con su propio ciclo de vida; esto es únicamente a
+     * nombre de quién se pidió.
+     */
+    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
+    @Column(name = "factura_electronica", columnDefinition = "jsonb")
+    private String facturaElectronica;
+
     @OneToMany(mappedBy = "order", orphanRemoval = true)
     private List<OrderItem> items;
     @OneToOne(mappedBy = "order", orphanRemoval = true, fetch = FetchType.EAGER)
