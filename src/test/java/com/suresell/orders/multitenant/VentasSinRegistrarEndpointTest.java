@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -23,6 +24,7 @@ import java.util.UUID;
 
 import static org.hamcrest.Matchers.hasSize;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -151,5 +153,75 @@ class VentasSinRegistrarEndpointTest {
                 .andExpect(jsonPath("$[0].veces").exists())
                 .andExpect(jsonPath("$[0].ultimaVenta").exists())
                 .andExpect(jsonPath("$[0].ultimaOrden").exists());
+    }
+    /**
+     * 🔴 El camino REAL: la venta entra por donde entra en staging
+     * (`POST /orders/create`, como la manda el POS con F4), no con un INSERT
+     * a mano. Es la única forma de ver lo que el POS y -mt hacen de verdad
+     * con la línea «sin registrar».
+     */
+    @Test
+    @DisplayName("🔴 una venta cobrada por el POS con F4 aparece en la cola (camino real, no INSERT a mano)")
+    void ventaDelPosLlegaALaCola() throws Exception {
+        String negocio = "e2e-sin-registrar";
+        try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
+             Statement s = c.createStatement()) {
+            s.execute("INSERT INTO tenants (id, name, plan) VALUES ('" + negocio + "','S','pro') ON CONFLICT (id) DO NOTHING");
+            s.execute("INSERT INTO menu_products (id_product, tenant_id, name_product, price, active) VALUES ('P-" + negocio
+                    + "','" + negocio + "','Gaseosa',5000,true)");
+            s.execute("INSERT INTO sites (tenant_id, name, code, flujo_de_venta, is_default) VALUES ('" + negocio
+                    + "','Principal','PRINCIPAL','DIRECTO',true)");
+        }
+
+        // Tal cual lo arma el POS: `sin-registrar:<uuid>` y el nombre (con el
+        // código leído entre corchetes) en `instructions`.
+        String cuerpo = "{\"paymentMethod\":\"CASH\",\"items\":["
+                + "{\"productId\":\"P-" + negocio + "\",\"quantity\":1,\"unitPrice\":5000},"
+                + "{\"productId\":\"sin-registrar:" + UUID.randomUUID()
+                + "\",\"quantity\":1,\"unitPrice\":3500,\"instructions\":\"Galleta importada [7702009999999]\"}],"
+                + "\"idempotencyKey\":\"" + UUID.randomUUID() + "\"}";
+        mockMvc.perform(post("/orders/create").header("Authorization", bearer(negocio))
+                        .contentType(MediaType.APPLICATION_JSON).content(cuerpo))
+                .andExpect(status().isCreated());
+
+        mockMvc.perform(get("/api/menu/sin-registrar").header("Authorization", bearer(negocio)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(1)))
+                .andExpect(jsonPath("$[0].nombre").value("Galleta importada"))
+                .andExpect(jsonPath("$[0].codigo").value("7702009999999"))
+                .andExpect(jsonPath("$[0].veces").value(1))
+                .andExpect(jsonPath("$[0].ultimaVenta").exists())
+                .andExpect(jsonPath("$[0].ultimaOrden").exists());
+    }
+    /**
+     * 🔴 La relación OrderItem→Order es por UUID, no por el número de orden
+     * (V1__multitenant_baseline.sql:45, y {@code @JoinColumn("order_uuid_id")}).
+     * Hay un camino de escritura que solo pone el UUID
+     * ({@code PostgresOrderCloudSyncAdapter.upsertOrderItems}: la venta que
+     * sincroniza una caja local). Esas líneas están vendidas y cobradas; la
+     * cola tiene que verlas igual.
+     */
+    @Test
+    @DisplayName("🔴 una línea unida a su orden solo por UUID (order_id nulo) también entra en la cola")
+    void lineaUnidaPorUuidEntra() throws Exception {
+        String negocio = "uuid-sin-registrar";
+        UUID uuid = UUID.nameUUIDFromBytes((negocio + "-9201").getBytes(StandardCharsets.UTF_8));
+        try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
+             Statement s = c.createStatement()) {
+            s.execute("INSERT INTO tenants (id, name, plan) VALUES ('" + negocio + "','S','pro') ON CONFLICT (id) DO NOTHING");
+            s.execute("INSERT INTO orders (uuid_id, tenant_id, id_order, total, status, payment_method, created_at) VALUES ('"
+                    + uuid + "','" + negocio + "',9201,4000,'pagado','CASH', now())");
+            // Como la escribe el sincronizador: sin order_id, solo el UUID.
+            s.execute("INSERT INTO order_item (uuid_id, tenant_id, order_uuid_id, product_id, quantity, unit_price, total_price, instructions, precio_origen) "
+                    + "VALUES ('" + UUID.randomUUID() + "','" + negocio + "','" + uuid
+                    + "','sin-registrar:u1',1,4000,4000,'Pila AA [7702008888888]','POS')");
+        }
+
+        mockMvc.perform(get("/api/menu/sin-registrar").header("Authorization", bearer(negocio)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(1)))
+                .andExpect(jsonPath("$[0].nombre").value("Pila AA"))
+                .andExpect(jsonPath("$[0].codigo").value("7702008888888"))
+                .andExpect(jsonPath("$[0].ultimaOrden").value(9201));
     }
 }

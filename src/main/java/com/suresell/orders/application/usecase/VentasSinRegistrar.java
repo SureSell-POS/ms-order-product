@@ -44,27 +44,53 @@ public class VentasSinRegistrar {
         int ventana = Math.max(1, Math.min(dias, 365));
         return jdbc.query("""
                 SELECT nombre, codigo, precio, count(*) AS veces,
-                       max(created_at) AS ultima_venta, max(order_id) AS ultima_orden
+                       max(created_at) AS ultima_venta, max(orden) AS ultima_orden
                   FROM (
                     SELECT btrim(regexp_replace(COALESCE(oi.instructions, ''), '\\s*\\[[^\\]]*\\]\\s*$', '')) AS nombre,
                            NULLIF(substring(COALESCE(oi.instructions, '') FROM '\\[([^\\]]*)\\]\\s*$'), '') AS codigo,
-                           oi.unit_price AS precio,
+                           oi.unit_price AS precio, oi.tenant_id AS negocio,
                            -- Medido en staging: `order_item.created_at` llega NULL en las
                            -- ventas reales del POS; la fecha que vale es la de la orden.
-                           COALESCE(oi.created_at, o.created_at) AS created_at, oi.order_id
+                           COALESCE(oi.created_at, o.created_at) AS created_at,
+                           COALESCE(o.id_order, oi.order_id) AS orden
                       FROM public.order_item oi
-                      JOIN public.orders o ON o.id_order = oi.order_id AND o.tenant_id = oi.tenant_id
+                      -- La línea se une a su orden por UUID, que es la relación de
+                      -- verdad (V1__multitenant_baseline.sql:45, @JoinColumn
+                      -- "order_uuid_id"). Antes se unía por `oi.order_id`, que es
+                      -- una copia: el sincronizador de una caja local escribe la
+                      -- línea SOLO con el UUID
+                      -- (PostgresOrderCloudSyncAdapter.upsertOrderItems), así que
+                      -- esas ventas —cobradas y guardadas— no aparecían en la cola.
+                      -- La segunda rama solo entra cuando no hay UUID, así que una
+                      -- línea nunca casa con dos órdenes.
+                      JOIN public.orders o
+                        ON (o.uuid_id = oi.order_uuid_id
+                            OR (oi.order_uuid_id IS NULL AND o.id_order = oi.order_id))
+                       AND o.tenant_id = oi.tenant_id
                      WHERE oi.product_id LIKE ?
                        AND COALESCE(oi.created_at, o.created_at) >= now() - make_interval(days => ?)
                   ) lineas
                  -- Fuera lo que ya tiene dueño: si el código leído es hoy un código
-                 -- VIGENTE de un producto del negocio (V51; RLS acota al negocio),
-                 -- ese pendiente ya se resolvió —en la caja (registro rápido, V55)
-                 -- o en el panel— y la cola no lo vuelve a ofrecer. Un código
-                 -- retirado no cuenta: ya no es de nadie. Sin código, se queda.
-                 WHERE NOT EXISTS (
+                 -- VIGENTE de un producto del MISMO negocio (V51), ese pendiente ya
+                 -- se resolvió —en la caja (registro rápido, V55) o en el panel— y
+                 -- la cola no lo vuelve a ofrecer. Un código retirado no cuenta: ya
+                 -- no es de nadie.
+                 --
+                 -- Sin código NO se filtra, y se dice aparte en vez de dejarlo al
+                 -- azar de `= NULL`: una venta tecleada con F4 sin escanear nada es
+                 -- justo la que hay que registrar, y no puede depender de una
+                 -- comparación que no es verdadera ni falsa.
+                 --
+                 -- El `tenant_id` va explícito aunque RLS ya acote: este filtro
+                 -- BORRA filas de la cola, y si alguna vez el aislamiento falla
+                 -- (staging ya tuvo políticas de más, V54), el daño sería una cola
+                 -- vacía sin explicación en vez de una fila de más.
+                 WHERE lineas.codigo IS NULL
+                    OR NOT EXISTS (
                        SELECT 1 FROM public.codigos_de_producto c
-                        WHERE c.codigo = lineas.codigo AND c.retirado_en IS NULL)
+                        WHERE c.codigo = lineas.codigo
+                          AND c.tenant_id = lineas.negocio
+                          AND c.retirado_en IS NULL)
                  GROUP BY nombre, codigo, precio
                  ORDER BY ultima_venta DESC""",
                 (rs, i) -> new Pendiente(
