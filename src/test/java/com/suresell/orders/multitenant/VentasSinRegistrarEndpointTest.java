@@ -25,6 +25,7 @@ import java.util.UUID;
 import static org.hamcrest.Matchers.hasSize;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -223,5 +224,77 @@ class VentasSinRegistrarEndpointTest {
                 .andExpect(jsonPath("$[0].nombre").value("Pila AA"))
                 .andExpect(jsonPath("$[0].codigo").value("7702008888888"))
                 .andExpect(jsonPath("$[0].ultimaOrden").value(9201));
+    }
+
+    /**
+     * 🔴 EL CASO QUE PARECÍA UN FALLO Y NO LO ERA (medido en staging el
+     * 2026-09-13, negocio «PonyFerrelectrico»).
+     *
+     * <p>Santiago escaneó un código desconocido, lo registró desde la caja con
+     * nombre, categoría, precio y clave, lo vendió, y luego echó en falta la
+     * venta en «Vendidos sin registrar». La cola estaba vacía, y estaba
+     * <b>bien</b>: el REGISTRO RÁPIDO (⏎ sobre el aviso «no encontrado») crea
+     * un producto de verdad, y un producto del catálogo no es una venta sin
+     * registrar. La cola es solo de F4, que no crea nada.
+     *
+     * <p>Sin esta prueba, la próxima persona que lea «la cola está vacía»
+     * volverá a buscar el fallo en el filtro. Aquí queda dicho lo contrario:
+     * si el producto nació en la caja, la cola NO debe verlo — y lo que sí
+     * debe verse es la pastilla «Registrado en la caja», que se alimenta de
+     * {@code GET /api/menu/products/registrados-en-caja}.
+     */
+    @Test
+    @DisplayName("🔴 lo registrado desde la caja (registro rápido) y vendido NO entra en la cola; sale en «registrados en la caja»")
+    void loRegistradoEnLaCajaNoEsUnaVentaSinRegistrar() throws Exception {
+        String negocio = "escaner-sin-registrar";
+        try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
+             Statement s = c.createStatement()) {
+            s.execute("INSERT INTO tenants (id, name, plan) VALUES ('" + negocio + "','S','pro') ON CONFLICT (id) DO NOTHING");
+            s.execute("INSERT INTO sites (tenant_id, name, code, flujo_de_venta, is_default) VALUES ('" + negocio
+                    + "','Principal','PRINCIPAL','DIRECTO',true)");
+        }
+
+        // El administrador pone la clave de la caja (el PIN nunca viaja de vuelta).
+        mockMvc.perform(put("/account/sites/caja").header("Authorization", bearerRol(negocio, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"pin\":\"4821\"}"))
+                .andExpect(status().isOk());
+
+        // El cajero escanea un código que no está y lo REGISTRA (⏎), no lo vende con F4.
+        String creado = mockMvc.perform(post("/api/menu/products/registro-rapido")
+                        .header("Authorization", bearerRol(negocio, "cajero"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"nombre\":\"test scaner sin producto\",\"precio\":2000,"
+                                + "\"codigo\":\"7702001111111\",\"pin\":\"4821\"}"))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        String productoId = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(creado).path("idProduct").asText();
+        org.assertj.core.api.Assertions.assertThat(productoId).isNotBlank();
+
+        // Y lo vende, como hizo Santiago.
+        mockMvc.perform(post("/orders/create").header("Authorization", bearerRol(negocio, "cajero"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"paymentMethod\":\"CASH\",\"items\":[{\"productId\":\"" + productoId
+                                + "\",\"quantity\":2,\"unitPrice\":2000}],\"idempotencyKey\":\""
+                                + UUID.randomUUID() + "\"}"))
+                .andExpect(status().isCreated());
+
+        // La cola sigue vacía: no hubo ninguna venta SIN registrar.
+        mockMvc.perform(get("/api/menu/sin-registrar").header("Authorization", bearerRol(negocio, "cajero")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(0)));
+
+        // Donde sí tiene que verse es aquí, que es lo que pinta la pastilla.
+        mockMvc.perform(get("/api/menu/products/registrados-en-caja")
+                        .header("Authorization", bearerRol(negocio, "cajero")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[?(@.productoId == '" + productoId + "')]", hasSize(1)));
+    }
+
+    /** Como {@link #bearer}, pero con el rol: la configuración de caja es de administrador. */
+    private String bearerRol(String tenant, String rol) {
+        return "Bearer " + Jwts.builder().subject(rol + "@" + tenant)
+                .claim("tenant_id", tenant).claim("role", rol)
+                .signWith(Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8))).compact();
     }
 }

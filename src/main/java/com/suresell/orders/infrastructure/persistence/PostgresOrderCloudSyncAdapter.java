@@ -196,8 +196,9 @@ public class PostgresOrderCloudSyncAdapter implements OrderCloudSyncPort {
                     """
                     INSERT INTO order_item (
                         uuid_id, combo_group, instructions, product_id, quantity,
-                        total_price, unit_price, order_uuid_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        total_price, unit_price, order_uuid_id, order_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+                              (SELECT o.id_order FROM orders o WHERE o.uuid_id = ?))
                     """,
                     asUuid(itemNode.path("uuidId")),
                     asInteger(itemNode.path("comboGroup")),
@@ -206,6 +207,7 @@ public class PostgresOrderCloudSyncAdapter implements OrderCloudSyncPort {
                     asInteger(itemNode.path("quantity")),
                     asBigDecimal(itemNode.path("totalPrice")),
                     asBigDecimal(itemNode.path("unitPrice")),
+                    orderUuid,
                     orderUuid);
         }
     }
