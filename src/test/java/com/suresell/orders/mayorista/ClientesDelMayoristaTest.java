@@ -368,4 +368,21 @@ class ClientesDelMayoristaTest {
                 + "WHERE c.tenant_id = ? AND c.documento = '300' AND e.campo = 'dv' ORDER BY e.ocurrido_en", String.class, T))
                 .containsExactly(String.valueOf(Nit.dv("300")), null);
     }
+
+    @Test
+    @DisplayName("🔴 un token sin rol no edita, no reactiva ni lee el historial de un cliente: 403 y nada escrito")
+    void sinRol() throws Exception {
+        String sinRol = "Bearer " + Jwts.builder().subject(ADMIN).claim("tenant_id", T)
+                .claim("modules", List.of("ventas", "mayorista", "cartera"))
+                .signWith(Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8))).compact();
+        mockMvc.perform(put("/api/mayorista/clientes/100").header("Authorization", sinRol)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"nombre\":\"Cambiado\"}"))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/mayorista/clientes/100/desactivar").header("Authorization", sinRol)).andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/mayorista/clientes/100/reactivar").header("Authorization", sinRol)).andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/mayorista/clientes/100/eventos").header("Authorization", sinRol)).andExpect(status().isForbidden());
+        assertThat(dueno.queryForObject("SELECT nombre FROM clientes WHERE tenant_id = ? AND documento = '100'", String.class, T))
+                .isEqualTo("Tienda de Ana");
+        assertThat(dueno.queryForObject("SELECT count(*) FROM clientes_eventos WHERE tenant_id = ?", Integer.class, T)).isZero();
+    }
 }

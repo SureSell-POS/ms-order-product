@@ -424,4 +424,110 @@ class CarteraTest {
         assertThat(dueno.queryForObject("SELECT total_expected_cash FROM daily_closures WHERE tenant_id = ?", BigDecimal.class, T))
                 .isEqualByComparingTo("50000");
     }
+
+    // ================================================================ caras restrictivas
+
+    private BigDecimal deudaDelOtro(String doc) {
+        return dueno.queryForObject("SELECT COALESCE(sum(CASE WHEN type = 'DEBIT' THEN amount ELSE -amount END), 0) "
+                + "FROM debt_transactions WHERE tenant_id = ? AND account_id = (SELECT id FROM accounts_receivable "
+                + "WHERE tenant_id = ? AND customer_document = ?)", BigDecimal.class, OTRO, OTRO, doc);
+    }
+
+    @Test
+    @DisplayName("🔴 escrituras cruzadas: un cliente, un recibo o un cupo de OTRO negocio no existen para este, y su libro no se toca")
+    void escriturasCruzadas() throws Exception {
+        // Un cliente que solo existe en el otro negocio, con su cuenta y un recibo suyo.
+        dueno.update("INSERT INTO clientes (tenant_id, documento, nombre, creado_por) VALUES (?, '777', 'Solo del otro', 's')", OTRO);
+        String cuentaAjena = cuenta(OTRO, "777", "Solo del otro", 100000, 40000);
+        debito(OTRO, cuentaAjena, 40000, hoy.minusDays(3), hoy.plusDays(5), UUID.randomUUID());
+        String reciboAjeno = dueno.queryForObject("""
+                INSERT INTO recibos_de_caja (tenant_id, numero, cliente_documento, monto, medio, ocurrido_en, idempotency_key)
+                VALUES (?, 0, '777', 1000, 'EFECTIVO', now(), 'ajeno-1') RETURNING id::text""", String.class, OTRO);
+        BigDecimal deudaAntes = deudaDelOtro("777");
+        long recibosAntes = dueno.queryForObject("SELECT count(*) FROM recibos_de_caja WHERE tenant_id = ?", Long.class, OTRO);
+        // Abrir su cuenta con cupo ya dejó un evento `cupo` (V66): se cuenta desde aquí.
+        long eventosAntes = dueno.queryForObject("SELECT count(*) FROM clientes_eventos WHERE tenant_id = ?", Long.class, OTRO);
+
+        abonar(ADMIN, "admin", abono("777", 1000, "EFECTIVO", "cruzado-1"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("clienteDocumento"));
+        mockMvc.perform(post("/api/cartera/recibos/" + reciboAjeno + "/anular").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"motivo\":\"DUPLICADO\"}"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("id"));
+        mockMvc.perform(put("/api/cartera/clientes/777/cupo").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"cupo\":999999}"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("documento"));
+        mockMvc.perform(post("/api/cartera/clientes/777/insolvencia").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"desde\":\"" + hoy + "\"}"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("documento"));
+        mockMvc.perform(get("/api/cartera/clientes/777/estado-de-cuenta").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isBadRequest());
+
+        assertThat(deudaDelOtro("777")).isEqualByComparingTo(deudaAntes);
+        assertThat(dueno.queryForObject("SELECT count(*) FROM recibos_de_caja WHERE tenant_id = ?", Long.class, OTRO)).isEqualTo(recibosAntes);
+        assertThat(dueno.queryForMap("SELECT credit_limit, total_debt FROM accounts_receivable WHERE tenant_id = ? AND customer_document = '777'", OTRO))
+                .satisfies(m -> {
+                    assertThat(new BigDecimal(m.get("credit_limit").toString())).isEqualByComparingTo("100000");
+                    assertThat(new BigDecimal(m.get("total_debt").toString())).isEqualByComparingTo("40000");
+                });
+        assertThat(dueno.queryForObject("SELECT en_insolvencia_desde FROM clientes WHERE tenant_id = ? AND documento = '777'",
+                java.sql.Date.class, OTRO)).isNull();
+        assertThat(dueno.queryForObject("SELECT count(*) FROM clientes_eventos WHERE tenant_id = ?", Long.class, OTRO)).isEqualTo(eventosAntes);
+        // Y en este negocio tampoco se escribió nada.
+        assertThat(dueno.queryForObject("SELECT count(*) FROM recibos_de_caja WHERE tenant_id = ?", Long.class, T)).isZero();
+    }
+
+    @Test
+    @DisplayName("🔴 un token sin rol no lee ni escribe cartera: 403 en cada ruta")
+    void sinRol() throws Exception {
+        String sinRol = "Bearer " + Jwts.builder().subject(CAJA).claim("tenant_id", T)
+                .claim("modules", List.of("ventas", "mayorista", "cartera"))
+                .signWith(Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8))).compact();
+        mockMvc.perform(get("/api/cartera/clientes").header("Authorization", sinRol)).andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/cartera/clientes/" + TIENDA_A + "/estado-de-cuenta").header("Authorization", sinRol))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/cartera/recibos").header("Authorization", sinRol).contentType(MediaType.APPLICATION_JSON)
+                .content(abono(TIENDA_A, 1000, "EFECTIVO", "sin-rol"))).andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/cartera/resumen").header("Authorization", sinRol)).andExpect(status().isForbidden());
+        assertThat(dueno.queryForObject("SELECT count(*) FROM recibos_de_caja WHERE tenant_id = ?", Long.class, T)).isZero();
+    }
+
+    @Test
+    @DisplayName("🔴 un vendedor cuyo token no es de ningún usuario no ve ni cobra nada (el servidor filtra por -1)")
+    void vendedorFantasma() throws Exception {
+        String fantasma = "fantasma@qa-cartera.invalid";
+        mockMvc.perform(get("/api/cartera/clientes").header("Authorization", bearer(fantasma, "vendedor")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(0));
+        abonar(fantasma, "vendedor", abono(TIENDA_A, 1000, "EFECTIVO", "fantasma-1")).andExpect(status().isBadRequest());
+        assertThat(dueno.queryForObject("SELECT count(*) FROM recibos_de_caja WHERE tenant_id = ?", Long.class, T)).isZero();
+    }
+
+    @Test
+    @DisplayName("🔴 sin RLS (el dueño la salta): el filtro de negocio ESCRITO impide anular, cobrar o cambiar el cupo de otro negocio")
+    void filtroExplicitoSinRls() {
+        dueno.update("INSERT INTO clientes (tenant_id, documento, nombre, creado_por) VALUES (?, '777', 'Solo del otro', 's')", OTRO);
+        String cuentaAjena = cuenta(OTRO, "777", "Solo del otro", 100000, 40000);
+        debito(OTRO, cuentaAjena, 40000, hoy.minusDays(3), hoy.plusDays(5), UUID.randomUUID());
+        UUID reciboAjeno = dueno.queryForObject("""
+                INSERT INTO recibos_de_caja (tenant_id, numero, cliente_documento, monto, medio, ocurrido_en, idempotency_key)
+                VALUES (?, 0, '777', 1000, 'EFECTIVO', now(), 'ajeno-sin-rls') RETURNING id""", UUID.class, OTRO);
+        // Con el dueño de la base RLS no aplica: solo queda lo que el código escribe.
+        Cartera sinRls = new Cartera(dueno);
+        Cartera.Quien admin = new Cartera.Quien(T, "admin", this.admin);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> sinRls.anular(admin, reciboAjeno, "DUPLICADO"))
+                .isInstanceOf(com.suresell.orders.shared.exception.DatoInvalidoException.class)
+                .satisfies(e -> assertThat(((com.suresell.orders.shared.exception.DatoInvalidoException) e).campo()).isEqualTo("id"));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> sinRls.registrarRecibo(admin, new Cartera.NuevoRecibo(
+                        "777", new BigDecimal("1000"), "EFECTIVO", null, null, null, "sin-rls-1", null, null)))
+                .isInstanceOf(com.suresell.orders.shared.exception.DatoInvalidoException.class)
+                // La primera capa (la cuenta, buscada con el negocio escrito), no la segunda (las facturas del negocio).
+                .satisfies(e -> assertThat(((com.suresell.orders.shared.exception.DatoInvalidoException) e).campo())
+                        .isEqualTo("clienteDocumento"));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> sinRls.cambiarCupo(admin, "777", new BigDecimal("999999")))
+                .isInstanceOf(com.suresell.orders.shared.exception.DatoInvalidoException.class)
+                .satisfies(e -> assertThat(((com.suresell.orders.shared.exception.DatoInvalidoException) e).campo()).isEqualTo("documento"));
+        assertThat(dueno.queryForObject("SELECT count(*) FROM recibos_de_caja WHERE anula_recibo_id = ?", Long.class, reciboAjeno)).isZero();
+        assertThat(dueno.queryForObject("SELECT count(*) FROM recibos_de_caja WHERE tenant_id = ?", Long.class, T)).isZero();
+        assertThat(dueno.queryForObject("SELECT credit_limit FROM accounts_receivable WHERE tenant_id = ? AND customer_document = '777'",
+                BigDecimal.class, OTRO)).isEqualByComparingTo("100000");
+    }
 }
