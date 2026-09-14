@@ -83,6 +83,7 @@ class MayoristaEndpointTest {
     void sembrar() {
         dueno = new JdbcTemplate(new DriverManagerDataSource(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword()));
         for (String t : new String[] {A, B}) {
+            dueno.update("DELETE FROM debt_transactions WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM accounts_receivable WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM clientes_eventos WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM clientes WHERE tenant_id = ?", t);
@@ -256,10 +257,15 @@ class MayoristaEndpointTest {
         for (String[] n : new String[][] {{A, "5000"}, {B, "777000"}}) {
             dueno.update("INSERT INTO clientes (tenant_id, documento, nombre, creado_por) VALUES (?, '900123456', 'Tienda', 'semilla')",
                     n[0]);
+            String cuenta = UUID.randomUUID().toString();
             dueno.update("INSERT INTO accounts_receivable (id, tenant_id, created_at, credit_limit, customer_document, "
                             + "customer_name, status, total_debt, updated_at) "
                             + "VALUES (?, ?, now(), 100000, '900123456', 'Tienda', 'ACTIVE', ?, now())",
-                    UUID.randomUUID().toString(), n[0], new java.math.BigDecimal(n[1]));
+                    cuenta, n[0], new java.math.BigDecimal(n[1]));
+            // F4.4: la deuda de la ficha sale del libro, no de total_debt.
+            dueno.update("INSERT INTO debt_transactions (id, tenant_id, account_id, amount, created_at, transaction_date, type) "
+                    + "VALUES (?, ?, ?, ?, now(), current_date, 'DEBIT')", UUID.randomUUID().toString(), n[0], cuenta,
+                    new java.math.BigDecimal(n[1]));
         }
         // El dueño salta RLS: aquí solo el filtro escrito separa los negocios.
         List<Map<String, Object>> clientes = new ListasDePrecio(dueno).clientes(A);

@@ -23,11 +23,25 @@ public class ClienteEnInsolvenciaException extends RuntimeException {
     private final String clienteDocumento;
 
     public ClienteEnInsolvenciaException(String clienteDocumento, LocalDate desde) {
-        super("El cliente " + clienteDocumento + " está en proceso de insolvencia"
-                + (desde == null ? "" : " desde el " + String.format("%02d/%02d/%04d",
-                        desde.getDayOfMonth(), desde.getMonthValue(), desde.getYear()))
+        this(clienteDocumento, "El cliente " + clienteDocumento + " está en proceso de insolvencia" + desdeEl(desde)
                 + ": no se le vende a crédito. La venta no se registró.");
+    }
+
+    private ClienteEnInsolvenciaException(String clienteDocumento, String mensaje) {
+        super(mensaje);
         this.clienteDocumento = clienteDocumento;
+    }
+
+    /** F4.4: la insolvencia suspende también los cobros. El recibo no se registra. */
+    public static ClienteEnInsolvenciaException alCobrar(String clienteDocumento, LocalDate desde) {
+        return new ClienteEnInsolvenciaException(clienteDocumento, "El cliente " + clienteDocumento
+                + " está en proceso de insolvencia" + desdeEl(desde)
+                + ": los cobros están suspendidos. El recibo no se registró.");
+    }
+
+    private static String desdeEl(LocalDate desde) {
+        return desde == null ? "" : " desde el " + String.format("%02d/%02d/%04d",
+                desde.getDayOfMonth(), desde.getMonthValue(), desde.getYear());
     }
 
     public String clienteDocumento() {

@@ -132,8 +132,8 @@ public class ListasDePrecio {
             c.lista_precio_id, l.nombre AS lista,
             c.tipo_documento, c.razon_social, c.tipo_cliente, c.direccion_entrega, c.municipio_dane,
             c.correo, c.whatsapp, c.vendedor_id, v.nombre AS vendedor, c.exige_factura, c.en_insolvencia_desde,
-            a.total_debt AS deuda, a.credit_limit AS cupo, a.status AS estado_cartera,
-            (a.total_debt > a.credit_limit) AS excede_cupo
+            libro.saldo AS deuda, a.credit_limit AS cupo, a.status AS estado_cartera,
+            (libro.saldo > a.credit_limit) AS excede_cupo
             """;
 
     /**
@@ -146,6 +146,11 @@ public class ListasDePrecio {
               LEFT JOIN listas_precio l ON l.tenant_id = c.tenant_id AND l.id = c.lista_precio_id
               LEFT JOIN users v ON v.tenant_id = c.tenant_id AND v.id = c.vendedor_id
               LEFT JOIN accounts_receivable a ON a.tenant_id = c.tenant_id AND a.customer_document = c.documento
+              -- F4.4: la deuda sale del libro (DEBIT − CREDIT), nunca de total_debt.
+              LEFT JOIN LATERAL (
+                  SELECT COALESCE(sum(CASE WHEN d.type = 'DEBIT' THEN d.amount ELSE -d.amount END), 0) AS saldo
+                    FROM debt_transactions d
+                   WHERE d.tenant_id = a.tenant_id AND d.account_id = a.id) libro ON a.id IS NOT NULL
             """;
 
     /**

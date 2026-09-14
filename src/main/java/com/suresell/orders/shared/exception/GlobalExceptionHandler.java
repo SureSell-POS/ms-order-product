@@ -179,6 +179,15 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(m);
     }
 
+    /** 409: un recibo o una anulación que choca con la cartera ya escrita (F4.4). */
+    @ExceptionHandler(ConflictoDeCarteraException.class)
+    public ResponseEntity<Map<String, String>> handleConflictoDeCartera(ConflictoDeCarteraException ex) {
+        logger.warn("409 {}: {}", ex.codigo(), ex.getMessage());
+        Map<String, String> m = cuerpo(ex.codigo(), ex.getMessage());
+        m.put("codigo", ex.codigo());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(m);
+    }
+
     /** 409: la venta es de otro vendedor que el del token. El POS la aparta sin gastar intentos. */
     @ExceptionHandler(UsuarioDeOtraSesionException.class)
     public ResponseEntity<Map<String, String>> handleUsuarioDeOtraSesion(UsuarioDeOtraSesionException ex) {
