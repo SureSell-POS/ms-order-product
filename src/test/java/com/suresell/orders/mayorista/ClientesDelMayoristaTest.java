@@ -132,7 +132,7 @@ class ClientesDelMayoristaTest {
     void editarDejaHistoriaConAutor() throws Exception {
         mockMvc.perform(put("/api/mayorista/clientes/300").header("Authorization", bearer(ADMIN, "admin"))
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"tipoCliente\":\"dulceria\",\"direccionEntrega\":\"Calle 1 # 2-3\",\"plazoDias\":8,"
+                        .content("{\"nombre\":\"Sin vendedor\",\"tipoCliente\":\"dulceria\",\"direccionEntrega\":\"Calle 1 # 2-3\",\"plazoDias\":8,"
                                 + "\"vendedorId\":" + ana + ",\"exigeFactura\":true,\"municipioDane\":\"05001\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.tipo_cliente").value("DULCERIA"))
@@ -202,5 +202,116 @@ class ClientesDelMayoristaTest {
         }
         assertThat(dueno.queryForObject("SELECT usuario_id FROM clientes_eventos WHERE tenant_id = ? AND campo = 'plazo_dias'",
                 Long.class, T)).isNull();
+    }
+
+    private static final String TODO_EL_FORMULARIO_DE_ANA = "{\"nombre\":\"Tienda de Ana\",\"telefono\":\"3001112233\","
+            + "\"correo\":\"ana@tienda.invalid\",\"direccionEntrega\":\"Cra 7 # 1-1\",\"plazoDias\":15,"
+            + "\"exigeFactura\":true,\"vendedorId\":%d}";
+
+    @Test
+    @DisplayName("🔴 F1.11: el PUT es reemplazo completo: null vacía (con su evento a NULL), nombre obligatorio, lista de otro negocio no")
+    void putReemplazoCompleto() throws Exception {
+        mockMvc.perform(put("/api/mayorista/clientes/100").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON).content(String.format(TODO_EL_FORMULARIO_DE_ANA, ana)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.correo").value("ana@tienda.invalid"))
+                .andExpect(jsonPath("$.en_insolvencia_desde").isEmpty());
+        // El mismo formulario sin correo, sin dirección, sin plazo y sin vendedor: quedan vacíos.
+        mockMvc.perform(put("/api/mayorista/clientes/100").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"nombre\":\"Tienda de Ana\",\"telefono\":\"3001112233\",\"correo\":\"  \","
+                                + "\"exigeFactura\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.correo").isEmpty())
+                .andExpect(jsonPath("$.direccion_entrega").isEmpty())
+                .andExpect(jsonPath("$.plazo_dias").isEmpty())
+                .andExpect(jsonPath("$.vendedor_id").isEmpty())
+                .andExpect(jsonPath("$.telefono").value("3001112233"));
+        List<Map<String, Object>> vaciados = dueno.queryForList(
+                "SELECT campo, valor_nuevo FROM clientes_eventos WHERE tenant_id = ? AND valor_nuevo IS NULL ORDER BY campo", T);
+        assertThat(vaciados).extracting(e -> e.get("campo"))
+                .containsExactly("correo", "direccion_entrega", "plazo_dias", "vendedor_id");
+
+        int antes = dueno.queryForObject("SELECT count(*) FROM clientes_eventos WHERE tenant_id = ?", Integer.class, T);
+        mockMvc.perform(put("/api/mayorista/clientes/100").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"telefono\":\"1\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.campo").value("nombre"));
+        dueno.update("INSERT INTO tenants (id, name, plan) VALUES ('qa-clientes-may-otro', 'otro', 'pro') ON CONFLICT (id) DO NOTHING");
+        dueno.update("DELETE FROM listas_precio WHERE tenant_id = 'qa-clientes-may-otro' AND codigo = 'ajena'");
+        String listaAjena = dueno.queryForObject("INSERT INTO listas_precio (tenant_id, codigo, nombre, creado_por) "
+                + "VALUES ('qa-clientes-may-otro', 'ajena', 'Ajena', 's') RETURNING id::text", String.class);
+        mockMvc.perform(put("/api/mayorista/clientes/100").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"nombre\":\"Tienda de Ana\",\"listaPrecioId\":\"" + listaAjena + "\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.campo").value("listaPrecioId"));
+        assertThat(dueno.queryForObject("SELECT count(*) FROM clientes_eventos WHERE tenant_id = ?", Integer.class, T))
+                .isEqualTo(antes);
+    }
+
+    @Test
+    @DisplayName("F1.11: reactivar es simétrico a desactivar; reactivar uno activo responde 200 sin evento; solo admin")
+    void reactivar() throws Exception {
+        mockMvc.perform(post("/api/mayorista/clientes/100/reactivar").header("Authorization", bearer(CAJA, "cajero")))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/mayorista/clientes/100/desactivar").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.activo").value(false));
+        mockMvc.perform(post("/api/mayorista/clientes/100/reactivar").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.activo").value(true));
+        mockMvc.perform(post("/api/mayorista/clientes/100/reactivar").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.activo").value(true));
+        assertThat(dueno.queryForList("SELECT valor_nuevo FROM clientes_eventos WHERE tenant_id = ? AND campo = 'activo' "
+                + "ORDER BY ocurrido_en, valor_nuevo DESC", String.class, T)).containsExactly("false", "true");
+        mockMvc.perform(post("/api/mayorista/clientes/999/reactivar").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("documento"));
+    }
+
+    @Test
+    @DisplayName("🔴 F1.11: el historial pagina por cursor sin saltar ni repetir filas del mismo instante, y no ve otro negocio")
+    void historialPorCursor() throws Exception {
+        // Un solo PUT escribe 6 eventos con el MISMO ocurrido_en: el caso en que un cursor por fecha sola falla.
+        mockMvc.perform(put("/api/mayorista/clientes/100").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON).content(String.format(TODO_EL_FORMULARIO_DE_ANA, pedro)))
+                .andExpect(status().isOk());
+        // Otro negocio con el mismo documento y su propia historia.
+        String otro = "qa-clientes-may-otro";
+        dueno.update("DELETE FROM clientes_eventos WHERE tenant_id = ?", otro);
+        dueno.update("DELETE FROM clientes WHERE tenant_id = ?", otro);
+        dueno.update("INSERT INTO tenants (id, name, plan) VALUES (?, ?, 'pro') ON CONFLICT (id) DO NOTHING", otro, otro);
+        dueno.update("INSERT INTO clientes (tenant_id, documento, nombre, creado_por) VALUES (?, '100', 'Ajena', 's')", otro);
+        dueno.update("UPDATE clientes SET nombre = 'Ajena 2', telefono = '9' WHERE tenant_id = ? AND documento = '100'", otro);
+
+        java.util.Set<String> vistos = new java.util.HashSet<>();
+        String cursor = null;
+        int paginas = 0;
+        do {
+            var peticion = get("/api/mayorista/clientes/100/eventos").param("limite", "4")
+                    .header("Authorization", bearer(ADMIN, "admin"));
+            if (cursor != null) {
+                peticion.param("antesDe", cursor);
+            }
+            String cuerpo = mockMvc.perform(peticion).andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+            var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(cuerpo);
+            for (var e : json.get("eventos")) {
+                assertThat(vistos.add(e.get("id").asText())).as("fila repetida entre páginas").isTrue();
+                assertThat(e.get("usuario").asText()).isEqualTo(ADMIN);
+                assertThat(e.has("campo") && e.has("valor_anterior") && e.has("valor_nuevo") && e.has("ocurrido_en")).isTrue();
+            }
+            cursor = json.get("siguiente").isNull() ? null : json.get("siguiente").asText();
+            paginas++;
+        } while (cursor != null && paginas < 10);
+        assertThat(vistos).hasSize(dueno.queryForObject("SELECT count(*) FROM clientes_eventos WHERE tenant_id = ?", Integer.class, T));
+        assertThat(vistos).hasSize(6);
+        assertThat(paginas).isEqualTo(2);
+
+        mockMvc.perform(get("/api/mayorista/clientes/100/eventos").header("Authorization", bearer(ANA, "vendedor")))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/mayorista/clientes/100/eventos").param("limite", "201")
+                        .header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("limite"));
+        mockMvc.perform(get("/api/mayorista/clientes/100/eventos").param("antesDe", "ayer")
+                        .header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("antesDe"));
     }
 }

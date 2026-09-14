@@ -112,6 +112,7 @@ public class AtribucionDeLaVenta {
      * @return true si abrió la cuenta
      */
     public boolean asegurarCuentaDeCredito(String negocio, String documento) {
+        exigirQueNoEsteEnInsolvencia(negocio, documento);
         if (negocio == null || documento == null || documento.isBlank()) {
             return false;
         }
@@ -124,12 +125,29 @@ public class AtribucionDeLaVenta {
                        left(c.telefono, 20), 'ACTIVE', 0, now()
                   FROM clientes c
                  WHERE c.tenant_id = ? AND c.documento = ? AND c.activo
-                   -- customer_document es VARCHAR(20) (V28) y un documento no se recorta:
-                   -- si no cabe, no se abre y el disparador lo dice (F4.2 lo pasa a TEXT).
-                   AND length(c.documento) <= 20
                    AND NOT EXISTS (SELECT 1 FROM accounts_receivable a
                                     WHERE a.tenant_id = c.tenant_id AND a.customer_document = c.documento)""",
                 negocio, documento);
         return abiertas > 0;
+    }
+
+    /**
+     * F4.3: a un cliente con la insolvencia ya cumplida (día de Bogotá) no se le
+     * vende a crédito: 409 {@code CLIENTE_EN_INSOLVENCIA}, antes de escribir nada.
+     * La base (V65) lo vuelve a comprobar.
+     */
+    public void exigirQueNoEsteEnInsolvencia(String negocio, String documento) {
+        if (negocio == null || documento == null || documento.isBlank()) {
+            return;
+        }
+        List<java.sql.Date> desde = jdbc.queryForList("""
+                SELECT c.en_insolvencia_desde FROM clientes c
+                 WHERE c.tenant_id = ? AND c.documento = ?
+                   AND c.en_insolvencia_desde <= (now() AT TIME ZONE 'America/Bogota')::date""",
+                java.sql.Date.class, negocio, documento);
+        if (!desde.isEmpty()) {
+            throw new com.suresell.orders.shared.exception.ClienteEnInsolvenciaException(
+                    documento, desde.get(0).toLocalDate());
+        }
     }
 }

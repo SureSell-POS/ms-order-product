@@ -54,6 +54,9 @@ public class GlobalExceptionHandler {
 
     /** Un RAISE EXCEPTION nuestro: el texto está escrito para leerse. */
     private static final String RAISE_NUESTRO = "P0001";
+    /** Texto del RAISE de {@code fn_venta_a_credito} (V65). Si cambia allí, cambia aquí. */
+    private static final java.util.regex.Pattern INSOLVENCIA_DE_LA_BASE =
+            java.util.regex.Pattern.compile("El cliente (.+) esta en proceso de insolvencia desde el ");
     private static final String CLAVE_DUPLICADA = "23505";
     private static final String REFERENCIA_INEXISTENTE = "23503";
     private static final String REGLA_INCUMPLIDA = "23514";
@@ -162,6 +165,17 @@ public class GlobalExceptionHandler {
         Map<String, String> m = cuerpo(NegocioDeOtraSesionException.CODIGO, ex.getMessage());
         m.put("codigo", NegocioDeOtraSesionException.CODIGO);
         m.put("negocioDeLaVenta", ex.negocioDeLaVenta());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(m);
+    }
+
+    /** 409: venta a crédito a un cliente en insolvencia. El POS la aparta con su motivo. */
+    @ExceptionHandler(ClienteEnInsolvenciaException.class)
+    public ResponseEntity<Map<String, String>> handleClienteEnInsolvencia(ClienteEnInsolvenciaException ex) {
+        logger.warn("409 {}: venta a credito al cliente {}. No se escribe nada.",
+                ClienteEnInsolvenciaException.CODIGO, ex.clienteDocumento());
+        Map<String, String> m = cuerpo(ClienteEnInsolvenciaException.CODIGO, ex.getMessage());
+        m.put("codigo", ClienteEnInsolvenciaException.CODIGO);
+        m.put("clienteDocumento", ex.clienteDocumento());
         return ResponseEntity.status(HttpStatus.CONFLICT).body(m);
     }
 
@@ -316,6 +330,11 @@ public class GlobalExceptionHandler {
         String detalle = sql == null ? soloLaPrimeraLinea(ex.getMessage()) : soloLaPrimeraLinea(sql.getMessage());
 
         if (RAISE_NUESTRO.equals(sqlState)) {
+            // El disparador de V65 cuando la comprobación previa perdió la carrera: mismo código.
+            java.util.regex.Matcher insolvencia = INSOLVENCIA_DE_LA_BASE.matcher(detalle == null ? "" : detalle);
+            if (insolvencia.find()) {
+                return handleClienteEnInsolvencia(new ClienteEnInsolvenciaException(insolvencia.group(1), null));
+            }
             logger.info("Rechazo de la base (P0001): {}", detalle);
             return respuesta(HttpStatus.CONFLICT, "CONFLICT", detalle);
         }

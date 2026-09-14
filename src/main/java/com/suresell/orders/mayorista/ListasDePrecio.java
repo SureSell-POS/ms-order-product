@@ -131,7 +131,7 @@ public class ListasDePrecio {
             c.id, c.documento, c.nombre, c.telefono, c.plazo_dias, c.activo,
             c.lista_precio_id, l.nombre AS lista,
             c.tipo_documento, c.razon_social, c.tipo_cliente, c.direccion_entrega, c.municipio_dane,
-            c.correo, c.whatsapp, c.vendedor_id, v.nombre AS vendedor, c.exige_factura,
+            c.correo, c.whatsapp, c.vendedor_id, v.nombre AS vendedor, c.exige_factura, c.en_insolvencia_desde,
             a.total_debt AS deuda, a.credit_limit AS cupo, a.status AS estado_cartera,
             (a.total_debt > a.credit_limit) AS excede_cupo
             """;
@@ -185,7 +185,12 @@ public class ListasDePrecio {
         return filas.stream().findFirst();
     }
 
-    /** Lo que se puede cambiar de un cliente (F1.6). null = no cambia. */
+    /**
+     * Los campos editables de un cliente (F1.6, contrato 2026-09-14). REEMPLAZO
+     * COMPLETO: llega el formulario entero y {@code null} (o texto en blanco) vacía
+     * el campo. {@code nombre} es obligatorio; {@code exigeFactura} null es false;
+     * {@code plazoDias} null es «sin plazo pactado». Fuera: documento, activo y cupo.
+     */
     public record CambiosDelCliente(String nombre, String telefono, UUID listaPrecioId, Integer plazoDias,
                                     String tipoDocumento, String razonSocial, String tipoCliente,
                                     String direccionEntrega, String municipioDane, String correo, String whatsapp,
@@ -198,7 +203,9 @@ public class ListasDePrecio {
             "CAFETERIA", "BAR_CIGARRERIA", "HOTEL", "INSTITUCIONAL", "SUBDISTRIBUIDOR");
 
     /**
-     * F1.6: cambia un cliente del negocio. Cada campo que cambia queda en
+     * F1.6: reemplaza los campos editables de un cliente del negocio (un PUT a
+     * medias BORRA lo que no mande: hoy solo lo llama el panel, que manda el
+     * formulario entero). Cada campo que cambia queda en
      * {@code clientes_eventos} con su autor: se fija {@code app.user_id} en esta
      * transacción, que es lo que lee el disparador de V62. Los catálogos se validan
      * aquí para responder con {@code campo}; la base es el suelo.
@@ -226,8 +233,13 @@ public class ListasDePrecio {
         if (c.plazoDias() != null && (c.plazoDias() < 0 || c.plazoDias() > 365)) {
             throw new com.suresell.orders.shared.exception.DatoInvalidoException("plazoDias", "El plazo va de 0 a 365 días.");
         }
-        if (c.nombre() != null && c.nombre().isBlank()) {
+        if (c.nombre() == null || c.nombre().isBlank()) {
             throw new com.suresell.orders.shared.exception.DatoInvalidoException("nombre", "El nombre no puede quedar vacío.");
+        }
+        if (c.listaPrecioId() != null && jdbc.queryForList("SELECT 1 FROM listas_precio WHERE tenant_id = ? AND id = ?",
+                Integer.class, negocio, c.listaPrecioId()).isEmpty()) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("listaPrecioId",
+                    "La lista de precios no es de este negocio.");
         }
         if (c.vendedorId() != null) {
             List<String> rol = jdbc.queryForList("SELECT role FROM users WHERE tenant_id = ? AND id = ?",
@@ -240,24 +252,14 @@ public class ListasDePrecio {
         fijarAutor(autor);
         int n = jdbc.update("""
                 UPDATE clientes SET
-                       nombre = COALESCE(?, nombre),
-                       telefono = COALESCE(?, telefono),
-                       lista_precio_id = COALESCE(?, lista_precio_id),
-                       plazo_dias = COALESCE(?, plazo_dias),
-                       tipo_documento = COALESCE(?, tipo_documento),
-                       razon_social = COALESCE(?, razon_social),
-                       tipo_cliente = COALESCE(?, tipo_cliente),
-                       direccion_entrega = COALESCE(?, direccion_entrega),
-                       municipio_dane = COALESCE(?, municipio_dane),
-                       correo = COALESCE(?, correo),
-                       whatsapp = COALESCE(?, whatsapp),
-                       vendedor_id = COALESCE(?, vendedor_id),
-                       exige_factura = COALESCE(?, exige_factura),
+                       nombre = ?, telefono = ?, lista_precio_id = ?, plazo_dias = ?, tipo_documento = ?,
+                       razon_social = ?, tipo_cliente = ?, direccion_entrega = ?, municipio_dane = ?,
+                       correo = ?, whatsapp = ?, vendedor_id = ?, exige_factura = ?,
                        actualizado_en = now()
                  WHERE tenant_id = ? AND documento = ?""",
-                recortar(c.nombre()), recortar(c.telefono()), c.listaPrecioId(), c.plazoDias(), tipoDoc,
-                recortar(c.razonSocial()), tipoCliente, recortar(c.direccionEntrega()), recortar(c.municipioDane()),
-                recortar(c.correo()), recortar(c.whatsapp()), c.vendedorId(), c.exigeFactura(),
+                c.nombre().trim(), vacioANulo(c.telefono()), c.listaPrecioId(), c.plazoDias(), tipoDoc,
+                vacioANulo(c.razonSocial()), tipoCliente, vacioANulo(c.direccionEntrega()), vacioANulo(c.municipioDane()),
+                vacioANulo(c.correo()), vacioANulo(c.whatsapp()), c.vendedorId(), Boolean.TRUE.equals(c.exigeFactura()),
                 negocio, documento.trim());
         return n > 0;
     }
@@ -265,11 +267,101 @@ public class ListasDePrecio {
     /** F1.6: desactivar, nunca borrar (las ventas y la cartera lo nombran). */
     @Transactional
     public boolean desactivarCliente(String negocio, String documento, Autor autor) {
+        return fijarActivo(negocio, documento, false, autor);
+    }
+
+    /** F1.11: simétrico a desactivar. Reactivar uno activo no escribe evento (el disparador solo anota cambios). */
+    @Transactional
+    public boolean reactivarCliente(String negocio, String documento, Autor autor) {
+        return fijarActivo(negocio, documento, true, autor);
+    }
+
+    private boolean fijarActivo(String negocio, String documento, boolean activo, Autor autor) {
         exigirNegocio(negocio);
         exigirAutor(autor);
         fijarAutor(autor);
-        return jdbc.update("UPDATE clientes SET activo = false, actualizado_en = now() WHERE tenant_id = ? AND documento = ?",
-                negocio, documento.trim()) > 0;
+        return jdbc.update("UPDATE clientes SET activo = ?, actualizado_en = now() WHERE tenant_id = ? AND documento = ?",
+                activo, negocio, documento.trim()) > 0;
+    }
+
+    public static final int EVENTOS_POR_DEFECTO = 50;
+    public static final int EVENTOS_MAXIMO = 200;
+
+    /** Una página del historial y el cursor de la siguiente (null si no hay más). */
+    public record PaginaDeEventos(List<Map<String, Object>> eventos, String siguiente) {}
+
+    /**
+     * F1.11: el historial de un cliente, lo más reciente primero. Cursor y no
+     * offset: un mismo cambio escribe varias filas con el mismo {@code ocurrido_en},
+     * así que el cursor es {@code ocurrido_en} + {@code id} y ninguna se salta ni se
+     * repite al cortar la página.
+     *
+     * @return vacío si el cliente no existe en el negocio
+     */
+    public java.util.Optional<PaginaDeEventos> eventosDelCliente(String negocio, String documento, String antesDe,
+                                                                 Integer limite) {
+        exigirNegocio(negocio);
+        int n = limite == null ? EVENTOS_POR_DEFECTO : limite;
+        if (n < 1 || n > EVENTOS_MAXIMO) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("limite",
+                    "El límite va de 1 a " + EVENTOS_MAXIMO + ".");
+        }
+        List<UUID> cliente = jdbc.queryForList("SELECT id FROM clientes WHERE tenant_id = ? AND documento = ?",
+                UUID.class, negocio, documento == null ? null : documento.trim());
+        if (cliente.isEmpty()) {
+            return java.util.Optional.empty();
+        }
+        StringBuilder sql = new StringBuilder("""
+                SELECT e.id, e.campo, e.valor_anterior, e.valor_nuevo, e.usuario_id,
+                       COALESCE(u.nombre, u.email) AS usuario, e.ocurrido_en
+                  FROM clientes_eventos e
+                  LEFT JOIN users u ON u.tenant_id = e.tenant_id AND u.id = e.usuario_id
+                 WHERE e.tenant_id = ? AND e.cliente_id = ?""");
+        List<Object> args = new java.util.ArrayList<>(List.of(negocio, cliente.get(0)));
+        if (antesDe != null && !antesDe.isBlank()) {
+            Cursor cursor = Cursor.leer(antesDe);
+            sql.append(" AND (e.ocurrido_en, e.id) < (?, ?)");
+            args.add(java.sql.Timestamp.from(cursor.ocurridoEn()));
+            args.add(cursor.id());
+        }
+        sql.append(" ORDER BY e.ocurrido_en DESC, e.id DESC LIMIT ?");
+        args.add(n + 1);
+        List<Map<String, Object>> filas = new java.util.ArrayList<>(jdbc.queryForList(sql.toString(), args.toArray()));
+        String siguiente = null;
+        if (filas.size() > n) {
+            filas = new java.util.ArrayList<>(filas.subList(0, n));
+            Map<String, Object> ultima = filas.get(n - 1);
+            siguiente = new Cursor(instante(ultima.get("ocurrido_en")), (UUID) ultima.get("id")).escribir();
+        }
+        for (Map<String, Object> f : filas) {
+            f.put("ocurrido_en", instante(f.get("ocurrido_en")).toString());
+        }
+        return java.util.Optional.of(new PaginaDeEventos(filas, siguiente));
+    }
+
+    private static java.time.Instant instante(Object valor) {
+        if (valor instanceof java.time.OffsetDateTime o) {
+            return o.toInstant();
+        }
+        return ((java.sql.Timestamp) valor).toInstant();
+    }
+
+    /** {@code <instante ISO en UTC>_<uuid>}. Opaco para el panel: lo devuelve tal cual. */
+    record Cursor(java.time.Instant ocurridoEn, UUID id) {
+        String escribir() {
+            return ocurridoEn + "_" + id;
+        }
+
+        static Cursor leer(String texto) {
+            try {
+                int corte = texto.lastIndexOf('_');
+                return new Cursor(java.time.Instant.parse(texto.substring(0, corte)),
+                        UUID.fromString(texto.substring(corte + 1)));
+            } catch (RuntimeException e) {
+                throw new com.suresell.orders.shared.exception.DatoInvalidoException("antesDe",
+                        "El cursor no es válido: usa el valor «siguiente» de la página anterior.");
+            }
+        }
     }
 
     /** El autor que lee el disparador de `clientes_eventos` (V62), acotado a la transacción. */
@@ -280,6 +372,10 @@ public class ListasDePrecio {
 
     private static String recortar(String s) {
         return s == null ? null : s.trim();
+    }
+
+    private static String vacioANulo(String s) {
+        return s == null || s.isBlank() ? null : s.trim();
     }
 
     private static String mayusculasONulo(String s) {

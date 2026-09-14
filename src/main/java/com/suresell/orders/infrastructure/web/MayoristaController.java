@@ -192,7 +192,8 @@ public class MayoristaController {
                                   Long vendedorId, Boolean exigeFactura) {}
 
     @PutMapping("/clientes/{documento}")
-    @Operation(summary = "F1.6 — Editar un cliente (solo admin). Cada cambio queda en clientes_eventos con su autor")
+    @Operation(summary = "F1.6 — Editar un cliente (solo admin). REEMPLAZO COMPLETO: null vacía; nombre obligatorio. "
+            + "Cada cambio queda en clientes_eventos con su autor")
     public Map<String, Object> editarCliente(@PathVariable String documento, @RequestBody CambioDeCliente c,
                                              HttpServletRequest http) {
         exigirAdmin(http, "editar un cliente");
@@ -205,6 +206,32 @@ public class MayoristaController {
             throw new com.suresell.orders.shared.exception.DatoInvalidoException("documento", "Ese cliente no existe en el negocio.");
         }
         return listas.cliente(TenantContext.get(), documento).orElseThrow();
+    }
+
+    @PostMapping("/clientes/{documento}/reactivar")
+    @Operation(summary = "F1.11 — Reactivar un cliente (solo admin). Si ya estaba activo, 200 sin evento")
+    public Map<String, Object> reactivarCliente(@PathVariable String documento, HttpServletRequest http) {
+        exigirAdmin(http, "reactivar un cliente");
+        if (!listas.reactivarCliente(TenantContext.get(), documento, autor(http))) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("documento", "Ese cliente no existe en el negocio.");
+        }
+        return listas.cliente(TenantContext.get(), documento).orElseThrow();
+    }
+
+    @GetMapping("/clientes/{documento}/eventos")
+    @Operation(summary = "F1.11 — Historial de un cliente (solo admin), lo más reciente primero, por cursor")
+    public Map<String, Object> eventosDelCliente(@PathVariable String documento,
+                                                 @RequestParam(required = false) String antesDe,
+                                                 @RequestParam(required = false) Integer limite,
+                                                 HttpServletRequest http) {
+        exigirAdmin(http, "ver el historial de un cliente");
+        ListasDePrecio.PaginaDeEventos pagina = listas.eventosDelCliente(TenantContext.get(), documento, antesDe, limite)
+                .orElseThrow(() -> new com.suresell.orders.shared.exception.DatoInvalidoException("documento",
+                        "Ese cliente no existe en el negocio."));
+        Map<String, Object> cuerpo = new java.util.LinkedHashMap<>();
+        cuerpo.put("eventos", pagina.eventos());
+        cuerpo.put("siguiente", pagina.siguiente());
+        return cuerpo;
     }
 
     @PostMapping("/clientes/{documento}/desactivar")

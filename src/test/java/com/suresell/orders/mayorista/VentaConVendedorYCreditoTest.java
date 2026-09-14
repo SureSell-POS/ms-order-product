@@ -64,6 +64,7 @@ class VentaConVendedorYCreditoTest {
     }
 
     @Autowired MockMvc mockMvc;
+    @Autowired com.suresell.orders.shared.exception.GlobalExceptionHandler manejador;
     private JdbcTemplate dueno;
     private long ana;
     private long luis;
@@ -272,5 +273,46 @@ class VentaConVendedorYCreditoTest {
                 Integer.class, T)).isZero();
         assertThat(dueno.queryForObject("SELECT count(*) FROM orders WHERE idempotency_key = 'sin-cliente'",
                 Integer.class)).isZero();
+    }
+
+    @Test
+    @DisplayName("🔴 F4.3: a crédito a un cliente en insolvencia: 409 CLIENTE_EN_INSOLVENCIA con su documento, sin orden ni débito")
+    void clienteEnInsolvencia() throws Exception {
+        dueno.update("UPDATE clientes SET en_insolvencia_desde = (now() AT TIME ZONE 'America/Bogota')::date "
+                + "WHERE tenant_id = ? AND documento = ?", T, DOC);
+        mockMvc.perform(post("/orders/create").header("Authorization", bearer(LUIS, "cajero"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(venta("\"paymentMethod\":\"CREDITO\",\"clienteDocumento\":\"" + DOC + "\","
+                                + "\"condicionPago\":\"CREDITO\",", "insolvente-1")))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.codigo").value("CLIENTE_EN_INSOLVENCIA"))
+                .andExpect(jsonPath("$.clienteDocumento").value(DOC))
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("insolvencia")));
+        assertThat(dueno.queryForObject("SELECT count(*) FROM orders WHERE idempotency_key = 'insolvente-1'",
+                Integer.class)).isZero();
+        assertThat(dueno.queryForObject("SELECT count(*) FROM debt_transactions WHERE tenant_id = ?",
+                Integer.class, T)).isZero();
+
+        // Si la comprobación previa pierde la carrera, el P0001 del disparador (V65) sale con el mismo código:
+        // se provoca de verdad en la base y se pasa al manejador tal cual.
+        dueno.update("INSERT INTO accounts_receivable (id, tenant_id, created_at, credit_limit, customer_document, "
+                + "customer_name, status, total_debt, updated_at) VALUES (gen_random_uuid()::text, ?, now(), 0, ?, 'x', "
+                + "'ACTIVE', 0, now())", T, DOC);
+        java.sql.SQLException deLaBase = null;
+        try (java.sql.Connection c = java.sql.DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
+             java.sql.Statement st = c.createStatement()) {
+            st.execute("INSERT INTO orders (uuid_id, tenant_id, status, payment_method, subtotal, total, synced, is_printed, "
+                    + "cliente_documento, created_at) VALUES (gen_random_uuid(), '" + T + "', 'pagado', 'CREDITO', 1, 1, "
+                    + "true, false, '" + DOC + "', now())");
+        } catch (java.sql.SQLException e) {
+            deLaBase = e;
+        }
+        // SQLException es Throwable e Iterable a la vez: se afirma sobre su estado.
+        assertThat(deLaBase == null ? null : deLaBase.getSQLState()).isEqualTo("P0001");
+        var respuesta = manejador.handleDataAccess(
+                new org.springframework.dao.DataIntegrityViolationException("orden", deLaBase));
+        assertThat(respuesta.getStatusCode().value()).isEqualTo(409);
+        assertThat(respuesta.getBody()).containsEntry("codigo", "CLIENTE_EN_INSOLVENCIA")
+                .containsEntry("clienteDocumento", DOC);
     }
 }
