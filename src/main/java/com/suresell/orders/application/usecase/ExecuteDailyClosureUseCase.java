@@ -45,6 +45,8 @@ public class ExecuteDailyClosureUseCase {
     private final ConciliadorDeQr conciliadorDeQr;
     // V55: la base de caja configurada por el negocio (`sites.base_caja`).
     private final SiteService siteService;
+    // F4.5: el efectivo que la cartera metió al cajón en el turno (solo en la nube).
+    private final java.util.Optional<com.suresell.orders.cartera.RecaudoEnCaja> recaudoEnCaja;
 
     public ExecuteDailyClosureUseCase(OrderRepository orderRepository, DailyClosureRepository closureRepository,
                                     CashflowCalculator cashflowCalculator, ObjectMapper objectMapper,
@@ -53,7 +55,8 @@ public class ExecuteDailyClosureUseCase {
                                     com.suresell.orders.infrastructure.persistence.OrderPaymentRepository orderPaymentRepository,
                                     TableSessionService tableSessionService,
                                     ConciliadorDeQr conciliadorDeQr,
-                                    SiteService siteService) {
+                                    SiteService siteService,
+                                    java.util.Optional<com.suresell.orders.cartera.RecaudoEnCaja> recaudoEnCaja) {
         this.orderRepository = orderRepository;
         this.closureRepository = closureRepository;
         this.cashflowCalculator = cashflowCalculator;
@@ -64,6 +67,7 @@ public class ExecuteDailyClosureUseCase {
         this.tableSessionService = tableSessionService;
         this.conciliadorDeQr = conciliadorDeQr;
         this.siteService = siteService;
+        this.recaudoEnCaja = recaudoEnCaja;
     }
 
     @Transactional
@@ -199,7 +203,12 @@ public class ExecuteDailyClosureUseCase {
         }
 
         // Deducir el total de gastos menores de la caja esperada
-        BigDecimal trueExpectedCash = salesCash.add(previousBase).subtract(totalPettyCashExpenses); // Ventas + Base Inicial - Gastos Menores
+        // F4.5: los abonos de cartera en efectivo del turno están en el cajón. No son venta: no tocan pureSales.
+        BigDecimal recaudoCartera = recaudoEnCaja
+                .map(r -> r.efectivoEntre(com.suresell.orders.multitenant.TenantContext.get(), openingTime, closingTime))
+                .orElse(BigDecimal.ZERO);
+        BigDecimal trueExpectedCash = salesCash.add(previousBase).subtract(totalPettyCashExpenses)
+                .add(recaudoCartera); // Ventas + Base Inicial - Gastos Menores + Recaudo de cartera en efectivo
 
         expected.put("CASH", trueExpectedCash);
 
@@ -267,7 +276,8 @@ public class ExecuteDailyClosureUseCase {
                 roundingAdjustment,
                 turno,
                 // F1.13: informativo; `expected` lo trae del GROUP BY y no entra en pureSales ni en caja.
-                expected.getOrDefault("CREDITO", BigDecimal.ZERO)
+                expected.getOrDefault("CREDITO", BigDecimal.ZERO),
+                recaudoCartera
         );
     }
 

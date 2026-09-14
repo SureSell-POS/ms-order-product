@@ -105,6 +105,11 @@ implements DailyClosurePort {
                 }
             }
         }
+        // F4.5: los abonos de cartera en efectivo del turno están en el cajón (no son venta).
+        BigDecimal recaudoCartera = recaudoEnCaja
+                .map(r -> r.efectivoEntre(com.suresell.orders.multitenant.TenantContext.get(), ventanaDesde, endOfDay))
+                .orElse(BigDecimal.ZERO);
+        totalCash = totalCash.add(recaudoCartera);
         BigDecimal totalExpected = totalCash.add(totalCard).add(totalQr);
         LocalDateTime currentTime = LocalDateTime.now(BOGOTA_ZONE);
         // "Turno iniciado" en la pantalla del POS. Antes era la hora de la
@@ -128,7 +133,8 @@ implements DailyClosurePort {
                 ventanaDesde,
                 baseBalance,
                 baseSugerida,
-                vendidoACredito);
+                vendidoACredito,
+                recaudoCartera);
     }
     @Transactional
     public ClosureResponse executeClosure(ClosureRequest request) {
@@ -229,7 +235,12 @@ implements DailyClosurePort {
             default -> "Cierre ejecutado";
         };
     }
-    public DailyClosureHandler(DailyClosureRepositoryPort closureRepositoryPort, OrderRepositoryPort orderRepositoryPort, com.suresell.orders.domain.port.out.SyncOutboxRepositoryPort syncOutboxRepositoryPort, com.fasterxml.jackson.databind.ObjectMapper objectMapper, SiteService siteService) {
+    // F4.5: el efectivo que la cartera metió al cajón en el turno (solo en la nube).
+    private final java.util.Optional<com.suresell.orders.cartera.RecaudoEnCaja> recaudoEnCaja;
+
+    public DailyClosureHandler(DailyClosureRepositoryPort closureRepositoryPort, OrderRepositoryPort orderRepositoryPort, com.suresell.orders.domain.port.out.SyncOutboxRepositoryPort syncOutboxRepositoryPort, com.fasterxml.jackson.databind.ObjectMapper objectMapper, SiteService siteService,
+                               java.util.Optional<com.suresell.orders.cartera.RecaudoEnCaja> recaudoEnCaja) {
+        this.recaudoEnCaja = recaudoEnCaja;
         this.closureRepositoryPort = closureRepositoryPort;
         this.orderRepositoryPort = orderRepositoryPort;
         this.syncOutboxRepositoryPort = syncOutboxRepositoryPort;

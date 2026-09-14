@@ -20,6 +20,9 @@ import java.time.LocalDateTime;
  * crédito en el turno. Es INFORMATIVO: no entra en {@code totalExpected} ni en
  * el efectivo esperado, porque ese dinero no está en el cajón (queda en cuentas
  * por cobrar).
+ * {@code recaudoCarteraEfectivo} (F4.5, aditivo): abonos de cartera en efectivo
+ * del turno, menos sus anulaciones. YA está sumado en {@code totalExpectedCash} y
+ * {@code totalExpected} (está en el cajón), y se informa aparte porque no es venta.
  * {@code previousBaseBalance} se conserva con el mismo valor que
  * {@code baseInicial} para los clientes que ya lo leían.
  */
@@ -38,5 +41,6 @@ public record ClosurePreviewResponse(
         LocalDateTime abiertoDesde,
         BigDecimal baseInicial,
         BigDecimal baseSugerida,
-        BigDecimal vendidoACredito) {
+        BigDecimal vendidoACredito,
+        BigDecimal recaudoCarteraEfectivo) {
 }

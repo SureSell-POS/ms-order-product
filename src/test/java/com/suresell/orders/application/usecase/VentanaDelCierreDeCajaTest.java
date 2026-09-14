@@ -92,7 +92,7 @@ class VentanaDelCierreDeCajaTest {
         useCase = new ExecuteDailyClosureUseCase(
                 orderRepository, closureRepository, new CashflowCalculator(), new ObjectMapper(),
                 outbox, Mockito.mock(DailyPaymentRecordService.class), orderPaymentRepository,
-                tableSessionService, conciliadorDeQr, siteService);
+                tableSessionService, conciliadorDeQr, siteService, Optional.empty());
     }
 
     private ExecuteClosureRequest peticion(CashCountDetail conteo, String sellerId) {

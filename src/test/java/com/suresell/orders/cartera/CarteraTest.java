@@ -103,10 +103,14 @@ class CarteraTest {
             dueno.update("DELETE FROM clientes_eventos WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM accounts_receivable WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM clientes WHERE tenant_id = ?", t);
+            dueno.update("DELETE FROM daily_closures WHERE tenant_id = ?", t);
+            dueno.update("DELETE FROM sites WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM users WHERE tenant_id = ?", t);
             dueno.update("INSERT INTO tenants (id, name, plan) VALUES (?, ?, 'pro') ON CONFLICT (id) DO NOTHING",
                     t, t.equals(T) ? "Distribuidora QA" : "Otra");
         }
+        dueno.update("INSERT INTO sites (tenant_id, name, code, flujo_de_venta, is_default) "
+                + "VALUES (?, 'Principal', 'PRINCIPAL', 'DIRECTO', true)", T);
         admin = usuario(ADMIN, "admin", "Admin");
         usuario(CAJA, "cajero", "Caja");
         ana = usuario(ANA, "vendedor", "Ana");
@@ -365,5 +369,51 @@ class CarteraTest {
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.codigo").value("MODULO_NO_INCLUIDO"));
         assertThat(dueno.queryForObject("SELECT count(*) FROM recibos_de_caja WHERE tenant_id = ?", Integer.class, T)).isZero();
+    }
+
+    private JsonNode preview() throws Exception {
+        return leer(mockMvc.perform(get("/api/closures/preview").header("Authorization", bearer(CAJA, "cajero")))
+                .andExpect(status().isOk()));
+    }
+
+    @Test
+    @DisplayName("🔴 F4.5: el abono en efectivo sube el esperado del cajón; la transferencia no; el cierre hecho no se toca y la anulación cae en el turno siguiente")
+    void recaudoEnElCierre() throws Exception {
+        JsonNode antes = preview();
+        assertThat(antes.get("recaudoCarteraEfectivo").decimalValue()).isZero();
+        BigDecimal efectivoAntes = antes.get("totalExpectedCash").decimalValue();
+
+        String efectivo = leer(abonar(CAJA, "cajero", abono(TIENDA_A, 50000, "EFECTIVO", "cierre-efectivo"))
+                .andExpect(status().isCreated())).get("id").asText();
+        abonar(CAJA, "cajero", abono(TIENDA_A, 30000, "TRANSFERENCIA", "cierre-transferencia")).andExpect(status().isCreated());
+
+        JsonNode despues = preview();
+        assertThat(despues.get("recaudoCarteraEfectivo").decimalValue()).isEqualByComparingTo("50000");
+        assertThat(despues.get("totalExpectedCash").decimalValue()).isEqualByComparingTo(efectivoAntes.add(new BigDecimal("50000")));
+        assertThat(despues.get("totalExpected").decimalValue())
+                .isEqualByComparingTo(antes.get("totalExpected").decimalValue().add(new BigDecimal("50000")));
+
+        // Se cierra contando exactamente los 50.000 del abono: cuadra, sin faltante de efectivo.
+        String cuerpo = "{\"cashDetail\":{\"bill100k\":0,\"bill50k\":1,\"bill20k\":0,\"bill10k\":0,\"bill5k\":0,"
+                + "\"bill2k\":0,\"coin1000\":0,\"coin500\":0,\"coin200\":0,\"coin100\":0,\"coin50\":0},"
+                + "\"countedCard\":0,\"countedQr\":0,\"notes\":\"turno\",\"pettyCashExpenses\":[],\"baseForNextDay\":0}";
+        JsonNode cierre = leer(mockMvc.perform(post("/api/closures").header("Authorization", bearer(CAJA, "cajero"))
+                        .header("X-User-Name", "Caja").contentType(MediaType.APPLICATION_JSON).content(cuerpo))
+                .andExpect(status().isOk()));
+        assertThat(cierre.get("recaudoCarteraEfectivo").decimalValue()).isEqualByComparingTo("50000");
+        assertThat(cierre.get("shortages").has("Efectivo")).as(cierre.toString()).isFalse();
+        assertThat(dueno.queryForObject("SELECT total_expected_cash FROM daily_closures WHERE tenant_id = ?", BigDecimal.class, T))
+                .isEqualByComparingTo("50000");
+        assertThat(dueno.queryForObject("SELECT sales_of_day FROM daily_closures WHERE tenant_id = ?", BigDecimal.class, T))
+                .as("un abono no es venta").isZero();
+
+        // El turno nuevo arranca sin el recaudo del anterior; anular aquel recibo resta aquí y no toca el cierre hecho.
+        assertThat(preview().get("recaudoCarteraEfectivo").decimalValue()).isZero();
+        mockMvc.perform(post("/api/cartera/recibos/" + efectivo + "/anular").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"motivo\":\"ERROR_DE_MONTO\"}"))
+                .andExpect(status().isCreated());
+        assertThat(preview().get("recaudoCarteraEfectivo").decimalValue()).isEqualByComparingTo("-50000");
+        assertThat(dueno.queryForObject("SELECT total_expected_cash FROM daily_closures WHERE tenant_id = ?", BigDecimal.class, T))
+                .isEqualByComparingTo("50000");
     }
 }

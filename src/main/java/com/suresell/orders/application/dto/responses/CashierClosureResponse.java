@@ -17,6 +17,10 @@ import java.util.Map;
  * <p>{@code vendidoACredito} (plan de mayoristas F1.13, aditivo): lo vendido a
  * crédito en el turno, informativo. No suma al efectivo esperado ni a ninguna
  * diferencia: ese dinero está en cuentas por cobrar, no en el cajón.
+ *
+ * <p>{@code recaudoCarteraEfectivo} (F4.5, aditivo): abonos de cartera en efectivo
+ * del turno (menos sus anulaciones). YA está sumado al efectivo esperado; se
+ * informa aparte porque no es venta.
  */
 public record CashierClosureResponse(
         String status,
@@ -26,5 +30,6 @@ public record CashierClosureResponse(
         BigDecimal amountToDeposit,
         BigDecimal roundingAdjustment,
         Integer turno,
-        BigDecimal vendidoACredito
+        BigDecimal vendidoACredito,
+        BigDecimal recaudoCarteraEfectivo
 ) {}
