@@ -39,8 +39,16 @@
 --
 -- RLS de UN negocio (el proveedor) en las cuatro tablas, FORCE (ECM: la lectura de
 -- dos partes llega con la red y su guarda). Las funciones son SECURITY DEFINER y su
--- dueño salta RLS (medido en staging: `postgres`, BYPASSRLS): por eso filtran por
--- negocio ESCRITO en cada consulta, con el negocio sacado de la sesión.
+-- dueño salta RLS (medido en staging: `postgres`, BYPASSRLS).
+--
+-- 🔴 DENTRO DE LAS FUNCIONES, RLS NO ES SUELO: el único aislamiento es el filtro de
+-- negocio ESCRITO en cada consulta, con el negocio sacado de la sesión. Por eso
+-- el control negativo sin ese filtro es obligatorio (lo tiene ElPedidoTest y el
+-- cierre de abajo). Y por ser DEFINER: `search_path` fijo con `pg_temp` al final
+-- (sin él, un objeto temporal del que llama podría suplantar un nombre), y EXECUTE
+-- revocado a PUBLIC y dado solo a `app_user`; el cierre comprueba las dos cosas.
+-- Llaman a `public.fn_precio_para`, que también corre como dueño: su filtro por
+-- negocio es el de V59, así que esta cadena NO llega a producción antes que V59.
 --
 -- IMPACTO: cinco tablas nuevas, un contador, dos funciones y dos vistas en el
 -- esquema `pedidos`, vacío hasta hoy. Nada en `public`.
@@ -374,7 +382,7 @@ END $$;
 CREATE FUNCTION pedidos.fn_pedido_crear(p_tipo_inicial TEXT, p_cliente_documento TEXT, p_origen TEXT, p_modalidad TEXT,
                                         p_vendedor_id BIGINT, p_site_id BIGINT, p_fecha_entrega_prometida DATE,
                                         p_lineas JSONB, p_ocurrido_en TIMESTAMPTZ, p_idempotency_key TEXT)
-RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pedidos AS $$
+RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pedidos, public, pg_temp AS $$
 DECLARE
     s RECORD;
     v_pedido pedidos.pedidos%ROWTYPE;
@@ -460,7 +468,7 @@ END $$;
  */
 CREATE FUNCTION pedidos.fn_pedido_transicionar(p_pedido_id UUID, p_tipo TEXT, p_motivo TEXT, p_nota TEXT, p_lineas JSONB,
                                                p_ocurrido_en TIMESTAMPTZ, p_idempotency_key TEXT)
-RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pedidos AS $$
+RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pedidos, public, pg_temp AS $$
 DECLARE
     s RECORD;
     v_pedido pedidos.pedidos%ROWTYPE;
@@ -503,8 +511,9 @@ BEGIN
 
     IF p_tipo = 'ENVIADO' THEN   -- desde un borrador: el precio es el del momento del envío (Q2)
         UPDATE pedidos.pedidos_lineas l
-           SET precio_visto = f.precio, precio_origen = f.origen, lista_precio_item_id = f.lista_precio_item_id
-          FROM LATERAL public.fn_precio_para(v_pedido.cliente_documento, l.producto_id, l.cantidad_pedida, p_ocurrido_en) f
+           SET (precio_visto, precio_origen, lista_precio_item_id) =
+               (SELECT f.precio, f.origen, f.lista_precio_item_id
+                  FROM public.fn_precio_para(v_pedido.cliente_documento, l.producto_id, l.cantidad_pedida, p_ocurrido_en) f)
          WHERE l.tenant_id = s.negocio AND l.pedido_id = p_pedido_id;
         UPDATE pedidos.pedidos SET precio_congelado_en = p_ocurrido_en WHERE tenant_id = s.negocio AND id = p_pedido_id;
     ELSIF p_tipo = 'AJUSTADO' AND p_motivo = 'ERROR_DE_PRECIO' THEN
@@ -557,6 +566,22 @@ BEGIN
                 WHERE ns.nspname = 'pedidos' AND c.relkind = 'v'
                   AND NOT COALESCE(c.reloptions @> ARRAY['security_invoker=true'], false)) THEN
         RAISE EXCEPTION 'V2 pedidos: una vista del pedido no tiene security_invoker';
+    END IF;
+
+    -- DEFINER con search_path fijo (pg_temp al final) y sin EXECUTE para PUBLIC.
+    IF EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+                WHERE ns.nspname = 'pedidos' AND p.prosecdef
+                  AND NOT COALESCE(p.proconfig @> ARRAY['search_path=pg_catalog, pedidos, public, pg_temp'], false)) THEN
+        RAISE EXCEPTION 'V2 pedidos: una funcion SECURITY DEFINER no tiene el search_path fijo con pg_temp al final';
+    END IF;
+    IF (SELECT count(*) FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+         WHERE ns.nspname = 'pedidos' AND p.prosecdef) <> 2 THEN
+        RAISE EXCEPTION 'V2 pedidos: se esperaban exactamente dos funciones SECURITY DEFINER';
+    END IF;
+    IF has_function_privilege('public', 'pedidos.fn_pedido_crear(text, text, text, text, bigint, bigint, date, jsonb, timestamp with time zone, text)', 'EXECUTE')
+       OR has_function_privilege('public', 'pedidos.fn_pedido_transicionar(uuid, text, text, text, jsonb, timestamp with time zone, text)', 'EXECUTE')
+       OR has_function_privilege('public', 'pedidos.fn_pedido_escribir_evento(pedidos.pedidos, text, text, bigint, text, text, jsonb, timestamp with time zone, text)', 'EXECUTE') THEN
+        RAISE EXCEPTION 'V2 pedidos: PUBLIC puede ejecutar una funcion del pedido';
     END IF;
 
     INSERT INTO public.tenants (id, name, plan) VALUES (a, 'Prueba V2 pedidos A', 'basico'), (b, 'Prueba V2 pedidos B', 'basico');
@@ -678,6 +703,16 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pedidos.v_pedidos_estado WHERE tenant_id = a AND estado_guardado IS DISTINCT FROM estado_derivado)
        OR (SELECT estado_guardado FROM pedidos.v_pedidos_estado WHERE pedido_id = v_otro_pedido) <> 'CANCELADO' THEN
         RAISE EXCEPTION 'V2 pedidos: el estado guardado no coincide con el derivado por secuencia';
+    END IF;
+
+    -- 8b. Un borrador que se envía después: el precio es el del momento del ENVIADO (Q2), no el de la creación.
+    v_e1 := pedidos.fn_pedido_crear('CREADO_BORRADOR', 'v2p-tienda', 'vendedor', 'PREVENTA', NULL, NULL, NULL,
+        '[{"producto_id":"v2p-arroz","cantidad":3}]', now() - interval '2 hours', 'v2p-borrador');
+    UPDATE public.menu_products SET price = 6000 WHERE id_product = 'v2p-arroz';
+    PERFORM pedidos.fn_pedido_transicionar(v_e1, 'ENVIADO', NULL, NULL, NULL, now(), 'v2p-borrador-envia');
+    IF (SELECT precio_visto FROM pedidos.pedidos_lineas WHERE pedido_id = v_e1) <> 6000
+       OR (SELECT precio_congelado_en FROM pedidos.pedidos WHERE id = v_e1) IS NULL THEN
+        RAISE EXCEPTION 'V2 pedidos: enviar un borrador no tomo el precio del momento del envio';
     END IF;
 
     -- 9. Sin usuario en la sesión → P0001; otro negocio no mueve ni ve el pedido.
