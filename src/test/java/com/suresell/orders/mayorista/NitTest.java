@@ -18,11 +18,13 @@ class NitTest {
     }
 
     @Test
-    @DisplayName("separa el DV con guion, con puntos, o pegado en diez dígitos si cuadra; si no cuadra, es el número entero")
+    @DisplayName("🔴 separa el DV solo con guion; diez dígitos sin guion se quedan enteros aunque el último coincida con el DV")
     void separar() {
         assertThat(Nit.separar("800197268-4")).isEqualTo(new Nit.Separado("800197268", 4));
         assertThat(Nit.separar("800.197.268-4")).isEqualTo(new Nit.Separado("800197268", 4));
-        assertThat(Nit.separar("8001972684")).isEqualTo(new Nit.Separado("800197268", 4));
+        // «8001972684»: el 4 final ES el DV de 800197268, y aun así no se corta (podría ser una cédula).
+        assertThat(Nit.dv("800197268")).isEqualTo(4);
+        assertThat(Nit.separar("8001972684")).isEqualTo(new Nit.Separado("8001972684", null));
         assertThat(Nit.separar("8001972685")).isEqualTo(new Nit.Separado("8001972685", null));
         assertThat(Nit.separar("890903938-5")).isEqualTo(new Nit.Separado("890903938", 5));
         assertThat(Nit.dv("80019726A")).isNull();

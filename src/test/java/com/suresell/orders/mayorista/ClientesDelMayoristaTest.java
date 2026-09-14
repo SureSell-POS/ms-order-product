@@ -336,12 +336,14 @@ class ClientesDelMayoristaTest {
                 .andExpect(jsonPath("$.documento").value("800197268"))
                 .andExpect(jsonPath("$.dv").value(4))
                 .andExpect(jsonPath("$.tipo_documento").value("NIT"));
-        // Pegado en diez dígitos con tipo NIT.
-        alta("{\"documento\":\"8999990681\",\"nombre\":\"Ecopetrol\",\"tipoDocumento\":\"NIT\"}").andExpect(status().isCreated());
+        // Diez dígitos sin guion con tipo NIT, cuyo último dígito coincide con el DV de los nueve primeros (1):
+        // NO se corta; se guarda entero y el DV se calcula sobre los diez.
+        alta("{\"documento\":\"8999990681\",\"nombre\":\"Persona natural\",\"tipoDocumento\":\"NIT\"}")
+                .andExpect(status().isCreated());
         // Sin DV: lo calcula el servidor.
         alta("{\"documento\":\"860034313\",\"nombre\":\"Bavaria\",\"tipoDocumento\":\"nit\"}").andExpect(status().isCreated());
         assertThat(dueno.queryForList("SELECT documento || '-' || dv FROM clientes WHERE tenant_id = ? AND dv IS NOT NULL ORDER BY documento",
-                String.class, T)).containsExactly("800197268-4", "860034313-7", "899999068-1");
+                String.class, T)).containsExactly("800197268-4", "860034313-7", "8999990681-" + Nit.dv("8999990681"));
 
         // DV errado: 400 en documento, y nada escrito.
         alta("{\"documento\":\"890903938-5\",\"nombre\":\"Bancolombia\"}")

@@ -403,10 +403,10 @@ public class ListasDePrecio {
     }
 
     /**
-     * Alta (o actualización) de un cliente. F4.10: un NIT llega con o sin DV
-     * («900123456-7» o «9001234567»); el DV se separa del número, se valida si
-     * vino ({@code 400 documento} «El dígito de verificación no corresponde») y se
-     * guarda en {@code dv}. Un documento con guion y DV sin tipo se toma por NIT.
+     * Alta (o actualización) de un cliente. F4.10: un NIT con guion
+     * («900.123.456-7») se separa y se valida ({@code 400 documento} «El dígito de
+     * verificación no corresponde»); sin guion es el número entero y el DV lo
+     * calcula el servidor. El DV va en {@code dv}. Con guion y sin tipo, es NIT.
      */
     // Una sola transacción: el autor (set_config local) y el UPDATE que lee el disparador.
     @Transactional

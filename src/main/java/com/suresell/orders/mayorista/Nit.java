@@ -29,24 +29,18 @@ public final class Nit {
     }
 
     /**
-     * Separa el DV si viene: «900123456-7» (con guion; también con puntos o
-     * espacios) o «9001234567» (diez dígitos cuyo último es el DV de los nueve
-     * primeros). Sin guion no hay forma de saber si el décimo dígito es el DV o
-     * parte de un NIT de persona natural: solo se separa si cuadra, y si no
-     * cuadra se toma como número entero (el DV se calcula).
+     * Separa el DV SOLO si viene con guion: «900123456-7» (también con puntos o
+     * espacios). Sin guion nunca se separa: el NIT de una persona natural es su
+     * cédula, muchas tienen 10 dígitos, y más o menos 1 de cada 11 terminaría en
+     * un dígito que coincide por azar con el DV de los nueve primeros. Cortarla
+     * dañaría la clave del cliente; un DV mal tecleado sin guion es un fallo menor
+     * (ECM, 2026-09-14). Sin guion, el valor es el número entero y el DV se calcula.
      */
     public static Separado separar(String documento) {
         String limpio = documento == null ? "" : documento.replaceAll("[\\s.]", "");
         java.util.regex.Matcher conGuion = java.util.regex.Pattern.compile("^([0-9]{1,15})-([0-9])$").matcher(limpio);
         if (conGuion.matches()) {
             return new Separado(conGuion.group(1), Integer.parseInt(conGuion.group(2)));
-        }
-        if (limpio.matches("^[0-9]{10}$")) {
-            String nueve = limpio.substring(0, 9);
-            int ultimo = limpio.charAt(9) - '0';
-            if (Integer.valueOf(ultimo).equals(dv(nueve))) {
-                return new Separado(nueve, ultimo);
-            }
         }
         return new Separado(limpio, null);
     }
