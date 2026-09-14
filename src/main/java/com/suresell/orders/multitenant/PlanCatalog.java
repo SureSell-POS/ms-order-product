@@ -67,6 +67,15 @@ public final class PlanCatalog {
      */
     public static final String VENTA_SIN_REGISTRO = "venta_sin_registro";
 
+    /**
+     * Plan de mayoristas (F0.7). El vendedor en la calle (F6): ruta de hoy,
+     * visitas y cobro. Existe desde F0 para que {@code /api/ruta} tenga guarda
+     * y el KAM pueda nombrarlo, pero NO se enciende en el alta mayorista hasta
+     * que F6 lo construya: un módulo encendido que no hace nada le promete al
+     * comerciante una función que no existe. Fuera de todo plan.
+     */
+    public static final String RUTA = "ruta";
+
     /** Módulos del panel que entran en el plan `pro`. */
     private static final List<String> PANEL_PRO =
             List.of(PANEL, ANALITICA, MENU_ADMIN, GASTOS);
@@ -94,7 +103,7 @@ public final class PlanCatalog {
     public static final Set<String> KNOWN = Set.of(
             VENTAS, HISTORIAL, CIERRE, DESCUENTOS, COCINA, MESEROS,
             PANEL, ANALITICA, NOMINA, EMPLEADOS, VALERAS, INSUMOS, COMPRAS,
-            GASTOS, CARTERA, MAYORISTA, MENU_ADMIN, PRODUCCION, VENTA_SIN_REGISTRO);
+            GASTOS, CARTERA, MAYORISTA, MENU_ADMIN, PRODUCCION, VENTA_SIN_REGISTRO, RUTA);
 
     private static List<String> concat(List<String> a, List<String> b) {
         List<String> out = new java.util.ArrayList<>(a);

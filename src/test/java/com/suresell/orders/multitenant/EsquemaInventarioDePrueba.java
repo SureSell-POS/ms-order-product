@@ -76,6 +76,7 @@ final class EsquemaInventarioDePrueba {
               ('drogueria',   'Droguería',   'Vende medicamentos', ARRAY['componentes','lote','vencimiento','fefo','prescripcion']),
               ('minimercado', 'Minimercado', 'Vende al detal', ARRAY['lote','vencimiento','fefo','granel','variantes']),
               ('ferreteria',  'Ferretería',  'Vende herramienta', ARRAY['componentes','variantes','serial','granel']),
+              ('mayorista',   'Mayorista',   'Vende por caja a comercios', ARRAY['lote','vencimiento','fefo','variantes']),
               ('optica',      'Óptica',      'Sin flujo declarado en public: aparece con la lista vacía', ARRAY['componentes','variantes','serial'])
             ON CONFLICT (codigo) DO NOTHING""");
     }

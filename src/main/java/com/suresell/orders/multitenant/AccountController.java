@@ -2,6 +2,7 @@ package com.suresell.orders.multitenant;
 
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.context.annotation.Profile;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -117,18 +118,25 @@ public class AccountController {
         }
     }
 
+    /**
+     * Cerrada (plan de mayoristas, F0.4). Hasta aquí el admin del negocio podía
+     * regalarse cualquier módulo, incluido `mayorista` o `cartera`, que se
+     * venden. Los módulos los decide el KAM con
+     * {@code PUT /admin/tenants/{id}/modules}, que no pasa por aquí (un token
+     * de KAM no lleva negocio y esta ruta exige uno). Ningún cliente del
+     * monorepo la llamaba (medido el 2026-09-13), así que el 403 no rompe a
+     * nadie. Se deja la ruta, en vez de quitarla, para que quien la llame lea
+     * por qué y no un 404.
+     */
     @PutMapping("/account/modules")
-    public ResponseEntity<?> setModules(@RequestBody ModulesRequest req, HttpServletRequest http) {
-        String tenantId = TenantContext.get();
-        ResponseEntity<?> guard = requireAdmin(http, tenantId);
-        if (guard != null) {
-            return guard;
-        }
-        try {
-            return ResponseEntity.ok(auth.setModuleOverrides(tenantId, req.overrides()));
-        } catch (AuthException e) {
-            return ResponseEntity.status(e.status()).body(Map.of("error", e.getMessage()));
-        }
+    public ResponseEntity<?> setModules(@RequestBody(required = false) ModulesRequest req, HttpServletRequest http) {
+        String texto = "Los módulos del negocio los activa SureSell desde el KAM.";
+        Map<String, String> cuerpo = new java.util.LinkedHashMap<>();
+        cuerpo.put("error", "SOLO_KAM");
+        cuerpo.put("codigo", "SOLO_KAM");
+        cuerpo.put("message", texto);
+        cuerpo.put("mensaje", texto);
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(cuerpo);
     }
 
     /** null si es admin válido; si no, la respuesta 401/403 a devolver. */

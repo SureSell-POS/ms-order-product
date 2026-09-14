@@ -86,6 +86,21 @@ public class JwtTenantResolver {
                 .orElse(java.util.Collections.emptyList());
     }
 
+    /**
+     * El claim {@code modules} tal como viene, distinguiendo "no vino" (vacío)
+     * de "vino y es una lista vacía" (presente, sin elementos). Las rutas de
+     * guarda estricta del {@link ModuleAccessFilter} necesitan esa diferencia:
+     * {@link #resolveModules} las confunde, y un negocio al que se le quitaron
+     * todos los módulos quedaría con la puerta abierta.
+     */
+    @SuppressWarnings("unchecked")
+    public Optional<java.util.List<String>> resolveModulesClaim(String authorizationHeader) {
+        return parse(authorizationHeader)
+                .flatMap(c -> c.get("modules") instanceof java.util.List<?> m
+                        ? Optional.of((java.util.List<String>) m)
+                        : Optional.empty());
+    }
+
     private Optional<Claims> parse(String authorizationHeader) {
         if (authorizationHeader == null || authorizationHeader.isBlank()) {
             return Optional.empty();

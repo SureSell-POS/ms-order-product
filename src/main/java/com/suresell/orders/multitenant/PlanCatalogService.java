@@ -78,6 +78,11 @@ public class PlanCatalogService {
         if (overrides != null) {
             for (Map.Entry<String, Boolean> e : overrides.entrySet()) {
                 if (!PlanCatalog.isKnownModule(e.getKey())) {
+                    // Se descarta, pero no en silencio: así se perdieron
+                    // `mayorista` y `produccion` (el KAM los regalaba y el
+                    // login no los devolvía). Falta la constante en PlanCatalog.
+                    log.warn("Override de modulo desconocido descartado: '{}' (falta en PlanCatalog.KNOWN)",
+                            e.getKey());
                     continue;
                 }
                 if (Boolean.TRUE.equals(e.getValue())) {

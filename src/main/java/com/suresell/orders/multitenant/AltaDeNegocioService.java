@@ -2,6 +2,7 @@ package com.suresell.orders.multitenant;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Locale;
 import java.util.Optional;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -91,6 +92,9 @@ public class AltaDeNegocioService {
     }
 
     private static final String ROL_ADMIN = "admin";
+
+    static final String PERFIL_MAYORISTA = "mayorista";
+    static final List<String> MODULOS_DEL_MAYORISTA = List.of(PlanCatalog.MAYORISTA, PlanCatalog.CARTERA);
 
     private final JdbcTemplate jdbc;
     private final PasswordEncoder encoder;
@@ -219,7 +223,21 @@ public class AltaDeNegocioService {
                     + "VALUES (?, ?, ?, true)", tenantId, siteId, n);
         }
 
-        List<String> modulos = new ArrayList<>(planes.modulesForPlan(plan));
+        // Plan de mayoristas, F0.8: un mayorista nace con su vertical. Antes el
+        // alta con perfil `mayorista` salía sin `mayorista` ni `cartera`, y el
+        // negocio no podía abrir las listas de precio hasta que alguien se
+        // acordara de regalarlas en el KAM. Van como override (se venden
+        // aparte, fuera de todo plan) y en esta transacción, con el negocio ya
+        // fijado. `ruta` NO: se enciende cuando F6 exista (decisión de ECM).
+        Map<String, Boolean> overrides = new java.util.LinkedHashMap<>();
+        if (perfil.map(p -> PERFIL_MAYORISTA.equals(p.codigo())).orElse(false)) {
+            for (String m : MODULOS_DEL_MAYORISTA) {
+                jdbc.update("INSERT INTO tenant_modules (tenant_id, module, enabled) VALUES (?, ?, true) "
+                        + "ON CONFLICT (tenant_id, module) DO UPDATE SET enabled = true", tenantId, m);
+                overrides.put(m, true);
+            }
+        }
+        List<String> modulos = new ArrayList<>(planes.effectiveModules(plan, overrides));
 
         // El perfil queda asignado EN el alta, en la misma transacción, con la
         // fuente y la confianza que V50 reservó para el KAM. Si la base no tiene

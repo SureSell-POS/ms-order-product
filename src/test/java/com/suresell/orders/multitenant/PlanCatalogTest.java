@@ -32,6 +32,17 @@ class PlanCatalogTest {
     }
 
     @Test
+    void rutaExisteSeRegalaYNoVieneEnNingunPlan() {
+        // F0.7: sin la constante, el override del KAM se descartaría en silencio,
+        // como pasó con `mayorista` y `produccion`.
+        assertTrue(PlanCatalog.isKnownModule("ruta"));
+        assertTrue(PlanCatalog.effectiveModules("basico", Map.of("ruta", true)).contains("ruta"));
+        assertFalse(PlanCatalog.modulesForPlan("basico").contains("ruta"));
+        assertFalse(PlanCatalog.modulesForPlan("pro").contains("ruta"));
+        assertFalse(PlanCatalog.modulesForPlan(null).contains("ruta"));
+    }
+
+    @Test
     void isKnownModule() {
         assertTrue(PlanCatalog.isKnownModule("descuentos"));
         assertFalse(PlanCatalog.isKnownModule("xyz"));

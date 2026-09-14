@@ -279,6 +279,36 @@ class AltaDeNegocioIT {
     }
 
     @Test
+    @DisplayName("🔴 un mayorista nace con `mayorista` y `cartera` (F0.8), sin `ruta` hasta que exista F6")
+    void unMayoristaNaceConSuVertical() {
+        var r = servicio.darDeAlta(conPerfil("Distribuciones del Valle", "admin@delvalle.co", "mayorista", null, null),
+                "kam@suresell.com.co");
+
+        assertThat(r.flujoDeVenta()).isEqualTo("DIRECTO");
+        assertThat(r.modulos()).contains("mayorista", "cartera").doesNotContain("ruta");
+
+        // Lo que lee el login: overrides en tenant_modules, con el negocio fijado (V40).
+        jdbc.queryForObject("SELECT set_config('app.tenant_id', 'distribuciones-del-valle', false)", String.class);
+        var overrides = jdbc.queryForList(
+                "SELECT module FROM tenant_modules WHERE tenant_id = 'distribuciones-del-valle' AND enabled ORDER BY module",
+                String.class);
+        jdbc.queryForObject("SELECT set_config('app.tenant_id', '', false)", String.class);
+        assertThat(overrides).containsExactly("cartera", "mayorista");
+    }
+
+    @Test
+    @DisplayName("una droguería NO recibe los módulos del mayorista")
+    void otroPerfilNoLosRecibe() {
+        var r = servicio.darDeAlta(conPerfil("Droguería Sin Cartera", "admin@sincartera.co", "drogueria", null, null));
+        assertThat(r.modulos()).doesNotContain("mayorista", "cartera");
+        jdbc.queryForObject("SELECT set_config('app.tenant_id', 'drogueria-sin-cartera', false)", String.class);
+        Integer n = jdbc.queryForObject(
+                "SELECT count(*) FROM tenant_modules WHERE tenant_id = 'drogueria-sin-cartera'", Integer.class);
+        jdbc.queryForObject("SELECT set_config('app.tenant_id', '', false)", String.class);
+        assertThat(n).isZero();
+    }
+
+    @Test
     @DisplayName("un restaurante sin decir flujo nace en el que su perfil trae por defecto (MESA), con mesas")
     void elRestauranteHeredaElDefectoDelPerfil() {
         var r = servicio.darDeAlta(conPerfil("Mesón Real", "admin@meson.co", "restaurante", null, 6));
