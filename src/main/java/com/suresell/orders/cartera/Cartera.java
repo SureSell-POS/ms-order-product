@@ -290,6 +290,8 @@ public class Cartera {
 
         Map<String, Object> ficha = fichaVisible(quien, documento);
         LocalDate hoy = LocalDate.now(BOGOTA);
+        // Insolvencia: se suspenden los cobros. Ley 1116 de 2006 (y Ley 2445 de 2025): los pagos
+        // por fuera del proceso a deudas anteriores a su inicio son ineficaces. Anular sí se permite.
         Object insolvente = ficha == null ? null : ficha.get("en_insolvencia_desde");
         if (insolvente != null && !((java.sql.Date) insolvente).toLocalDate().isAfter(hoy)) {
             throw ClienteEnInsolvenciaException.alCobrar(documento, ((java.sql.Date) insolvente).toLocalDate());
@@ -302,8 +304,9 @@ public class Cartera {
         BigDecimal deudaLibro = saldoDelLibro(negocio, cuenta);
         BigDecimal debe = deudaFacturas.min(deudaLibro);
         if (monto.compareTo(debe) > 0) {
-            throw new DatoInvalidoException("monto", "El abono (" + pesos(monto) + ") supera lo que debe el cliente ("
-                    + pesos(debe.max(BigDecimal.ZERO)) + ").");
+            // Sin anticipos ni saldo a favor en esta fase (ECM, 2026-09-14): el libro dejaría de cuadrar con la vista.
+            throw new DatoInvalidoException("monto", "El cliente debe " + pesos(debe.max(BigDecimal.ZERO))
+                    + "; no se puede abonar más.");
         }
 
         List<Object[]> reparto = repartir(vivas, monto, r.aplicaciones());

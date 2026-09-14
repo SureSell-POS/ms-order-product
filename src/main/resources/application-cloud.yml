@@ -108,6 +108,10 @@ pedidos:
 sync:
   cloud:
     enabled: false
+    # La conciliación de QR del cierre (ConciliadorDeQr). Sin la variable queda
+    # VACÍA a propósito, no en localhost: el servicio arranca, avisa con un ERROR
+    # y el cierre queda como fallo_integracion con el motivo escrito.
+    core-url: ${SYNC_CLOUD_CORE_URL:}
 
 # Secreto para validar el JWT del tenant.
 security:

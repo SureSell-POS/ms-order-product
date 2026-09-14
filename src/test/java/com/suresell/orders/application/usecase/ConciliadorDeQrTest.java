@@ -351,4 +351,18 @@ class ConciliadorDeQrTest {
             assertThat(r.monto()).isEqualByComparingTo(VALOR_DEL_CAJERO);
         }
     }
+
+    // =====================================================================
+    @Test
+    @DisplayName("🔴 sin SYNC_CLOUD_CORE_URL: no llama a nadie, el cierre se completa y queda fallo_integracion con el motivo")
+    void sinUrlDeCore() {
+        ConciliadorDeQr c = new ConciliadorDeQr(token, restTemplate);
+        c.fijarUrlDeCore("");
+        c.avisarSiFaltaLaUrl();   // solo registra: no lanza
+        ResultadoQr r = c.resolver(FECHA, VALOR_DEL_CAJERO, QR_DEL_POS);
+        servidor.verify();        // ninguna petición esperada, ninguna hecha
+        assertThat(r.fuente()).isEqualTo(FuenteQr.fallo_integracion);
+        assertThat(r.monto()).isEqualByComparingTo(VALOR_DEL_CAJERO);
+        assertThat(r.detalle()).contains("SYNC_CLOUD_CORE_URL");
+    }
 }

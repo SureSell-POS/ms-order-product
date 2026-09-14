@@ -79,8 +79,29 @@ public class ConciliadorDeQr {
     private final RestTemplate restTemplate;
     private final TokenDeLaPeticion token;
 
+    /**
+     * En la nube sale SOLO de {@code SYNC_CLOUD_CORE_URL} ({@code application-cloud.yml}):
+     * sin ella queda vacía, no en {@code localhost}. El {@code localhost} por defecto
+     * fallaba en silencio en staging con «Connection refused» (DrDev002, 2026-09-14).
+     * El {@code localhost} de aquí solo lo ve el perfil local.
+     */
     @Value("${sync.cloud.core-url:http://localhost:8083/api/core}")
     private String coreApiUrl;
+
+    static final String FALTA_LA_URL = "falta SYNC_CLOUD_CORE_URL: el servicio no sabe dónde está ms-core-app";
+
+    /**
+     * Sin URL el servicio ARRANCA igual: el cierre se completa sin conciliar, como
+     * hoy. Negarse a arrancar tumbaría las ventas en cualquier entorno donde falte
+     * la variable, por un fallo que no rompe nada. Queda un ERROR que la nombra.
+     */
+    @jakarta.annotation.PostConstruct
+    void avisarSiFaltaLaUrl() {
+        if (coreApiUrl == null || coreApiUrl.isBlank()) {
+            log.error("Conciliación de QR sin destino: {}. Los cierres quedarán como fallo_integracion "
+                    + "hasta que se ponga la variable.", FALTA_LA_URL);
+        }
+    }
 
     /**
      * El {@code @Autowired} es obligatorio: hay dos constructores y Spring solo
@@ -121,6 +142,10 @@ public class ConciliadorDeQr {
      *                       El único de los tres que existe siempre
      */
     public ResultadoQr resolver(LocalDate fecha, BigDecimal valorDelCajero, BigDecimal valorDelPos) {
+        if (coreApiUrl == null || coreApiUrl.isBlank()) {
+            log.warn("Cierre: QR sin conciliar ({}). Se usa el valor del cajero.", FALTA_LA_URL);
+            return ResultadoQr.fallo(valorDelCajero, valorDelPos, FALTA_LA_URL);
+        }
         String url = coreApiUrl + "/qr-payments/by-date?date=" + fecha;
         try {
             ResponseEntity<JsonNode> respuesta = restTemplate.exchange(

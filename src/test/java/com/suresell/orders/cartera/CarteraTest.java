@@ -228,7 +228,8 @@ class CarteraTest {
     void numerosSinHuecos() throws Exception {
         abonar(CAJA, "cajero", abono(TIENDA_A, 10000, "EFECTIVO", "n-1")).andExpect(jsonPath("$.numero").value(1));
         abonar(CAJA, "cajero", abono(TIENDA_A, 200000, "EFECTIVO", "n-malo"))
-                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("monto"));
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("monto"))
+                .andExpect(jsonPath("$.message").value("El cliente debe $100.000; no se puede abonar más."));
         abonar(CAJA, "cajero", abono(TIENDA_A, 1000, "PAGARE", "n-medio"))
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("medio"));
         abonar(CAJA, "cajero", abono(TIENDA_B, 5000, "BRE_B", "n-2")).andExpect(jsonPath("$.numero").value(2));
@@ -387,6 +388,7 @@ class CarteraTest {
                 .andExpect(status().isCreated())).get("id").asText();
         abonar(CAJA, "cajero", abono(TIENDA_A, 30000, "TRANSFERENCIA", "cierre-transferencia")).andExpect(status().isCreated());
 
+        // Sumado UNA vez: si el recaudo entrara dos veces (en la consulta y en la respuesta), esto daría +100.000.
         JsonNode despues = preview();
         assertThat(despues.get("recaudoCarteraEfectivo").decimalValue()).isEqualByComparingTo("50000");
         assertThat(despues.get("totalExpectedCash").decimalValue()).isEqualByComparingTo(efectivoAntes.add(new BigDecimal("50000")));
