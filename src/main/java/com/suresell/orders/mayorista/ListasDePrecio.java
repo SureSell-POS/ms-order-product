@@ -123,20 +123,167 @@ public class ListasDePrecio {
     }
 
     public List<Map<String, Object>> clientes(String negocio) {
-        // El cruce con la cartera es por documento, que se repite entre
-        // negocios (un NIT le compra a dos distribuidoras): sin
-        // `a.tenant_id = c.tenant_id`, un rol que salte RLS le pegaría a este
-        // cliente la deuda que tiene con otro.
-        return jdbc.queryForList("""
-                SELECT c.id, c.documento, c.nombre, c.telefono, c.plazo_dias, c.activo,
-                       c.lista_precio_id, l.nombre AS lista,
-                       a.total_debt AS deuda, a.credit_limit AS cupo, a.status AS estado_cartera,
-                       (a.total_debt > a.credit_limit) AS excede_cupo
-                  FROM clientes c
-                  LEFT JOIN listas_precio l ON l.tenant_id = c.tenant_id AND l.id = c.lista_precio_id
-                  LEFT JOIN accounts_receivable a ON a.tenant_id = c.tenant_id AND a.customer_document = c.documento
-                 WHERE c.tenant_id = ?
-                 ORDER BY c.nombre""", exigirNegocio(negocio));
+        return clientes(negocio, null, null, null);
+    }
+
+    /** Columnas del cliente que viajan a pantalla (F1.6). */
+    private static final String COLUMNAS_DEL_CLIENTE = """
+            c.id, c.documento, c.nombre, c.telefono, c.plazo_dias, c.activo,
+            c.lista_precio_id, l.nombre AS lista,
+            c.tipo_documento, c.razon_social, c.tipo_cliente, c.direccion_entrega, c.municipio_dane,
+            c.correo, c.whatsapp, c.vendedor_id, v.nombre AS vendedor, c.exige_factura,
+            a.total_debt AS deuda, a.credit_limit AS cupo, a.status AS estado_cartera,
+            (a.total_debt > a.credit_limit) AS excede_cupo
+            """;
+
+    /**
+     * El cruce con la cartera es por documento, que se repite entre negocios (un
+     * NIT le compra a dos distribuidoras): sin {@code a.tenant_id = c.tenant_id},
+     * un rol que salte RLS le pegaría a este cliente la deuda que tiene con otro.
+     */
+    private static final String DESDE_CLIENTES = """
+              FROM clientes c
+              LEFT JOIN listas_precio l ON l.tenant_id = c.tenant_id AND l.id = c.lista_precio_id
+              LEFT JOIN users v ON v.tenant_id = c.tenant_id AND v.id = c.vendedor_id
+              LEFT JOIN accounts_receivable a ON a.tenant_id = c.tenant_id AND a.customer_document = c.documento
+            """;
+
+    /**
+     * F1.6: la lista de clientes, filtrada en el SERVIDOR. {@code vendedorId} no
+     * nulo = solo los de ese vendedor (quien llama ya decidió si lo fuerza, ver
+     * el controlador); {@code q} busca por nombre, documento o teléfono;
+     * {@code activos} true/false filtra, null trae todos.
+     */
+    public List<Map<String, Object>> clientes(String negocio, Long vendedorId, String q, Boolean activos) {
+        StringBuilder sql = new StringBuilder("SELECT ").append(COLUMNAS_DEL_CLIENTE).append(DESDE_CLIENTES)
+                .append(" WHERE c.tenant_id = ?");
+        List<Object> args = new java.util.ArrayList<>(List.of(exigirNegocio(negocio)));
+        if (vendedorId != null) {
+            sql.append(" AND c.vendedor_id = ?");
+            args.add(vendedorId);
+        }
+        if (activos != null) {
+            sql.append(" AND c.activo = ?");
+            args.add(activos);
+        }
+        if (q != null && !q.isBlank()) {
+            sql.append(" AND (c.nombre ILIKE ? OR c.documento ILIKE ? OR c.telefono ILIKE ?)");
+            String patron = "%" + q.trim().replace("%", "\\%").replace("_", "\\_") + "%";
+            args.add(patron);
+            args.add(patron);
+            args.add(patron);
+        }
+        sql.append(" ORDER BY c.nombre");
+        return jdbc.queryForList(sql.toString(), args.toArray());
+    }
+
+    /** F1.6: la ficha de un cliente del negocio, o vacío. */
+    public java.util.Optional<Map<String, Object>> cliente(String negocio, String documento) {
+        List<Map<String, Object>> filas = jdbc.queryForList(
+                "SELECT " + COLUMNAS_DEL_CLIENTE + DESDE_CLIENTES + " WHERE c.tenant_id = ? AND c.documento = ?",
+                exigirNegocio(negocio), documento == null ? null : documento.trim());
+        return filas.stream().findFirst();
+    }
+
+    /** Lo que se puede cambiar de un cliente (F1.6). null = no cambia. */
+    public record CambiosDelCliente(String nombre, String telefono, UUID listaPrecioId, Integer plazoDias,
+                                    String tipoDocumento, String razonSocial, String tipoCliente,
+                                    String direccionEntrega, String municipioDane, String correo, String whatsapp,
+                                    Long vendedorId, Boolean exigeFactura) {}
+
+    static final java.util.Set<String> TIPOS_DE_DOCUMENTO = java.util.Set.of("CC", "NIT", "CE", "PAS", "PPT", "TI");
+    static final java.util.Set<String> TIPOS_DE_CLIENTE = java.util.Set.of(
+            "TIENDA_DE_BARRIO", "MINIMERCADO", "SUPERMERCADO", "GRANERO", "LICORERIA", "DROGUERIA",
+            "FERRETERIA", "MISCELANEA", "PAPELERIA", "DULCERIA", "PANADERIA", "RESTAURANTE",
+            "CAFETERIA", "BAR_CIGARRERIA", "HOTEL", "INSTITUCIONAL", "SUBDISTRIBUIDOR");
+
+    /**
+     * F1.6: cambia un cliente del negocio. Cada campo que cambia queda en
+     * {@code clientes_eventos} con su autor: se fija {@code app.user_id} en esta
+     * transacción, que es lo que lee el disparador de V62. Los catálogos se validan
+     * aquí para responder con {@code campo}; la base es el suelo.
+     *
+     * @return false si el cliente no existe en el negocio
+     */
+    @Transactional
+    public boolean actualizarCliente(String negocio, String documento, CambiosDelCliente c, Autor autor) {
+        exigirNegocio(negocio);
+        exigirAutor(autor);
+        String tipoDoc = mayusculasONulo(c.tipoDocumento());
+        if (tipoDoc != null && !TIPOS_DE_DOCUMENTO.contains(tipoDoc)) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("tipoDocumento",
+                    "Tipo de documento: CC, NIT, CE, PAS, PPT o TI.");
+        }
+        String tipoCliente = mayusculasONulo(c.tipoCliente());
+        if (tipoCliente != null && !TIPOS_DE_CLIENTE.contains(tipoCliente)) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("tipoCliente",
+                    "Ese tipo de cliente no está en la lista. Si falta uno, se añade: pídeselo a SureSell.");
+        }
+        if (c.municipioDane() != null && !c.municipioDane().isBlank() && !c.municipioDane().trim().matches("^[0-9]{5}$")) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("municipioDane",
+                    "El código DANE del municipio tiene 5 dígitos.");
+        }
+        if (c.plazoDias() != null && (c.plazoDias() < 0 || c.plazoDias() > 365)) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("plazoDias", "El plazo va de 0 a 365 días.");
+        }
+        if (c.nombre() != null && c.nombre().isBlank()) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("nombre", "El nombre no puede quedar vacío.");
+        }
+        if (c.vendedorId() != null) {
+            List<String> rol = jdbc.queryForList("SELECT role FROM users WHERE tenant_id = ? AND id = ?",
+                    String.class, negocio, c.vendedorId());
+            if (rol.isEmpty()) {
+                throw new com.suresell.orders.shared.exception.DatoInvalidoException("vendedorId",
+                        "El vendedor no es de este negocio.");
+            }
+        }
+        fijarAutor(autor);
+        int n = jdbc.update("""
+                UPDATE clientes SET
+                       nombre = COALESCE(?, nombre),
+                       telefono = COALESCE(?, telefono),
+                       lista_precio_id = COALESCE(?, lista_precio_id),
+                       plazo_dias = COALESCE(?, plazo_dias),
+                       tipo_documento = COALESCE(?, tipo_documento),
+                       razon_social = COALESCE(?, razon_social),
+                       tipo_cliente = COALESCE(?, tipo_cliente),
+                       direccion_entrega = COALESCE(?, direccion_entrega),
+                       municipio_dane = COALESCE(?, municipio_dane),
+                       correo = COALESCE(?, correo),
+                       whatsapp = COALESCE(?, whatsapp),
+                       vendedor_id = COALESCE(?, vendedor_id),
+                       exige_factura = COALESCE(?, exige_factura),
+                       actualizado_en = now()
+                 WHERE tenant_id = ? AND documento = ?""",
+                recortar(c.nombre()), recortar(c.telefono()), c.listaPrecioId(), c.plazoDias(), tipoDoc,
+                recortar(c.razonSocial()), tipoCliente, recortar(c.direccionEntrega()), recortar(c.municipioDane()),
+                recortar(c.correo()), recortar(c.whatsapp()), c.vendedorId(), c.exigeFactura(),
+                negocio, documento.trim());
+        return n > 0;
+    }
+
+    /** F1.6: desactivar, nunca borrar (las ventas y la cartera lo nombran). */
+    @Transactional
+    public boolean desactivarCliente(String negocio, String documento, Autor autor) {
+        exigirNegocio(negocio);
+        exigirAutor(autor);
+        fijarAutor(autor);
+        return jdbc.update("UPDATE clientes SET activo = false, actualizado_en = now() WHERE tenant_id = ? AND documento = ?",
+                negocio, documento.trim()) > 0;
+    }
+
+    /** El autor que lee el disparador de `clientes_eventos` (V62), acotado a la transacción. */
+    private void fijarAutor(Autor autor) {
+        jdbc.query("SELECT set_config('app.user_id', ?, true)", rs -> null,
+                autor.id() == null ? "" : String.valueOf(autor.id()));
+    }
+
+    private static String recortar(String s) {
+        return s == null ? null : s.trim();
+    }
+
+    private static String mayusculasONulo(String s) {
+        return s == null || s.isBlank() ? null : s.trim().toUpperCase();
     }
 
     @Transactional
@@ -157,7 +304,8 @@ public class ListasDePrecio {
                     autor.correo(), autor.id());
         }
         // `autor_id` es de quien lo REGISTRÓ: editarlo no cambia el autor. La
-        // historia de los cambios es `clientes_eventos` (F1.6), no esta fila.
+        // historia de los cambios es `clientes_eventos` (V62), con el autor de aquí.
+        fijarAutor(autor);
         jdbc.update("""
                 UPDATE clientes SET nombre = ?, telefono = ?, lista_precio_id = ?, plazo_dias = ?, actualizado_en = now()
                  WHERE tenant_id = ? AND id = ?""", nombre.trim(), telefono, listaId, plazoDias, negocio, ids.get(0));

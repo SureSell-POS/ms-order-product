@@ -155,10 +155,83 @@ public class MayoristaController {
                 cuerpo.fuente(), cuerpo.confianza() == null ? 1 : cuerpo.confianza(), autor(http), cuerpo.nota()));
     }
 
+    /**
+     * F1.6. Con token de {@code vendedor}, solo SUS clientes: el filtro lo pone el
+     * servidor con el id del token, y el {@code vendedorId} de la petición no se
+     * usa (un vendedor no ve la cartera de otro, plan §7.2). Admin y cajero ven
+     * todos y pueden filtrar por vendedor.
+     */
     @GetMapping("/clientes")
-    @Operation(summary = "Los clientes con su lista y su cartera")
-    public List<Map<String, Object>> clientes() {
-        return listas.clientes(TenantContext.get());
+    @Operation(summary = "Los clientes con su lista y su cartera; un vendedor ve solo los suyos")
+    public List<Map<String, Object>> clientes(@RequestParam(required = false) Long vendedorId,
+                                              @RequestParam(required = false) String q,
+                                              @RequestParam(required = false) Boolean activos,
+                                              HttpServletRequest http) {
+        return listas.clientes(TenantContext.get(), vendedorQueFiltra(http, vendedorId), q, activos);
+    }
+
+    @GetMapping("/clientes/{documento}")
+    @Operation(summary = "F1.6 — La ficha de un cliente: datos, lista, plazo, cupo y deuda")
+    public Map<String, Object> cliente(@PathVariable String documento, HttpServletRequest http) {
+        Map<String, Object> ficha = listas.cliente(TenantContext.get(), documento)
+                .orElseThrow(() -> new com.suresell.orders.shared.exception.DatoInvalidoException("documento",
+                        "Ese cliente no existe en el negocio."));
+        Long soloDe = vendedorQueFiltra(http, null);
+        if (soloDe != null && !soloDe.equals(ficha.get("vendedor_id") == null ? null
+                : ((Number) ficha.get("vendedor_id")).longValue())) {
+            // A un vendedor, el cliente de otro no existe: mismo texto, no se confirma nada.
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("documento",
+                    "Ese cliente no existe en el negocio.");
+        }
+        return ficha;
+    }
+
+    public record CambioDeCliente(String nombre, String telefono, UUID listaPrecioId, Integer plazoDias,
+                                  String tipoDocumento, String razonSocial, String tipoCliente,
+                                  String direccionEntrega, String municipioDane, String correo, String whatsapp,
+                                  Long vendedorId, Boolean exigeFactura) {}
+
+    @PutMapping("/clientes/{documento}")
+    @Operation(summary = "F1.6 — Editar un cliente (solo admin). Cada cambio queda en clientes_eventos con su autor")
+    public Map<String, Object> editarCliente(@PathVariable String documento, @RequestBody CambioDeCliente c,
+                                             HttpServletRequest http) {
+        exigirAdmin(http, "editar un cliente");
+        boolean hecho = listas.actualizarCliente(TenantContext.get(), documento,
+                new ListasDePrecio.CambiosDelCliente(c.nombre(), c.telefono(), c.listaPrecioId(), c.plazoDias(),
+                        c.tipoDocumento(), c.razonSocial(), c.tipoCliente(), c.direccionEntrega(), c.municipioDane(),
+                        c.correo(), c.whatsapp(), c.vendedorId(), c.exigeFactura()),
+                autor(http));
+        if (!hecho) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("documento", "Ese cliente no existe en el negocio.");
+        }
+        return listas.cliente(TenantContext.get(), documento).orElseThrow();
+    }
+
+    @PostMapping("/clientes/{documento}/desactivar")
+    @Operation(summary = "F1.6 — Desactivar un cliente (solo admin). Nunca se borra")
+    public Map<String, Object> desactivarCliente(@PathVariable String documento, HttpServletRequest http) {
+        exigirAdmin(http, "desactivar un cliente");
+        if (!listas.desactivarCliente(TenantContext.get(), documento, autor(http))) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("documento", "Ese cliente no existe en el negocio.");
+        }
+        return listas.cliente(TenantContext.get(), documento).orElseThrow();
+    }
+
+    /** El vendedor por el que hay que filtrar: el del token si es vendedor; si no, el pedido (o ninguno). */
+    private Long vendedorQueFiltra(HttpServletRequest http, Long pedido) {
+        String rol = tokens.resolveRole(http.getHeader("Authorization")).orElse("");
+        if ("vendedor".equals(rol)) {
+            // Sin id resuelto, un vendedor no ve nada: -1 no es ningún usuario.
+            return usuarios.id().orElse(-1L);
+        }
+        return pedido;
+    }
+
+    private void exigirAdmin(HttpServletRequest http, String queCosa) {
+        String rol = tokens.resolveRole(http.getHeader("Authorization")).orElse("");
+        if (!"admin".equals(rol)) {
+            throw new com.suresell.orders.shared.exception.SoloAdministradorException(queCosa);
+        }
     }
 
     public record NuevoCliente(@NotBlank String documento, @NotBlank String nombre, String telefono,
