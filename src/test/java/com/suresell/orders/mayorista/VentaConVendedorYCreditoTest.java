@@ -205,6 +205,30 @@ class VentaConVendedorYCreditoTest {
     }
 
     @Test
+    @DisplayName("🔴 F1.13: el cierre informa lo vendido a crédito y no lo mete en el efectivo esperado")
+    void elCierreInformaElCredito() throws Exception {
+        mockMvc.perform(post("/orders/create").header("Authorization", bearer(LUIS, "cajero"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(venta("\"paymentMethod\":\"CREDITO\",\"clienteDocumento\":\"" + DOC + "\",", "cierre-credito")))
+                .andExpect(status().isCreated());
+        mockMvc.perform(post("/orders/create").header("Authorization", bearer(LUIS, "cajero"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(venta("\"paymentMethod\":\"CASH\",", "cierre-contado")))
+                .andExpect(status().isCreated());
+        java.math.BigDecimal credito = new java.math.BigDecimal(laVenta("cierre-credito").get("total").toString());
+        java.math.BigDecimal contado = new java.math.BigDecimal(laVenta("cierre-contado").get("total").toString());
+
+        String cuerpo = mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .get("/api/closures/preview").header("Authorization", bearer(LUIS, "cajero")))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        com.fasterxml.jackson.databind.JsonNode p = new com.fasterxml.jackson.databind.ObjectMapper().readTree(cuerpo);
+        assertThat(p.get("vendidoACredito").decimalValue()).isEqualByComparingTo(credito);
+        assertThat(p.get("totalExpectedCash").decimalValue()).isEqualByComparingTo(contado);
+        assertThat(p.get("totalExpected").decimalValue()).isEqualByComparingTo(contado);
+    }
+
+    @Test
     @DisplayName("un documento que no está en clientes no abre cuenta: la venta a crédito se sigue negando")
     void clienteNoRegistradoNoAbreCuenta() throws Exception {
         int estado = mockMvc.perform(post("/orders/create").header("Authorization", bearer(LUIS, "cajero"))

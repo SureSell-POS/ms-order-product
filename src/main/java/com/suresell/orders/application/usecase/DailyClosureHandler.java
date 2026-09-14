@@ -58,6 +58,7 @@ implements DailyClosurePort {
         BigDecimal totalCash = BigDecimal.ZERO;
         BigDecimal totalCard = BigDecimal.ZERO;
         BigDecimal totalQr = BigDecimal.ZERO;
+        BigDecimal vendidoACredito = BigDecimal.ZERO;
         // V55: con lo que arrancó este turno —la base que dejó el cierre
         // anterior (también si fue hoy); si no hay, la configurada; si no, 0.
         // Y lo que se precarga como base a dejar: siempre la configurada.
@@ -95,6 +96,11 @@ implements DailyClosurePort {
                     totalQr = totalQr.add(sumTotal);
                     break;
                 }
+                // F1.13: a crédito no entra al cajón; se informa aparte.
+                case "CREDITO": {
+                    vendidoACredito = sumTotal;
+                    break;
+                }
                 default: {
                 }
             }
@@ -121,7 +127,8 @@ implements DailyClosurePort {
                 cierresHoy,
                 ventanaDesde,
                 baseBalance,
-                baseSugerida);
+                baseSugerida,
+                vendidoACredito);
     }
     @Transactional
     public ClosureResponse executeClosure(ClosureRequest request) {

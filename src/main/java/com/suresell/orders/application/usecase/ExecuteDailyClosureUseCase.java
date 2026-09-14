@@ -265,7 +265,9 @@ public class ExecuteDailyClosureUseCase {
                 calculatedBase,
                 amountToDeposit,
                 roundingAdjustment,
-                turno
+                turno,
+                // F1.13: informativo; `expected` lo trae del GROUP BY y no entra en pureSales ni en caja.
+                expected.getOrDefault("CREDITO", BigDecimal.ZERO)
         );
     }
 

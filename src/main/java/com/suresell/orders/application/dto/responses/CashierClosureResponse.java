@@ -13,6 +13,10 @@ import java.util.Map;
  * <p>{@code turno} (V55, aditivo): el número del turno que acaba de cerrarse.
  * {@code baseToKeep} es el eco de la base usada: la declarada por el cajero,
  * o la {@code base_caja} del negocio, o 0.
+ *
+ * <p>{@code vendidoACredito} (plan de mayoristas F1.13, aditivo): lo vendido a
+ * crédito en el turno, informativo. No suma al efectivo esperado ni a ninguna
+ * diferencia: ese dinero está en cuentas por cobrar, no en el cajón.
  */
 public record CashierClosureResponse(
         String status,
@@ -21,5 +25,6 @@ public record CashierClosureResponse(
         BigDecimal baseToKeep,
         BigDecimal amountToDeposit,
         BigDecimal roundingAdjustment,
-        Integer turno
+        Integer turno,
+        BigDecimal vendidoACredito
 ) {}
