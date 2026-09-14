@@ -49,10 +49,25 @@ import org.junit.jupiter.api.Test;
  * rango propio funciona hoy y colisiona el día que la otra vertical llegue a ese
  * número.
  */
-class GuardaDeMigracionesTest {
+public class GuardaDeMigracionesTest {
 
-    private static final Path CARPETA = Paths.get("src/main/resources/db/migration");
-    private static final Path MANIFIESTO = CARPETA.resolve("MIGRACIONES.txt");
+    /**
+     * La carpeta de la cadena que se guarda. La cadena {@code pedidos} (plan de
+     * mayoristas, F0.9) hereda esta misma guarda sobrescribiéndola; una copia
+     * del test se habría desincronizado a la primera corrección.
+     */
+    protected Path carpeta() {
+        return Paths.get("src/main/resources/db/migration");
+    }
+
+    /** Dónde se deja el manifiesto sugerido; uno por cadena para que no se pisen. */
+    protected Path ayuda() {
+        return Paths.get("build/MIGRACIONES.txt.nuevo");
+    }
+
+    private Path manifiesto() {
+        return carpeta().resolve("MIGRACIONES.txt");
+    }
     private static final Pattern NOMBRE = Pattern.compile("^V(\\d+)__([a-z0-9_]+)\\.sql$");
     private static final Pattern RANGO = Pattern.compile("^@rango\\s+(\\d+)-(\\d+)\\s+(\\S+)\\s*$");
 
@@ -60,8 +75,8 @@ class GuardaDeMigracionesTest {
 
     // =====================================================================
 
-    private static List<Path> migraciones() throws IOException {
-        try (Stream<Path> s = Files.list(CARPETA)) {
+    private List<Path> migraciones() throws IOException {
+        try (Stream<Path> s = Files.list(carpeta())) {
             return s.filter(p -> p.getFileName().toString().matches("V\\d+__.*\\.sql"))
                     .sorted(java.util.Comparator.comparingInt(GuardaDeMigracionesTest::version))
                     .toList();
@@ -85,17 +100,17 @@ class GuardaDeMigracionesTest {
         }
     }
 
-    private static List<String> lineasUtiles() throws IOException {
-        return Files.readAllLines(MANIFIESTO).stream()
+    private List<String> lineasUtiles() throws IOException {
+        return Files.readAllLines(manifiesto()).stream()
                 .map(String::strip)
                 .filter(l -> !l.isEmpty() && !l.startsWith("#"))
                 .toList();
     }
 
     /** El manifiesto tal y como debería ser hoy. Se usa para el mensaje de ayuda. */
-    private static String manifiestoEsperado() throws IOException {
+    private String manifiestoEsperado() throws IOException {
         StringBuilder sb = new StringBuilder();
-        for (String l : Files.readAllLines(MANIFIESTO)) {
+        for (String l : Files.readAllLines(manifiesto())) {
             if (l.isBlank() || l.strip().startsWith("#") || l.strip().startsWith("@rango")) {
                 sb.append(l).append('\n');
             }
@@ -107,8 +122,8 @@ class GuardaDeMigracionesTest {
         return sb.toString();
     }
 
-    private static void escribirAyuda() throws IOException {
-        Path destino = Paths.get("build/MIGRACIONES.txt.nuevo");
+    private void escribirAyuda() throws IOException {
+        Path destino = ayuda();
         Files.createDirectories(destino.getParent());
         Files.writeString(destino, manifiestoEsperado());
     }
@@ -129,7 +144,7 @@ class GuardaDeMigracionesTest {
 
         List<String> problemas = new ArrayList<>();
         for (var e : sellado.entrySet()) {
-            Path p = CARPETA.resolve(e.getKey());
+            Path p = carpeta().resolve(e.getKey());
             if (!Files.exists(p)) {
                 problemas.add("BORRADA: " + e.getKey());
             } else if (!huella(p).equals(e.getValue())) {
@@ -146,7 +161,7 @@ class GuardaDeMigracionesTest {
                     edites: Flyway guarda su suma de comprobación y el servicio se negará \
                     a arrancar — pasó el 2026-09-02 con V18. Escribe una migración NUEVA \
                     que corrija lo anterior. Si de verdad no se ha aplicado en ninguna \
-                    parte, copia build/MIGRACIONES.txt.nuevo sobre MIGRACIONES.txt.""")
+                    parte, copia %s sobre MIGRACIONES.txt.""".formatted(ayuda()))
                 .isEmpty();
     }
 
@@ -186,8 +201,7 @@ class GuardaDeMigracionesTest {
             escribirAyuda();
         }
         assertThat(sinSellar)
-                .as("migraciones sin sellar. Copia build/MIGRACIONES.txt.nuevo "
-                    + "sobre src/main/resources/db/migration/MIGRACIONES.txt")
+                .as("migraciones sin sellar. Copia " + ayuda() + " sobre " + manifiesto())
                 .isEmpty();
     }
 

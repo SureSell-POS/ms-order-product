@@ -98,6 +98,12 @@ spring:
     password: ${DB_MIGRATION_PASSWORD:postgres}
     locations: classpath:db/migration
 
+# Segunda cadena Flyway (esquemas `pedidos` y `red`): la corre FlywayPedidos,
+# NUNCA un @Bean Flyway (apagaría la de `public`). Usa la conexión de arriba.
+pedidos:
+  flyway:
+    enabled: ${PEDIDOS_FLYWAY_ENABLED:true}
+
 # Desactiva la maquinaria local-first (outbox/sync-inversa/segundo datasource).
 sync:
   cloud:

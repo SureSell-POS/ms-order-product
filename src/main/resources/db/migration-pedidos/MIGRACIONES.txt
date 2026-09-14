@@ -1,0 +1,18 @@
+# ==============================================================
+# MIGRACIONES DE LA CADENA `pedidos` (esquemas `pedidos` y `red`) de ms-order-product-mt
+#
+# Cadena propia, historial propio: pedidos.flyway_schema_history_pedidos.
+# La guarda es la misma que la de `public` (GuardaDeMigracionesPedidosTest
+# hereda de GuardaDeMigracionesTest): huella sellada, sin números repetidos,
+# todo sellado, nombres legibles.
+#
+# Números: de quien escribe el fichero, contra la última aplicada en staging
+# justo antes. Una reserva sin fichero caduca (V56 y V133 de las otras cadenas).
+# Orden acordado al abrirla: V1 conjunta (Agente-mt), V2 red, V3 pedido,
+# V4-V5 red; desde V6, por orden de llegada.
+#
+# Al añadir una: ./gradlew test --tests '*GuardaDeMigracionesPedidos*'
+# y copiar build/MIGRACIONES-pedidos.txt.nuevo sobre este archivo.
+# ==============================================================
+@rango 1-999 pedidos-y-red
+1	10358590c2b000b1a20a1d2a0447f436c331f39f26a0fe97202e485fa0e64e4f	V1__esquemas_pedidos_y_red.sql
