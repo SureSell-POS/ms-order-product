@@ -142,8 +142,9 @@ class PoliticasDeLaCadenaPedidosTest {
                         + "OR comprador_tenant_id = current_setting('app.tenant_id', true))";
                 s.execute("CREATE TABLE red.__fixture_catalogo (id INT, tenant_id TEXT, comprador_tenant_id TEXT)");
                 s.execute("CREATE POLICY ve_el_comprador ON red.__fixture_catalogo USING " + dosPartes);
-                // La misma política en una tabla de la lista blanca no es hallazgo.
-                s.execute("CREATE TABLE pedidos.pedidos (id INT, tenant_id TEXT, comprador_tenant_id TEXT)");
+                // La misma política en una tabla de la lista blanca no es hallazgo. Desde la V2 de la
+                // cadena `pedidos.pedidos` existe de verdad (con `comprador_tenant_id`): la política se
+                // le pone dentro de esta transacción, que se deshace.
                 s.execute("CREATE POLICY dos_partes ON pedidos.pedidos USING " + dosPartes);
                 assertThat(dosPartesFueraDeLaLista(c)).containsExactly("red.__fixture_catalogo.ve_el_comprador");
             } finally {

@@ -18,3 +18,4 @@
 # ==============================================================
 @rango 1-999 pedidos-y-red
 1	10358590c2b000b1a20a1d2a0447f436c331f39f26a0fe97202e485fa0e64e4f	V1__esquemas_pedidos_y_red.sql
+2	9b017c2822c9d6953425666c9e034638a9316fd862314112b6683cb344972691	V2__el_pedido_y_su_historia.sql
