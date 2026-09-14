@@ -36,8 +36,14 @@ class CostoDeLaCarteraTest {
 
     @BeforeAll
     static void sembrar() throws SQLException {
-        Flyway.configure().dataSource(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword())
-                .locations("classpath:db/migration").load().migrate();
+        var conf = Flyway.configure().dataSource(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword())
+                .locations("classpath:db/migration");
+        // CARTERA_HASTA=67 mide las vistas de V64 (antes de V68), para comparar.
+        String hasta = System.getenv("CARTERA_HASTA");
+        if (hasta != null && !hasta.isBlank()) {
+            conf.target(hasta);
+        }
+        conf.load().migrate();
         try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
              Statement st = c.createStatement()) {
             for (String t : new String[] {"perf-a", "perf-b"}) {
@@ -99,6 +105,21 @@ class CostoDeLaCarteraTest {
         Map<String, Double> tiempos = new LinkedHashMap<>();
         try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
              Statement st = c.createStatement()) {
+            // La lista se mide también con el work_mem de staging (3500kB, SHOW work_mem del 14/09) y con uno holgado.
+            for (String wm : new String[] {"3500kB", "64MB"}) {
+                st.execute("SET work_mem = '" + wm + "'");
+                for (int vuelta = 0; vuelta < 3; vuelta++) {
+                    try (ResultSet rs = st.executeQuery("EXPLAIN (ANALYZE) " + CONSULTAS.get("lista de clientes del negocio"))) {
+                        while (rs.next()) {
+                            String l = rs.getString(1);
+                            if (l.startsWith("Execution Time:")) {
+                                tiempos.put("lista con work_mem " + wm + " #" + vuelta, Double.parseDouble(l.replaceAll("[^0-9.]", "")));
+                            }
+                        }
+                    }
+                }
+            }
+            st.execute("RESET work_mem");
             for (Map.Entry<String, String> q : CONSULTAS.entrySet()) {
                 informe.append("\n── ").append(q.getKey()).append(" ──\n");
                 double ms = -1;

@@ -36,9 +36,13 @@
 --   documentos de un cliente (estado de cuenta)   7,4 ms → 0,5 ms
 --   resumen de un cliente (ficha)                 34 ms  → 0,3 ms
 --   facturas vivas de una cuenta (al cobrar)      7,2 ms → 0,2 ms
---   lista de clientes del negocio (2.000)         67 ms  → 97 ms (todo el negocio en
---     los dos casos; la diferencia es la agregación por hash que en el contenedor
---     de pruebas desborda a disco con el work_mem por defecto)
+--   lista de clientes del negocio (2.000)         65 ms  → 90 ms (todo el negocio en
+--     los dos casos). NO es el work_mem: medido con 3500kB (el de staging, SHOW
+--     work_mem del 14/09) y con 64MB, V64 da ~65 ms en los dos y V68 ~90 ms en los
+--     dos. Es estructural: V68 agrupa las 40.000 facturas con sus aplicaciones en un
+--     solo GROUP BY; V64 agrupaba solo las 10.000 aplicaciones. Se acepta: la lista
+--     se carga una vez por pantalla y la ficha de un cliente, muchas; y la lista sigue
+--     costando lo del negocio, como antes.
 --
 -- ── El control: resultado idéntico, fila por fila ─────────────────────
 --
