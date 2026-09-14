@@ -315,7 +315,12 @@ public class AuthService {
         return getModuleConfig(tenantId);
     }
 
-    private static final Set<String> VALID_ROLES = Set.of("admin", "cajero");
+    /**
+     * Roles que el admin del negocio puede dar. `vendedor` (plan de mayoristas,
+     * F1.2, S3): quien vende, que no es quien opera la caja. `sistema` (V37) y
+     * `super_admin` no se conceden desde aquí.
+     */
+    private static final Set<String> VALID_ROLES = Set.of("admin", "cajero", "vendedor");
 
     /** Lista los usuarios del tenant (sin hash). Lo usa el panel de usuarios (admin). */
     @Transactional(readOnly = true)
@@ -334,6 +339,12 @@ public class AuthService {
      */
     public AuthRepository.UserSummary createUser(String tenantId, String email,
                                                  String password, String role) {
+        return createUser(tenantId, email, password, role, null);
+    }
+
+    /** F1.2: con nombre visible (V60). */
+    public AuthRepository.UserSummary createUser(String tenantId, String email,
+                                                 String password, String role, String nombre) {
         if (isBlank(email) || isBlank(password)) {
             throw new AuthException(400, "Email y contraseña son requeridos");
         }
@@ -342,17 +353,62 @@ public class AuthService {
         }
         String r = isBlank(role) ? "cajero" : role.trim().toLowerCase();
         if (!VALID_ROLES.contains(r)) {
-            throw new AuthException(400, "Rol inválido (admin|cajero)");
+            throw new AuthException(400, "Rol inválido (admin|cajero|vendedor)");
         }
         String cleanEmail = email.trim();
         if (repo.emailExists(cleanEmail)) {
             throw new AuthException(409, "Ese email ya está registrado");
         }
-        repo.insertUser(cleanEmail, encoder.encode(password), tenantId, r);
+        repo.insertUser(cleanEmail, encoder.encode(password), tenantId, r, trimOrNull(nombre));
         return repo.listUsers(tenantId).stream()
                 .filter(u -> u.email().equalsIgnoreCase(cleanEmail))
                 .findFirst()
                 .orElseThrow(() -> new AuthException(500, "No se pudo leer el usuario creado"));
+    }
+
+    /** F1.2: la lista de un solo rol (`?rol=vendedor`, para el selector de la caja). */
+    @Transactional(readOnly = true)
+    public List<AuthRepository.UserSummary> listUsers(String tenantId, String rol) {
+        List<AuthRepository.UserSummary> todos = listUsers(tenantId);
+        if (isBlank(rol)) {
+            return todos;
+        }
+        String r = rol.trim().toLowerCase();
+        return todos.stream().filter(u -> r.equals(u.role()) && "active".equals(u.status())).toList();
+    }
+
+    /**
+     * F1.2: cambia nombre, rol o si está activo. Desactivar, nunca borrar: las
+     * ventas atribuidas a ese usuario siguen apuntando a él (V37, V60).
+     *
+     * <p>Dos negativas para no dejar al negocio sin salida: nadie se quita a sí
+     * mismo el rol de admin ni se desactiva (quedaría fuera de la gestión). Y el
+     * usuario `sistema` (V37) no se gestiona desde aquí.
+     */
+    @Transactional
+    public AuthRepository.UserSummary updateUser(String tenantId, long id, String nombre, String rol,
+                                                 Boolean activo, String quienLoPide) {
+        repo.fijarNegocioEnLaTransaccion(tenantId);
+        AuthRepository.UserSummary actual = repo.listUsers(tenantId).stream()
+                .filter(u -> u.id() == id).findFirst()
+                .orElseThrow(() -> new AuthException(404, "Ese usuario no existe en este negocio"));
+        if ("sistema".equals(actual.role())) {
+            throw new AuthException(404, "Ese usuario no existe en este negocio");
+        }
+        String nuevoRol = isBlank(rol) ? actual.role() : rol.trim().toLowerCase();
+        if (!VALID_ROLES.contains(nuevoRol)) {
+            throw new AuthException(400, "Rol inválido (admin|cajero|vendedor)");
+        }
+        String nuevoEstado = activo == null ? actual.status() : (activo ? "active" : "disabled");
+        boolean esElMismo = quienLoPide != null && quienLoPide.equalsIgnoreCase(actual.email());
+        if (esElMismo && (!"admin".equals(nuevoRol) || "disabled".equals(nuevoEstado))) {
+            throw new AuthException(409, "No puedes quitarte el rol de administrador ni desactivarte a ti mismo");
+        }
+        String nuevoNombre = nombre == null ? actual.nombre() : trimOrNull(nombre);
+        if (repo.updateUser(tenantId, id, nuevoNombre, nuevoRol, nuevoEstado) != 1) {
+            throw new AuthException(404, "Ese usuario no existe en este negocio");
+        }
+        return new AuthRepository.UserSummary(id, actual.email(), nuevoRol, nuevoEstado, nuevoNombre);
     }
 
     // ---------- Reset de contraseña (F3, Inc.5) ----------

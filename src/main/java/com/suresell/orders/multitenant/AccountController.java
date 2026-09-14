@@ -6,11 +6,14 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Operaciones sobre la cuenta del usuario autenticado (perfil `cloud`). A
@@ -78,9 +81,22 @@ public class AccountController {
 
     // ---------- Gestión de usuarios (F3) — solo admin ----------
 
+    /**
+     * Sin {@code rol}: la gestión de usuarios, solo admin. Con {@code rol}
+     * (plan de mayoristas, F1.2): la lista activa de ese rol para el selector de
+     * vendedor de la caja, que también abre un cajero. Nunca devuelve hashes.
+     */
     @GetMapping("/account/users")
-    public ResponseEntity<?> listUsers(HttpServletRequest http) {
+    public ResponseEntity<?> listUsers(@RequestParam(value = "rol", required = false) String rol,
+                                       HttpServletRequest http) {
         String tenantId = TenantContext.get();
+        if (rol != null && !rol.isBlank()) {
+            ResponseEntity<?> guard = requireRole(http, tenantId, Set.of("admin", "cajero"));
+            if (guard != null) {
+                return guard;
+            }
+            return ResponseEntity.ok(auth.listUsers(tenantId, rol));
+        }
         ResponseEntity<?> guard = requireAdmin(http, tenantId);
         if (guard != null) {
             return guard;
@@ -96,7 +112,7 @@ public class AccountController {
             return guard;
         }
         try {
-            return ResponseEntity.ok(auth.createUser(tenantId, req.email(), req.password(), req.role()));
+            return ResponseEntity.ok(auth.createUser(tenantId, req.email(), req.password(), req.role(), req.nombre()));
         } catch (AuthException e) {
             return ResponseEntity.status(e.status()).body(Map.of("error", e.getMessage()));
         }
@@ -139,6 +155,34 @@ public class AccountController {
         return ResponseEntity.status(HttpStatus.FORBIDDEN).body(cuerpo);
     }
 
+    /** F1.2: nombre, rol o activo de un usuario del negocio. Desactivar, nunca borrar. Solo admin. */
+    @PutMapping("/account/users/{id}")
+    public ResponseEntity<?> updateUser(@PathVariable("id") long id, @RequestBody UpdateUserRequest req,
+                                        HttpServletRequest http) {
+        String tenantId = TenantContext.get();
+        ResponseEntity<?> guard = requireAdmin(http, tenantId);
+        if (guard != null) {
+            return guard;
+        }
+        String quien = resolver.resolveSubject(http.getHeader("Authorization")).orElse(null);
+        try {
+            return ResponseEntity.ok(auth.updateUser(tenantId, id, req.nombre(), req.rol(), req.activo(), quien));
+        } catch (AuthException e) {
+            return ResponseEntity.status(e.status()).body(Map.of("error", e.getMessage(), "mensaje", e.getMessage()));
+        }
+    }
+
+    private ResponseEntity<?> requireRole(HttpServletRequest http, String tenantId, Set<String> roles) {
+        if (tenantId == null || tenantId.isBlank()) {
+            return ResponseEntity.status(401).body(Map.of("error", "Sesión inválida"));
+        }
+        String role = resolver.resolveRole(http.getHeader("Authorization")).orElse("");
+        if (!roles.contains(role)) {
+            return ResponseEntity.status(403).body(Map.of("error", "Tu rol no puede ver esta lista"));
+        }
+        return null;
+    }
+
     /** null si es admin válido; si no, la respuesta 401/403 a devolver. */
     private ResponseEntity<?> requireAdmin(HttpServletRequest http, String tenantId) {
         if (tenantId == null || tenantId.isBlank()) {
@@ -156,7 +200,11 @@ public class AccountController {
     public record BusinessRequest(String name, String nit, String address, String phone,
                                   String ticketFooter, String editPassword) {}
 
-    public record CreateUserRequest(String email, String password, String role) {}
+    /** {@code nombre} (V60) es opcional: un cliente viejo no lo manda. */
+    public record CreateUserRequest(String email, String password, String role, String nombre) {}
+
+    /** Campos nulos = no cambian. {@code rol} ∈ admin|cajero|vendedor. */
+    public record UpdateUserRequest(String nombre, String rol, Boolean activo) {}
 
     public record ModulesRequest(Map<String, Boolean> overrides) {}
 }

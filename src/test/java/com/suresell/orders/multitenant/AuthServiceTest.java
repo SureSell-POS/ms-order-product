@@ -238,7 +238,7 @@ class AuthServiceTest {
                 () -> newService(repo).register("Neg", "a@x.co", "s3cret1", "clave-mala", null, null, null));
         assertEquals(403, ex.status());
         verify(repo, never()).insertTenant(any(), any(), any(), any(), any(), any());
-        verify(repo, never()).insertUser(any(), any(), any(), any());
+        verify(repo, never()).insertUser(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -369,7 +369,7 @@ class AuthServiceTest {
         AuthRepository.UserSummary u = newService(repo).createUser("t1", "caja@x.co", "clave123", "cajero");
 
         assertEquals("cajero", u.role());
-        verify(repo).insertUser(eq("caja@x.co"), anyString(), eq("t1"), eq("cajero"));
+        verify(repo).insertUser(eq("caja@x.co"), anyString(), eq("t1"), eq("cajero"), org.mockito.ArgumentMatchers.isNull());
     }
 
     @Test
@@ -381,7 +381,7 @@ class AuthServiceTest {
 
         newService(repo).createUser("t1", "x@x.co", "clave123", null);
 
-        verify(repo).insertUser(eq("x@x.co"), anyString(), eq("t1"), eq("cajero"));
+        verify(repo).insertUser(eq("x@x.co"), anyString(), eq("t1"), eq("cajero"), org.mockito.ArgumentMatchers.isNull());
     }
 
     @Test
@@ -390,7 +390,7 @@ class AuthServiceTest {
         AuthException ex = assertThrows(AuthException.class, () ->
                 newService(repo).createUser("t1", "a@x.co", "clave123", "superadmin"));
         assertEquals(400, ex.status());
-        verify(repo, never()).insertUser(any(), any(), any(), any());
+        verify(repo, never()).insertUser(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -400,7 +400,7 @@ class AuthServiceTest {
         AuthException ex = assertThrows(AuthException.class, () ->
                 newService(repo).createUser("t1", "dup@x.co", "clave123", "cajero"));
         assertEquals(409, ex.status());
-        verify(repo, never()).insertUser(any(), any(), any(), any());
+        verify(repo, never()).insertUser(any(), any(), any(), any(), any());
     }
 
     @Test

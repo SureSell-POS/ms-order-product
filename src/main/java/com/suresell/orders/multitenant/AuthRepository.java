@@ -32,7 +32,16 @@ public class AuthRepository {
                             String nit, String address, String phone, String ticketFooter) {}
 
     /** Proyección de usuario SIN el hash (para listar en el panel de usuarios). */
-    public record UserSummary(long id, String email, String role, String status) {}
+    /**
+     * {@code nombre} (V60): el nombre visible del vendedor o cajero; null = mostrar
+     * el correo. Aditivo en el JSON; el constructor de cuatro campos sigue para
+     * quien no lo tiene.
+     */
+    public record UserSummary(long id, String email, String role, String status, String nombre) {
+        public UserSummary(long id, String email, String role, String status) {
+            this(id, email, role, status, null);
+        }
+    }
 
     /** Override de módulo por tenant: enabled=true regala, false quita. */
     public record ModuleOverride(String module, boolean enabled) {}
@@ -150,16 +159,31 @@ public class AuthRepository {
     }
 
     public void insertUser(String email, String passwordHash, String tenantId, String role) {
-        jdbc.update("INSERT INTO users (email, password_hash, tenant_id, role) VALUES (?, ?, ?, ?)",
-                email, passwordHash, tenantId, role);
+        insertUser(email, passwordHash, tenantId, role, null);
+    }
+
+    /** V60: con nombre visible. */
+    public void insertUser(String email, String passwordHash, String tenantId, String role, String nombre) {
+        jdbc.update("INSERT INTO users (email, password_hash, tenant_id, role, nombre) VALUES (?, ?, ?, ?, ?)",
+                email, passwordHash, tenantId, role, nombre);
+    }
+
+    /**
+     * Cambia nombre, rol o estado de un usuario DEL negocio (plan de mayoristas,
+     * F1.2). El negocio va escrito en la consulta: devuelve cuántas filas tocó, y
+     * 0 significa «no es de este negocio», no «no cambió nada».
+     */
+    public int updateUser(String tenantId, long id, String nombre, String role, String status) {
+        return jdbc.update("UPDATE users SET nombre = ?, role = ?, status = ? WHERE tenant_id = ? AND id = ?",
+                nombre, role, status, tenantId, id);
     }
 
     /** Usuarios de un tenant (sin hash), para el panel de gestión (F3, admin). */
     public List<UserSummary> listUsers(String tenantId) {
         return jdbc.query(
-                "SELECT id, email, role, status FROM users WHERE tenant_id = ? ORDER BY created_at",
+                "SELECT id, email, role, status, nombre FROM users WHERE tenant_id = ? ORDER BY created_at",
                 (rs, i) -> new UserSummary(rs.getLong("id"), rs.getString("email"),
-                        rs.getString("role"), rs.getString("status")),
+                        rs.getString("role"), rs.getString("status"), rs.getString("nombre")),
                 tenantId);
     }
 
