@@ -208,6 +208,20 @@ public class MayoristaController {
         return listas.cliente(TenantContext.get(), documento).orElseThrow();
     }
 
+    public record AsignacionDeLista(UUID listaPrecioId) {}
+
+    @PutMapping("/clientes/{documento}/lista")
+    @Operation(summary = "Asignar (o quitar con null) la lista de precios de un cliente (solo admin). "
+            + "Toca solo esa columna; la misma lista → 200 sin evento")
+    public Map<String, Object> asignarLista(@PathVariable String documento, @RequestBody AsignacionDeLista cuerpo,
+                                            HttpServletRequest http) {
+        exigirAdmin(http, "asignar la lista de un cliente");
+        if (!listas.asignarLista(TenantContext.get(), documento, cuerpo == null ? null : cuerpo.listaPrecioId(), autor(http))) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("documento", "Ese cliente no existe en el negocio.");
+        }
+        return listas.cliente(TenantContext.get(), documento).orElseThrow();
+    }
+
     @PostMapping("/clientes/{documento}/reactivar")
     @Operation(summary = "F1.11 — Reactivar un cliente (solo admin). Si ya estaba activo, 200 sin evento")
     public Map<String, Object> reactivarCliente(@PathVariable String documento, HttpServletRequest http) {

@@ -81,7 +81,7 @@ class ClientesDelMayoristaTest {
     @BeforeEach
     void sembrar() {
         dueno = new JdbcTemplate(new DriverManagerDataSource(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword()));
-        dueno.update("DELETE FROM clientes_eventos WHERE tenant_id = ?", T);
+        dueno.update("DELETE FROM clientes_eventos WHERE tenant_id IN (?, 'qa-clientes-may-otro')", T);
         dueno.update("DELETE FROM clientes WHERE tenant_id = ?", T);
         dueno.update("DELETE FROM users WHERE tenant_id = ?", T);
         dueno.update("INSERT INTO tenants (id, name, plan) VALUES (?, ?, 'pro') ON CONFLICT (id) DO NOTHING", T, T);
@@ -384,5 +384,72 @@ class ClientesDelMayoristaTest {
         assertThat(dueno.queryForObject("SELECT nombre FROM clientes WHERE tenant_id = ? AND documento = '100'", String.class, T))
                 .isEqualTo("Tienda de Ana");
         assertThat(dueno.queryForObject("SELECT count(*) FROM clientes_eventos WHERE tenant_id = ?", Integer.class, T)).isZero();
+    }
+
+    private String lista(String negocio, String codigo) {
+        dueno.update("INSERT INTO tenants (id, name, plan) VALUES (?, ?, 'pro') ON CONFLICT (id) DO NOTHING", negocio, negocio);
+        dueno.update("UPDATE clientes SET lista_precio_id = NULL WHERE lista_precio_id IN (SELECT id FROM listas_precio WHERE tenant_id = ? AND codigo = ?)", negocio, codigo);
+        dueno.update("DELETE FROM listas_precio WHERE tenant_id = ? AND codigo = ?", negocio, codigo);
+        return dueno.queryForObject("INSERT INTO listas_precio (tenant_id, codigo, nombre, creado_por) VALUES (?, ?, ?, 's') RETURNING id::text",
+                String.class, negocio, codigo, codigo);
+    }
+
+    private org.springframework.test.web.servlet.ResultActions asignar(String quien, String rol, String documento, String listaId) throws Exception {
+        return mockMvc.perform(put("/api/mayorista/clientes/" + documento + "/lista").header("Authorization", bearer(quien, rol))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"listaPrecioId\":" + (listaId == null ? "null" : "\"" + listaId + "\"") + "}"));
+    }
+
+    @Test
+    @DisplayName("🔴 asignar lista: toca solo esa columna (lo editado entre medias no se pierde), deja evento con autor, la misma → 200 sin evento")
+    void asignarLista() throws Exception {
+        String mayoreo = lista(T, "mayoreo");
+        // Alguien edita el teléfono DESPUÉS de que la pantalla de la lista leyera la ficha.
+        dueno.update("UPDATE clientes SET telefono = '3009990000' WHERE tenant_id = ? AND documento = '100'", T);
+        asignar(ADMIN, "admin", "100", mayoreo)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.lista_precio_id").value(mayoreo))
+                .andExpect(jsonPath("$.lista").value("mayoreo"))
+                .andExpect(jsonPath("$.telefono").value("3009990000"));
+        assertThat(dueno.queryForMap("SELECT valor_nuevo, usuario_id FROM clientes_eventos WHERE tenant_id = ? AND campo = 'lista_precio_id'", T))
+                .containsEntry("valor_nuevo", mayoreo).containsEntry("usuario_id", admin);
+        asignar(ADMIN, "admin", "100", mayoreo).andExpect(status().isOk());
+        asignar(ADMIN, "admin", "100", null).andExpect(status().isOk()).andExpect(jsonPath("$.lista_precio_id").isEmpty());
+        assertThat(dueno.queryForList("SELECT valor_nuevo FROM clientes_eventos WHERE tenant_id = ? AND campo = 'lista_precio_id' ORDER BY ocurrido_en",
+                String.class, T)).containsExactly(mayoreo, null);
+    }
+
+    @Test
+    @DisplayName("🔴 asignar lista: de otro negocio → 400, cliente inactivo → 409 CLIENTE_INACTIVO, no admin → 403; nada escrito")
+    void asignarListaRestrictiva() throws Exception {
+        String ajena = lista("qa-clientes-may-otro", "ajena-lista");
+        String mia = lista(T, "mia");
+        asignar(ADMIN, "admin", "100", ajena).andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("listaPrecioId"));
+        asignar(CAJA, "cajero", "100", mia).andExpect(status().isForbidden());
+        asignar(ANA, "vendedor", "100", mia).andExpect(status().isForbidden());
+        dueno.update("UPDATE clientes SET activo = false WHERE tenant_id = ? AND documento = '200'", T);
+        asignar(ADMIN, "admin", "200", mia).andExpect(status().isConflict()).andExpect(jsonPath("$.codigo").value("CLIENTE_INACTIVO"));
+        asignar(ADMIN, "admin", "999", mia).andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("documento"));
+        assertThat(dueno.queryForObject("SELECT count(*) FROM clientes WHERE tenant_id = ? AND lista_precio_id IS NOT NULL", Integer.class, T)).isZero();
+        assertThat(dueno.queryForObject("SELECT count(*) FROM clientes_eventos WHERE tenant_id = ? AND campo = 'lista_precio_id'", Integer.class, T)).isZero();
+    }
+
+    @Test
+    @DisplayName("🔴 sin RLS (el dueño la salta): el filtro de negocio ESCRITO impide tocar al cliente de otro negocio con el mismo documento")
+    void asignarListaSinRls() {
+        String otro = "qa-clientes-may-otro";
+        dueno.update("INSERT INTO tenants (id, name, plan) VALUES (?, ?, 'pro') ON CONFLICT (id) DO NOTHING", otro, otro);
+        dueno.update("DELETE FROM clientes WHERE tenant_id = ? AND documento = '100'", otro);
+        dueno.update("INSERT INTO clientes (tenant_id, documento, nombre, creado_por) VALUES (?, '100', 'La del otro', 's')", otro);
+        String mia = lista(T, "mia-sin-rls");
+        String ajena = lista(otro, "ajena-sin-rls");
+        ListasDePrecio sinRls = new ListasDePrecio(dueno);
+        sinRls.asignarLista(T, "100", java.util.UUID.fromString(mia), new ListasDePrecio.Autor(ADMIN, admin));
+        assertThat(dueno.queryForObject("SELECT lista_precio_id::text FROM clientes WHERE tenant_id = ? AND documento = '100'", String.class, otro))
+                .as("el cliente del otro negocio con el mismo documento no cambia").isNull();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> sinRls.asignarLista(T, "100", java.util.UUID.fromString(ajena), new ListasDePrecio.Autor(ADMIN, admin)))
+                .isInstanceOf(com.suresell.orders.shared.exception.DatoInvalidoException.class);
+        assertThat(dueno.queryForObject("SELECT lista_precio_id::text FROM clientes WHERE tenant_id = ? AND documento = '100'", String.class, T))
+                .isEqualTo(mia);
     }
 }

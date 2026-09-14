@@ -168,6 +168,15 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(m);
     }
 
+    /** 409: asignar una lista a un cliente desactivado. */
+    @ExceptionHandler(ClienteInactivoException.class)
+    public ResponseEntity<Map<String, String>> handleClienteInactivo(ClienteInactivoException ex) {
+        logger.info("409 {}: {}", ClienteInactivoException.CODIGO, ex.getMessage());
+        Map<String, String> m = cuerpo(ClienteInactivoException.CODIGO, ex.getMessage());
+        m.put("codigo", ClienteInactivoException.CODIGO);
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(m);
+    }
+
     /** 409: venta a crédito a un cliente en insolvencia. El POS la aparta con su motivo. */
     @ExceptionHandler(ClienteEnInsolvenciaException.class)
     public ResponseEntity<Map<String, String>> handleClienteEnInsolvencia(ClienteEnInsolvenciaException ex) {

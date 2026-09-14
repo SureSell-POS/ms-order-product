@@ -285,6 +285,41 @@ public class ListasDePrecio {
         return fijarActivo(negocio, documento, false, autor);
     }
 
+    /**
+     * Asigna (o quita, con null) la lista de precios de UN cliente, y nada más: una
+     * sola columna, para que asignar desde la pantalla de la lista no pise lo que otra
+     * persona esté editando en la ficha. La lista tiene que ser de este negocio; el
+     * cliente, activo. El evento `lista_precio_id` lo escribe el disparador (V62) con
+     * el autor de la sesión; asignar la que ya tiene no escribe nada.
+     *
+     * @return false si el cliente no existe en el negocio
+     */
+    @Transactional
+    public boolean asignarLista(String negocio, String documento, UUID listaId, Autor autor) {
+        exigirNegocio(negocio);
+        exigirAutor(autor);
+        String doc = documento == null ? null : documento.trim();
+        List<Boolean> activo = jdbc.queryForList("SELECT activo FROM clientes WHERE tenant_id = ? AND documento = ?",
+                Boolean.class, negocio, doc);
+        if (activo.isEmpty()) {
+            return false;
+        }
+        if (!Boolean.TRUE.equals(activo.get(0))) {
+            throw new com.suresell.orders.shared.exception.ClienteInactivoException(doc);
+        }
+        if (listaId != null && jdbc.queryForList("SELECT 1 FROM listas_precio WHERE tenant_id = ? AND id = ?",
+                Integer.class, negocio, listaId).isEmpty()) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("listaPrecioId",
+                    "La lista de precios no es de este negocio.");
+        }
+        fijarAutor(autor);
+        jdbc.update("""
+                UPDATE clientes SET lista_precio_id = ?, actualizado_en = now()
+                 WHERE tenant_id = ? AND documento = ? AND lista_precio_id IS DISTINCT FROM ?""",
+                listaId, negocio, doc, listaId);
+        return true;
+    }
+
     /** F1.11: simétrico a desactivar. Reactivar uno activo no escribe evento (el disparador solo anota cambios). */
     @Transactional
     public boolean reactivarCliente(String negocio, String documento, Autor autor) {
