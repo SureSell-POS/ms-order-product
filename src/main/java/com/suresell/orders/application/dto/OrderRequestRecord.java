@@ -27,7 +27,10 @@ import java.util.List;
  *   <li>{@code status}, {@code synced}, {@code idOrder} — estado del servidor. El
  *       consecutivo lo asigna un trigger de la base (V28:226).</li>
  *   <li>{@code tenantId} — sale del JWT, nunca del cuerpo. Aceptarlo del cliente
- *       sería dejar que una petición eligiera en qué negocio escribe.</li>
+ *       sería dejar que una petición eligiera en qué negocio escribe. Sí se
+ *       COMPARA antes de llegar aquí: {@code OrderController.createOrder}
+ *       rechaza con 409 {@code NEGOCIO_DE_OTRA_SESION} la venta cuyo
+ *       {@code tenantId} no es el del token.</li>
  * </ul>
  *
  * <p>Dos de los ocho <b>sí se aprovechan</b>, y ninguno de los dos manda:

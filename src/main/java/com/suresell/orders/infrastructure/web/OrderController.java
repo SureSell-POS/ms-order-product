@@ -9,6 +9,7 @@ import com.suresell.orders.domain.model.OrderEditHistory;
 import com.suresell.orders.domain.port.in.OrderPort;
 import com.suresell.orders.infrastructure.web.adapter.OrderRequestWebAdapter;
 import com.suresell.orders.multitenant.JwtTenantResolver;
+import com.suresell.orders.shared.exception.NegocioDeOtraSesionException;
 import com.suresell.orders.shared.exception.SoloAdministradorException;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -59,6 +60,34 @@ public class OrderController {
             throw new SoloAdministradorException(queCosa);
         }
     }
+    /**
+     * Bloqueo #4 de la fase 0, del lado del servidor: la venta que el POS guardó
+     * trae su {@code tenantId}; si no es el del token, se rechaza antes de
+     * escribir nada. Integridad de datos, no control de acceso: el negocio lo
+     * decide el token de todas formas (ver {@link NegocioDeOtraSesionException}).
+     *
+     * <p>No se rechaza cuando el campo no viene (app de meseros, POS antiguo) ni
+     * cuando es {@code "demo"}: es lo que el POS escribe sin sesión
+     * ({@code order.service.ts:272}) y ningún negocio se llama así. Rechazarlo
+     * dejaría en bucle ventas de un comercio legítimo. Queda en el log.
+     */
+    private static void exigirQueLaVentaSeaDeEsteNegocio(Map<String, Object> payload) {
+        String delToken = com.suresell.orders.multitenant.TenantContext.get();
+        Object declarado = payload == null ? null : payload.get("tenantId");
+        if (delToken == null || !(declarado instanceof String deLaVenta) || deLaVenta.isBlank()) {
+            return;
+        }
+        if ("demo".equals(deLaVenta)) {
+            log.warn("Venta con tenantId 'demo' en el negocio {}: se acepta (POS sin sesion al guardarla)", delToken);
+            return;
+        }
+        if (!deLaVenta.equals(delToken)) {
+            log.warn("409 {}: venta de '{}' enviada con la sesion de '{}'. No se escribe nada.",
+                    NegocioDeOtraSesionException.CODIGO, deLaVenta, delToken);
+            throw new NegocioDeOtraSesionException(deLaVenta);
+        }
+    }
+
     @GetMapping("/pager-availability")
     @Operation(summary = "Obtener disponibilidad de pagers", description = "Lista los pagers disponibles y ocupados (Amarillo y Azul del 1 al 16).")
     public ResponseEntity<PagerAvailabilityResponse> getPagerAvailability() {
@@ -67,6 +96,7 @@ public class OrderController {
     @PostMapping("/create")
     @Operation(summary = "Crear orden")
     public ResponseEntity<Map<String, Object>> createOrder(@RequestBody Map<String, Object> payload) {
+        exigirQueLaVentaSeaDeEsteNegocio(payload);
         OrderRequestRecord dto = orderRequestWebAdapter.normalize(payload);
         Order created = orderPort.createOrUpdateOrder(dto);
         // Devuelve el idOrder (número por-tenant) para que el cliente offline lo guarde

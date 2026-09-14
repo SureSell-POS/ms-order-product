@@ -156,6 +156,15 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(m);
     }
 
+    /** 409: la venta es de otro negocio que el del token. Integridad, no acceso (ver la excepción). */
+    @ExceptionHandler(NegocioDeOtraSesionException.class)
+    public ResponseEntity<Map<String, String>> handleNegocioDeOtraSesion(NegocioDeOtraSesionException ex) {
+        Map<String, String> m = cuerpo(NegocioDeOtraSesionException.CODIGO, ex.getMessage());
+        m.put("codigo", NegocioDeOtraSesionException.CODIGO);
+        m.put("negocioDeLaVenta", ex.negocioDeLaVenta());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(m);
+    }
+
     @ExceptionHandler(SoloAdministradorException.class)
     public ResponseEntity<Map<String, String>> handleSoloAdministrador(SoloAdministradorException ex) {
         logger.info("Rechazo por rol: {}", ex.getMessage());
