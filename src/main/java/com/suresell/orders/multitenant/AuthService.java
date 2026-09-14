@@ -74,10 +74,22 @@ public class AuthService {
         this.businessEditKey = businessEditKey;
     }
 
+    /**
+     * {@code userId} (plan de mayoristas, F1.10): el {@code users.id} de quien
+     * entra, para que el POS atribuya la venta a un vendedor aunque la sincronice
+     * otra sesión (F2.3). Aditivo: null si no se pudo resolver.
+     */
     public record AuthResponse(String token, String tenantId, String tenantName,
                                String plan, String userName, String role,
                                String nit, String address, String phone, String ticketFooter,
-                               List<String> modules) {}
+                               List<String> modules, Long userId) {
+        public AuthResponse(String token, String tenantId, String tenantName,
+                            String plan, String userName, String role,
+                            String nit, String address, String phone, String ticketFooter,
+                            List<String> modules) {
+            this(token, tenantId, tenantName, plan, userName, role, nit, address, phone, ticketFooter, modules, null);
+        }
+    }
 
     /** Perfil del negocio (datos que se imprimen en el ticket). */
     public record BusinessProfile(String tenantId, String name, String nit,
@@ -132,9 +144,11 @@ public class AuthService {
         repo.fijarNegocioEnLaTransaccion(tenant.id());
         List<String> modules = effectiveModulesFor(tenant.id(), tenant.plan());
         String token = issueToken(tenant.id(), user.email(), user.rol(), modules);
+        // F1.10: con el negocio ya fijado, `users` se lee por RLS normal.
+        Long userId = repo.findUserByEmail(user.email()).map(AuthRepository.UserRow::id).orElse(null);
         return new AuthResponse(token, tenant.id(), tenant.name(), tenant.plan(),
                 user.email(), user.rol(),
-                tenant.nit(), tenant.address(), tenant.phone(), tenant.ticketFooter(), modules);
+                tenant.nit(), tenant.address(), tenant.phone(), tenant.ticketFooter(), modules, userId);
     }
 
     /**
@@ -187,7 +201,7 @@ public class AuthService {
         String token = issueToken(tenantId, cleanEmail, ADMIN_ROLE, modules);
         return new AuthResponse(token, tenantId, businessName.trim(), DEFAULT_PLAN,
                 cleanEmail, ADMIN_ROLE,
-                trimOrNull(nit), trimOrNull(address), trimOrNull(phone), null, modules);
+                trimOrNull(nit), trimOrNull(address), trimOrNull(phone), null, modules, repo.findUserByEmail(cleanEmail).map(AuthRepository.UserRow::id).orElse(null));
     }
 
     /** Perfil del negocio del tenant autenticado (para mostrar/editar sus datos). */

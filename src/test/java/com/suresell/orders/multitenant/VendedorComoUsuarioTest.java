@@ -109,6 +109,9 @@ class VendedorComoUsuarioTest {
         Claims claims = Jwts.parser().verifyWith(KEY).build().parseSignedClaims(token).getPayload();
         assertThat(claims.get("role", String.class)).isEqualTo("vendedor");
         assertThat(claims.get("tenant_id", String.class)).isEqualTo(T);
+        // F1.10: el login devuelve su users.id, para que el POS atribuya la venta aunque sincronice otra sesión.
+        long id = dueno.queryForObject("SELECT id FROM users WHERE email = ?", Long.class, "ana@negocio-vendedores.invalid");
+        assertThat(cuerpo).contains("\"userId\":" + id);
     }
 
     @Test

@@ -22,6 +22,8 @@ public interface OrderRepositoryPort {
     /** N3 — Órdenes de una cuenta de mesa (para acumular las rondas). */
     List<Order> findByTableSessionId(java.util.UUID tableSessionId);
     Optional<Long> findNumericIdByUuid(java.util.UUID uuidId);
+    /** F1.3: si la venta a crédito superó el cupo (lo escribe la base). Vacío si no es a crédito. */
+    Optional<Boolean> findExcedeCupoByUuid(java.util.UUID uuidId);
     List<Order> findAll();
     Page<Order> findAll(Pageable pageable);
     Optional<Order> findOccupiedPagerOrder(

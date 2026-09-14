@@ -33,8 +33,9 @@ public class AtribucionDeLaVenta {
      *
      * <ul>
      *   <li>Si quien la registra es un {@code vendedor}, vende a su nombre: sin
-     *       {@code vendedorId} se toma el suyo, y con otro distinto se rechaza (un
-     *       vendedor no atribuye ventas a otro; plan F2.3).</li>
+     *       {@code vendedorId} se toma el suyo, y con el de otro se rechaza con 409
+     *       {@code USUARIO_DE_OTRA_SESION}: es la venta de otro vendedor que llega
+     *       por su sesión, y el POS la aparta hasta que entre su dueño (plan F2.3).</li>
      *   <li>Si es cajero o admin, elige: sin {@code vendedorId} queda «sin asignar».</li>
      *   <li>El vendedor tiene que ser de este negocio y de un rol que venda. No se
      *       exige que siga activo: una venta tomada sin conexión antes de
@@ -48,7 +49,7 @@ public class AtribucionDeLaVenta {
                 return propio;
             }
             if (!vendedorId.equals(propio)) {
-                throw new DatoInvalidoException("vendedorId", "Un vendedor solo registra ventas a su nombre.");
+                throw new com.suresell.orders.shared.exception.UsuarioDeOtraSesionException(vendedorId);
             }
         }
         if (vendedorId == null || negocio == null) {
@@ -71,6 +72,12 @@ public class AtribucionDeLaVenta {
      * coherente con el medio: el débito en cuentas por cobrar lo escribe el
      * disparador de V45 solo cuando el medio es {@code CREDITO}, así que un
      * «crédito pagado en efectivo» sería una venta a crédito sin deuda.
+     *
+     * <p><b>Excepción prevista para F5, sin construir:</b> la venta nacida de un
+     * pedido contraentrega va con medio {@code CREDITO} y plazo 0 (el cobro en
+     * la entrega es un abono), y ante la DIAN es de {@code CONTADO}. Cuando
+     * exista, entra aquí como una rama más, para {@code origen = pedido} con
+     * plazo 0, y la regla de la caja no cambia (acordado con ECM, 2026-09-13).
      */
     public String condicionPago(String declarada, String medioNormalizado) {
         boolean medioCredito = CREDITO.equals(medioNormalizado);

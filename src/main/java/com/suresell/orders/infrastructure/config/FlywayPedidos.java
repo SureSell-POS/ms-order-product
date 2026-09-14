@@ -91,7 +91,11 @@ public class FlywayPedidos implements InitializingBean {
         }
         MigrateResult r = configuracion(principal.getUrl(), principal.getUser(), principal.getPassword())
                 .load().migrate();
+        // `targetSchemaVersion` viene vacío cuando no hubo nada que aplicar; la
+        // versión que cuenta es la del historial (medido en staging: «version null»).
+        String version = r.targetSchemaVersion != null ? r.targetSchemaVersion
+                : r.initialSchemaVersion != null ? r.initialSchemaVersion : "sin migraciones";
         log.info("Cadena pedidos: {} migraciones aplicadas; version {} (historial pedidos.{})",
-                r.migrationsExecuted, r.targetSchemaVersion, TABLA_DE_HISTORIAL);
+                r.migrationsExecuted, version, TABLA_DE_HISTORIAL);
     }
 }

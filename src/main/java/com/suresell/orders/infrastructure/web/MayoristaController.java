@@ -37,11 +37,84 @@ public class MayoristaController {
     private final ListasDePrecio listas;
     private final JwtTenantResolver tokens;
     private final UsuarioDeLaPeticion usuarios;
+    private final com.suresell.orders.mayorista.ResolucionDePrecios resolucion;
 
-    public MayoristaController(ListasDePrecio listas, JwtTenantResolver tokens, UsuarioDeLaPeticion usuarios) {
+    public MayoristaController(ListasDePrecio listas, JwtTenantResolver tokens, UsuarioDeLaPeticion usuarios,
+                               com.suresell.orders.mayorista.ResolucionDePrecios resolucion) {
         this.listas = listas;
         this.tokens = tokens;
         this.usuarios = usuarios;
+        this.resolucion = resolucion;
+    }
+
+    /** Máximo de líneas por consulta de precios: un pedido grande cabe, un volcado del catálogo no. */
+    static final int MAX_LINEAS_DE_PRECIO = 500;
+
+    public record LineaAPreciar(String productoId, Integer cantidad) {}
+
+    public record PedidoDePrecios(String clienteDocumento, List<LineaAPreciar> lineas,
+                                  java.time.OffsetDateTime momento) {}
+
+    @PostMapping("/precios")
+    @Operation(summary = "F1.5 — Precio, origen y línea de lista de varias líneas para un cliente, en una consulta")
+    public Map<String, Object> precios(@RequestBody PedidoDePrecios cuerpo) {
+        if (cuerpo == null || cuerpo.lineas() == null || cuerpo.lineas().isEmpty()) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("lineas", "Faltan las líneas.");
+        }
+        if (cuerpo.lineas().size() > MAX_LINEAS_DE_PRECIO) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("lineas",
+                    "Máximo " + MAX_LINEAS_DE_PRECIO + " líneas por consulta.");
+        }
+        List<String> productos = new java.util.ArrayList<>();
+        List<Integer> cantidades = new java.util.ArrayList<>();
+        for (LineaAPreciar l : cuerpo.lineas()) {
+            if (l == null || l.productoId() == null || l.productoId().isBlank()) {
+                throw new com.suresell.orders.shared.exception.DatoInvalidoException("lineas", "Cada línea necesita productoId.");
+            }
+            int cantidad = l.cantidad() == null ? 1 : l.cantidad();
+            if (cantidad < 1) {
+                throw new com.suresell.orders.shared.exception.DatoInvalidoException("lineas", "La cantidad empieza en 1.");
+            }
+            productos.add(l.productoId().trim());
+            cantidades.add(cantidad);
+        }
+        String documento = cuerpo.clienteDocumento() == null || cuerpo.clienteDocumento().isBlank()
+                ? null : cuerpo.clienteDocumento().trim();
+        List<com.suresell.orders.mayorista.ResolucionDePrecios.PrecioDeLinea> resueltas =
+                resolucion.preciosDeLineas(documento, productos, cantidades, cuerpo.momento());
+        // Un producto que no existe no viene de la base: se devuelve como no encontrado,
+        // en su posición, para que el POS no tenga que adivinar cuál faltó.
+        Map<String, com.suresell.orders.mayorista.ResolucionDePrecios.PrecioDeLinea> porClave = new java.util.HashMap<>();
+        for (var r : resueltas) {
+            porClave.putIfAbsent(r.productoId() + "|" + r.cantidad(), r);
+        }
+        List<Map<String, Object>> salida = new java.util.ArrayList<>();
+        for (int i = 0; i < productos.size(); i++) {
+            var r = porClave.get(productos.get(i) + "|" + cantidades.get(i));
+            Map<String, Object> linea = new java.util.LinkedHashMap<>();
+            linea.put("productoId", productos.get(i));
+            linea.put("cantidad", cantidades.get(i));
+            linea.put("encontrado", r != null);
+            linea.put("precio", r == null ? null : r.precio());
+            linea.put("origen", r == null ? null : r.origen());
+            linea.put("listaPrecioItemId", r == null ? null : r.listaPrecioItemId());
+            linea.put("listaPrecioId", r == null ? null : r.listaPrecioId());
+            salida.add(linea);
+        }
+        Map<String, Object> respuesta = new java.util.LinkedHashMap<>();
+        respuesta.put("clienteDocumento", documento);
+        respuesta.put("lineas", salida);
+        return respuesta;
+    }
+
+    @GetMapping("/catalogo-de-lista/{listaId}")
+    @Operation(summary = "F1.5 — Líneas de una lista para la caché del POS; con desde, solo lo que cambió")
+    public Map<String, Object> catalogoDeLista(@PathVariable UUID listaId,
+                                               @RequestParam(required = false)
+                                               @org.springframework.format.annotation.DateTimeFormat(
+                                                       iso = org.springframework.format.annotation.DateTimeFormat.ISO.DATE_TIME)
+                                               java.time.OffsetDateTime desde) {
+        return listas.catalogoDeLista(TenantContext.get(), listaId, desde);
     }
 
     private Autor autor(HttpServletRequest http) {

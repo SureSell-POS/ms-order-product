@@ -99,6 +99,10 @@ public interface OrderRepository extends JpaRepository<Order, java.util.UUID> {
     @Query("SELECT o.idOrder FROM Order o WHERE o.uuidId = :uuidId")
     Optional<Long> findNumericIdByUuid(@Param("uuidId") java.util.UUID uuidId);
 
+    /** F1.3: `excede_cupo` lo escribe el disparador de V45 al insertar; la entidad no lo trae. */
+    @Query("SELECT o.excedeCupo FROM Order o WHERE o.uuidId = :uuidId")
+    Optional<Boolean> findExcedeCupoByUuid(@Param("uuidId") java.util.UUID uuidId);
+
     @Query("""
             SELECT o
             FROM Order o

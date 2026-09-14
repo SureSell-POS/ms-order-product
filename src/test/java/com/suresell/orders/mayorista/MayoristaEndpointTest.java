@@ -174,6 +174,79 @@ class MayoristaEndpointTest {
         assertThat(((Number) cliente.get("autor_id")).longValue()).isEqualTo(idDe(ADMIN_A));
     }
 
+    // ── F1.5 ────────────────────────────────────────────────────────────
+
+    private UUID listaConArroz(String cliente) {
+        UUID lista = dueno.queryForObject("INSERT INTO listas_precio (tenant_id, codigo, nombre, creado_por) "
+                + "VALUES (?, 'dist', 'Distribuidor', 'semilla') RETURNING id", UUID.class, A);
+        dueno.update("INSERT INTO listas_precio_items (tenant_id, lista_id, producto_id, cantidad_minima, precio, "
+                + "usuario_id, fuente, confianza) VALUES (?, ?, 'arroz-qa-a', 1, 100000, 's', 'declarado_comerciante', 1), "
+                + "(?, ?, 'arroz-qa-a', 10, 95000, 's', 'declarado_comerciante', 1)", A, lista, A, lista);
+        dueno.update("INSERT INTO clientes (tenant_id, documento, nombre, lista_precio_id, creado_por) "
+                + "VALUES (?, ?, 'Tienda', ?, 'semilla')", A, cliente, lista);
+        return lista;
+    }
+
+    @Test
+    @DisplayName("🔴 F1.5: POST /precios resuelve varias líneas a la vez, con escala, en su orden, y marca la que no existe")
+    void preciosEnLote() throws Exception {
+        listaConArroz("900123456");
+        mockMvc.perform(post("/api/mayorista/precios").header("Authorization", conModulo(A, ADMIN_A))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"clienteDocumento\":\"900123456\",\"lineas\":["
+                                + "{\"productoId\":\"arroz-qa-a\",\"cantidad\":5},"
+                                + "{\"productoId\":\"no-existe\",\"cantidad\":1},"
+                                + "{\"productoId\":\"arroz-qa-a\",\"cantidad\":12}]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.lineas.length()").value(3))
+                .andExpect(jsonPath("$.lineas[0].precio").value(100000))
+                .andExpect(jsonPath("$.lineas[0].origen").value("LISTA"))
+                .andExpect(jsonPath("$.lineas[1].encontrado").value(false))
+                .andExpect(jsonPath("$.lineas[2].precio").value(95000));
+        // Sin cliente, el precio base del catálogo.
+        mockMvc.perform(post("/api/mayorista/precios").header("Authorization", conModulo(A, ADMIN_A))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"lineas\":[{\"productoId\":\"arroz-qa-a\",\"cantidad\":5}]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.lineas[0].precio").value(120000))
+                .andExpect(jsonPath("$.lineas[0].origen").value("BASE"));
+        mockMvc.perform(post("/api/mayorista/precios").header("Authorization", conModulo(A, ADMIN_A))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"lineas\":[]}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.campo").value("lineas"));
+    }
+
+    @Test
+    @DisplayName("🔴 F1.5: catálogo de lista para la caché: las vigentes, y con desde solo lo que cambió (incluidas las cerradas)")
+    void catalogoDeListaIncremental() throws Exception {
+        UUID lista = listaConArroz("900123456");
+        String primera = mockMvc.perform(get("/api/mayorista/catalogo-de-lista/" + lista)
+                        .header("Authorization", conModulo(A, ADMIN_A)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.lineas.length()").value(2))
+                .andReturn().getResponse().getContentAsString();
+        String servidoEn = primera.replaceAll(".*\"servidoEn\":\"([^\"]+)\".*", "$1");
+
+        // Se cambia el precio de la escala 1: se cierra la vieja y se abre otra.
+        mockMvc.perform(post("/api/mayorista/listas/" + lista + "/lineas").header("Authorization", conModulo(A, ADMIN_A))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"productoId\":\"arroz-qa-a\",\"precio\":101000}"))
+                .andExpect(status().isCreated());
+
+        mockMvc.perform(get("/api/mayorista/catalogo-de-lista/" + lista).param("desde", servidoEn)
+                        .header("Authorization", conModulo(A, ADMIN_A)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.lineas.length()").value(2))
+                .andExpect(jsonPath("$.lineas[?(@.vigenteHasta != null)].precio").value(org.hamcrest.Matchers.contains(100000.0)))
+                .andExpect(jsonPath("$.lineas[?(@.vigenteHasta == null)].precio").value(org.hamcrest.Matchers.contains(101000.0)));
+
+        // Una lista de otro negocio no existe para este.
+        UUID ajena = dueno.queryForObject("INSERT INTO listas_precio (tenant_id, codigo, nombre, creado_por) "
+                + "VALUES (?, 'dist', 'Ajena', 'semilla') RETURNING id", UUID.class, B);
+        mockMvc.perform(get("/api/mayorista/catalogo-de-lista/" + ajena).header("Authorization", conModulo(A, ADMIN_A)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.campo").value("listaId"));
+    }
+
     // ── F0.6 ────────────────────────────────────────────────────────────
 
     @Test

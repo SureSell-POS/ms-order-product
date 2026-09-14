@@ -120,7 +120,9 @@ class VentaConVendedorYCreditoTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(venta("\"paymentMethod\":\"CREDITO\",\"clienteDocumento\":\"" + DOC + "\","
                                 + "\"vendedorId\":" + ana + ",\"condicionPago\":\"CREDITO\",", "credito-1")))
-                .andExpect(status().isCreated());
+                .andExpect(status().isCreated())
+                // Plan §7.1: el aviso de cupo viaja con la respuesta (cupo 0 → true).
+                .andExpect(jsonPath("$.excedeCupo").value(true));
 
         Map<String, Object> v = laVenta("credito-1");
         assertThat(((Number) v.get("vendedor_id")).longValue()).isEqualTo(ana);
@@ -146,14 +148,15 @@ class VentaConVendedorYCreditoTest {
         mockMvc.perform(post("/orders/create").header("Authorization", bearer(LUIS, "cajero"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(venta("\"paymentMethod\":\"CASH\",", "contado-1")))
-                .andExpect(status().isCreated());
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.excedeCupo").doesNotExist());
         Map<String, Object> v = laVenta("contado-1");
         assertThat(v.get("vendedor_id")).isNull();
         assertThat(v).containsEntry("condicion_pago", "CONTADO").containsEntry("origen", "caja");
     }
 
     @Test
-    @DisplayName("🔴 un vendedor vende a su nombre: sin vendedorId es él; con el de otro, 400 y nada escrito")
+    @DisplayName("🔴 un vendedor vende a su nombre: sin vendedorId es él; con el de otro, 409 USUARIO_DE_OTRA_SESION y nada escrito")
     void elVendedorVendeASuNombre() throws Exception {
         mockMvc.perform(post("/orders/create").header("Authorization", bearer(ANA, "vendedor"))
                         .contentType(MediaType.APPLICATION_JSON)
@@ -164,9 +167,11 @@ class VentaConVendedorYCreditoTest {
         mockMvc.perform(post("/orders/create").header("Authorization", bearer(ANA, "vendedor"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(venta("\"paymentMethod\":\"CASH\",\"vendedorId\":" + luis + ",", "ana-como-luis")))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.codigo").value("DATOS_INVALIDOS"))
-                .andExpect(jsonPath("$.campo").value("vendedorId"));
+                // 409 y no 400: es la venta de otro que llega por esta sesión; el POS la aparta sin gastar intento.
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.codigo").value("USUARIO_DE_OTRA_SESION"))
+                .andExpect(jsonPath("$.error").value("USUARIO_DE_OTRA_SESION"))
+                .andExpect(jsonPath("$.message").isNotEmpty());
         assertThat(dueno.queryForObject("SELECT count(*) FROM orders WHERE idempotency_key = 'ana-como-luis'",
                 Integer.class)).isZero();
     }

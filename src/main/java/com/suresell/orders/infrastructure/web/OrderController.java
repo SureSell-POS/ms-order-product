@@ -104,6 +104,9 @@ public class OrderController {
         Map<String, Object> body = new java.util.HashMap<>();
         body.put("message", "Orden creada con éxito");
         body.put("idOrder", created != null ? created.getIdOrder() : null);
+        // F1.3 (plan §7.1): aditivo. null = la venta no es a crédito; true = superó
+        // el cupo y entró con aviso (D9).
+        body.put("excedeCupo", created != null ? created.getExcedeCupo() : null);
         return ResponseEntity.status(HttpStatus.CREATED).body(body);
     }
     @PutMapping("/{orderId}")

@@ -34,6 +34,11 @@ public class OrderRepositoryAdapter implements OrderRepositoryPort {
         return orderRepository.findByTableSessionId(tableSessionId);
     }
     @Override
+    public Optional<Boolean> findExcedeCupoByUuid(java.util.UUID uuidId) {
+        return orderRepository.findExcedeCupoByUuid(uuidId);
+    }
+
+    @Override
     public Optional<Long> findNumericIdByUuid(java.util.UUID uuidId) {
         return orderRepository.findNumericIdByUuid(uuidId);
     }

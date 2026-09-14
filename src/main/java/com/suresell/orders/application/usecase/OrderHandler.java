@@ -324,6 +324,11 @@ public class OrderHandler implements OrderPort {
                 .orElseThrow(() -> new RuntimeException("Error al recuperar ID numérico de la orden recién creada"));
         
         savedOrder.setIdOrder(numericId);
+        // F1.3: el aviso de cupo lo decide el disparador de V45 al insertar; se lee
+        // para devolverlo al POS con la respuesta. Solo en crédito, que es cuando existe.
+        if ("CREDITO".equals(savedOrder.getPaymentMethod())) {
+            savedOrder.setExcedeCupo(orderRepositoryPort.findExcedeCupoByUuid(savedOrder.getUuidId()).orElse(null));
+        }
 
         // 3. Crear y Guardar Items individualmente con el ID numérico poblado
         List<OrderItem> items = createOrderItems(savedOrder, lineas, preciosResueltos, dto.items());

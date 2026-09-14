@@ -64,16 +64,13 @@ public class ResolucionDePrecios {
         for (OrderItemRequestRecord l : lineas) {
             cantidadPorProducto.merge(l.productId(), l.quantity(), Integer::sum);
         }
+        // F1.5 (V61): todas las líneas en UNA consulta. Antes, una por producto
+        // (anexo A-4): 50 viajes a la base para un pedido de 50 líneas.
+        Map<String, Precio> resueltos = enLote(clienteDocumento, cantidadPorProducto, null);
         Map<String, Precio> resultado = new LinkedHashMap<>();
         for (Map.Entry<String, Integer> e : cantidadPorProducto.entrySet()) {
-            List<Precio> filas = jdbc.query("""
-                    SELECT precio, origen, lista_precio_item_id, lista_precio_id
-                      FROM fn_precio_para(?, ?, ?, now())""",
-                    (rs, i) -> new Precio(rs.getBigDecimal("precio"), rs.getString("origen"),
-                            rs.getObject("lista_precio_item_id", UUID.class),
-                            rs.getObject("lista_precio_id", UUID.class)),
-                    clienteDocumento, e.getKey(), e.getValue());
-            if (filas.isEmpty()) {
+            Precio encontrado = resueltos.get(e.getKey());
+            if (encontrado == null) {
                 // Sin fila no hay producto: ni en la lista ni en el catálogo.
                 if (exigirCatalogo) {
                     // Con cliente: no se vende algo que no existe a un precio
@@ -87,9 +84,44 @@ public class ResolucionDePrecios {
                 // retirados del menú). Una venta no se pierde por eso.
                 continue;
             }
-            resultado.put(e.getKey(), filas.get(0));
+            resultado.put(e.getKey(), encontrado);
         }
         return resultado;
+    }
+
+    /** Una línea resuelta por el lote, con la cantidad con la que se evaluó la escala. */
+    public record PrecioDeLinea(String productoId, int cantidad, BigDecimal precio, String origen,
+                                UUID listaPrecioItemId, UUID listaPrecioId) {}
+
+    /**
+     * F1.5: los precios de varias líneas para un cliente en un momento, en una
+     * sola consulta ({@code fn_precios_para}, V61). Sirve a la venta y a
+     * {@code POST /api/mayorista/precios}. Un producto que no existe no aparece.
+     *
+     * @param momento null = ahora
+     */
+    public List<PrecioDeLinea> preciosDeLineas(String clienteDocumento, List<String> productos, List<Integer> cantidades,
+                                               java.time.OffsetDateTime momento) {
+        if (productos.isEmpty()) {
+            return List.of();
+        }
+        return jdbc.query("""
+                SELECT producto_id, cantidad, precio, origen, lista_precio_item_id, lista_precio_id
+                  FROM fn_precios_para(?, ?::text[], ?::integer[], COALESCE(?::timestamptz, now()))""",
+                (rs, i) -> new PrecioDeLinea(rs.getString("producto_id"), rs.getInt("cantidad"),
+                        rs.getBigDecimal("precio"), rs.getString("origen"),
+                        rs.getObject("lista_precio_item_id", UUID.class), rs.getObject("lista_precio_id", UUID.class)),
+                clienteDocumento, productos.toArray(new String[0]), cantidades.toArray(new Integer[0]), momento);
+    }
+
+    private Map<String, Precio> enLote(String clienteDocumento, Map<String, Integer> cantidadPorProducto,
+                                       java.time.OffsetDateTime momento) {
+        Map<String, Precio> porProducto = new LinkedHashMap<>();
+        for (PrecioDeLinea l : preciosDeLineas(clienteDocumento, new ArrayList<>(cantidadPorProducto.keySet()),
+                new ArrayList<>(cantidadPorProducto.values()), momento)) {
+            porProducto.put(l.productoId(), new Precio(l.precio(), l.origen(), l.listaPrecioItemId(), l.listaPrecioId()));
+        }
+        return porProducto;
     }
 
     /** Las mismas líneas con el precio resuelto en vez del que mandó el POS. */

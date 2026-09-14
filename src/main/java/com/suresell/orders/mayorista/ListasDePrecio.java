@@ -164,6 +164,46 @@ public class ListasDePrecio {
         return ids.get(0);
     }
 
+    /**
+     * F1.5: las líneas de una lista para la caché del POS. Sin {@code desde}, las
+     * vigentes. Con {@code desde}, solo lo que cambió después: las que empezaron a
+     * regir y las que se cerraron (con {@code vigenteHasta}), para que la caché
+     * quite las cerradas sin descargar la lista entera otra vez.
+     *
+     * <p>{@code servidoEn} es el reloj del servidor al responder: el POS lo manda
+     * como {@code desde} la próxima vez, y así no depende de su propio reloj.
+     */
+    public Map<String, Object> catalogoDeLista(String negocio, UUID listaId, java.time.OffsetDateTime desde) {
+        exigirNegocio(negocio);
+        Integer existe = jdbc.queryForObject(
+                "SELECT count(*) FROM listas_precio WHERE tenant_id = ? AND id = ?", Integer.class, negocio, listaId);
+        if (existe == null || existe == 0) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("listaId",
+                    "Esa lista no existe en el negocio.");
+        }
+        java.time.OffsetDateTime servidoEn = jdbc.queryForObject("SELECT now()", java.time.OffsetDateTime.class);
+        List<Map<String, Object>> lineas = desde == null
+                ? jdbc.queryForList("""
+                    SELECT i.id, i.producto_id AS "productoId", i.cantidad_minima AS "cantidadMinima", i.precio,
+                           i.vigente_desde AS "vigenteDesde", i.vigente_hasta AS "vigenteHasta"
+                      FROM listas_precio_items i
+                     WHERE i.tenant_id = ? AND i.lista_id = ? AND i.vigente_hasta IS NULL
+                     ORDER BY i.producto_id, i.cantidad_minima""", negocio, listaId)
+                : jdbc.queryForList("""
+                    SELECT i.id, i.producto_id AS "productoId", i.cantidad_minima AS "cantidadMinima", i.precio,
+                           i.vigente_desde AS "vigenteDesde", i.vigente_hasta AS "vigenteHasta"
+                      FROM listas_precio_items i
+                     WHERE i.tenant_id = ? AND i.lista_id = ?
+                       AND (i.vigente_desde > ? OR i.vigente_hasta > ?)
+                     ORDER BY i.producto_id, i.cantidad_minima""", negocio, listaId, desde, desde);
+        Map<String, Object> r = new java.util.LinkedHashMap<>();
+        r.put("listaId", listaId);
+        r.put("desde", desde);
+        r.put("servidoEn", servidoEn);
+        r.put("lineas", lineas);
+        return r;
+    }
+
     /** Lo que la base cobraría hoy: para probar una lista sin vender. */
     public List<Map<String, Object>> precioPara(String documento, String productoId, int cantidad) {
         return jdbc.queryForList(
