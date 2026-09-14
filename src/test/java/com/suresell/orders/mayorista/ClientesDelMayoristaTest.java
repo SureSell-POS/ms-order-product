@@ -320,4 +320,50 @@ class ClientesDelMayoristaTest {
                         .header("Authorization", bearer(ADMIN, "admin")))
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("antesDe"));
     }
+
+    private org.springframework.test.web.servlet.ResultActions alta(String cuerpo) throws Exception {
+        return mockMvc.perform(post("/api/mayorista/clientes").header("Authorization", bearer(ADMIN, "admin"))
+                .contentType(MediaType.APPLICATION_JSON).content(cuerpo));
+    }
+
+    @Test
+    @DisplayName("🔴 F4.10: el NIT llega con o sin DV; se separa, se valida si vino y el DV sale en la lectura")
+    void nitConDigitoDeVerificacion() throws Exception {
+        // Con guion y sin tipo: se toma por NIT.
+        alta("{\"documento\":\"800.197.268-4\",\"nombre\":\"DIAN\"}").andExpect(status().isCreated());
+        mockMvc.perform(get("/api/mayorista/clientes/800197268").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.documento").value("800197268"))
+                .andExpect(jsonPath("$.dv").value(4))
+                .andExpect(jsonPath("$.tipo_documento").value("NIT"));
+        // Pegado en diez dígitos con tipo NIT.
+        alta("{\"documento\":\"8999990681\",\"nombre\":\"Ecopetrol\",\"tipoDocumento\":\"NIT\"}").andExpect(status().isCreated());
+        // Sin DV: lo calcula el servidor.
+        alta("{\"documento\":\"860034313\",\"nombre\":\"Bavaria\",\"tipoDocumento\":\"nit\"}").andExpect(status().isCreated());
+        assertThat(dueno.queryForList("SELECT documento || '-' || dv FROM clientes WHERE tenant_id = ? AND dv IS NOT NULL ORDER BY documento",
+                String.class, T)).containsExactly("800197268-4", "860034313-7", "899999068-1");
+
+        // DV errado: 400 en documento, y nada escrito.
+        alta("{\"documento\":\"890903938-5\",\"nombre\":\"Bancolombia\"}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.campo").value("documento"))
+                .andExpect(jsonPath("$.message").value("El dígito de verificación no corresponde"));
+        // Un CC no lleva DV.
+        alta("{\"documento\":\"1020304-5\",\"nombre\":\"Persona\",\"tipoDocumento\":\"CC\"}")
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("documento"));
+        assertThat(dueno.queryForObject("SELECT count(*) FROM clientes WHERE tenant_id = ? AND documento IN ('890903938', '1020304-5', '1020304')",
+                Integer.class, T)).isZero();
+
+        // PUT: marcar un cliente como NIT calcula su DV; volver a CC lo quita. El panel no manda `dv`.
+        String formulario = "{\"nombre\":\"Sin vendedor\",\"tipoDocumento\":\"%s\"}";
+        mockMvc.perform(put("/api/mayorista/clientes/300").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON).content(String.format(formulario, "NIT")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.dv").value(Nit.dv("300")));
+        mockMvc.perform(put("/api/mayorista/clientes/300").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON).content(String.format(formulario, "CC")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.dv").isEmpty());
+        assertThat(dueno.queryForList("SELECT valor_nuevo FROM clientes_eventos e JOIN clientes c ON c.id = e.cliente_id "
+                + "WHERE c.tenant_id = ? AND c.documento = '300' AND e.campo = 'dv' ORDER BY e.ocurrido_en", String.class, T))
+                .containsExactly(String.valueOf(Nit.dv("300")), null);
+    }
 }

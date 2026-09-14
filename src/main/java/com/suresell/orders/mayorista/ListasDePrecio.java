@@ -131,7 +131,7 @@ public class ListasDePrecio {
             c.id, c.documento, c.nombre, c.telefono, c.plazo_dias, c.activo,
             c.lista_precio_id, l.nombre AS lista,
             c.tipo_documento, c.razon_social, c.tipo_cliente, c.direccion_entrega, c.municipio_dane,
-            c.correo, c.whatsapp, c.vendedor_id, v.nombre AS vendedor, c.exige_factura, c.en_insolvencia_desde,
+            c.correo, c.whatsapp, c.vendedor_id, v.nombre AS vendedor, c.exige_factura, c.en_insolvencia_desde, c.dv,
             libro.saldo AS deuda, a.credit_limit AS cupo, a.status AS estado_cartera,
             (libro.saldo > a.credit_limit) AS excede_cupo
             """;
@@ -254,15 +254,25 @@ public class ListasDePrecio {
                         "El vendedor no es de este negocio.");
             }
         }
+        // F4.10: el DV no lo manda nadie: sale del documento (que no se edita). Sin NIT, no hay DV.
+        Integer dv = null;
+        if ("NIT".equals(tipoDoc)) {
+            dv = Nit.dv(documento.trim());
+            if (dv == null) {
+                throw new com.suresell.orders.shared.exception.DatoInvalidoException("documento",
+                        "Un NIT solo lleva números: este documento no puede ser NIT.");
+            }
+        }
         fijarAutor(autor);
         int n = jdbc.update("""
                 UPDATE clientes SET
+                       dv = ?,
                        nombre = ?, telefono = ?, lista_precio_id = ?, plazo_dias = ?, tipo_documento = ?,
                        razon_social = ?, tipo_cliente = ?, direccion_entrega = ?, municipio_dane = ?,
                        correo = ?, whatsapp = ?, vendedor_id = ?, exige_factura = ?,
                        actualizado_en = now()
                  WHERE tenant_id = ? AND documento = ?""",
-                c.nombre().trim(), vacioANulo(c.telefono()), c.listaPrecioId(), c.plazoDias(), tipoDoc,
+                dv, c.nombre().trim(), vacioANulo(c.telefono()), c.listaPrecioId(), c.plazoDias(), tipoDoc,
                 vacioANulo(c.razonSocial()), tipoCliente, vacioANulo(c.direccionEntrega()), vacioANulo(c.municipioDane()),
                 vacioANulo(c.correo()), vacioANulo(c.whatsapp()), c.vendedorId(), Boolean.TRUE.equals(c.exigeFactura()),
                 negocio, documento.trim());
@@ -387,29 +397,72 @@ public class ListasDePrecio {
         return s == null || s.isBlank() ? null : s.trim().toUpperCase();
     }
 
-    @Transactional
     public UUID guardarCliente(String negocio, String documento, String nombre, String telefono, UUID listaId,
                                Integer plazoDias, Autor autor) {
+        return guardarCliente(negocio, documento, nombre, telefono, listaId, plazoDias, null, autor);
+    }
+
+    /**
+     * Alta (o actualización) de un cliente. F4.10: un NIT llega con o sin DV
+     * («900123456-7» o «9001234567»); el DV se separa del número, se valida si
+     * vino ({@code 400 documento} «El dígito de verificación no corresponde») y se
+     * guarda en {@code dv}. Un documento con guion y DV sin tipo se toma por NIT.
+     */
+    // Una sola transacción: el autor (set_config local) y el UPDATE que lee el disparador.
+    @Transactional
+    public UUID guardarCliente(String negocio, String documento, String nombre, String telefono, UUID listaId,
+                               Integer plazoDias, String tipoDocumento, Autor autor) {
         exigirNegocio(negocio);
         exigir(documento, "el documento del cliente");
         exigir(nombre, "el nombre del cliente");
         exigirAutor(autor);
+        String tipo = mayusculasONulo(tipoDocumento);
+        if (tipo != null && !TIPOS_DE_DOCUMENTO.contains(tipo)) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("tipoDocumento",
+                    "Tipo de documento: CC, NIT, CE, PAS, PPT o TI.");
+        }
+        String doc = documento.trim();
+        Integer dv = null;
+        boolean traeGuionDeDv = doc.replaceAll("[\\s.]", "").matches("^[0-9]+-[0-9]$");
+        if ("NIT".equals(tipo) || (tipo == null && traeGuionDeDv)) {
+            Nit.Separado separado = Nit.separar(doc);
+            Integer calculado = Nit.dv(separado.numero());
+            if (calculado == null) {
+                throw new com.suresell.orders.shared.exception.DatoInvalidoException("documento",
+                        "Un NIT solo lleva números y, si acaso, el guion del dígito de verificación.");
+            }
+            if (separado.dv() != null && !separado.dv().equals(calculado)) {
+                throw new com.suresell.orders.shared.exception.DatoInvalidoException("documento",
+                        "El dígito de verificación no corresponde");
+            }
+            doc = separado.numero();
+            dv = calculado;
+            tipo = "NIT";
+        } else if (traeGuionDeDv) {
+            throw new com.suresell.orders.shared.exception.DatoInvalidoException("documento",
+                    "Un documento " + tipo + " no lleva dígito de verificación.");
+        }
         List<UUID> ids = jdbc.query("SELECT id FROM clientes WHERE tenant_id = ? AND documento = ?",
-                (rs, i) -> rs.getObject("id", UUID.class), negocio, documento.trim());
+                (rs, i) -> rs.getObject("id", UUID.class), negocio, doc);
         if (ids.isEmpty()) {
             return jdbc.queryForObject("""
                     INSERT INTO clientes (tenant_id, documento, nombre, telefono, lista_precio_id, plazo_dias,
-                                          creado_por, autor_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id""",
-                    UUID.class, negocio, documento.trim(), nombre.trim(), telefono, listaId, plazoDias,
+                                          tipo_documento, dv, creado_por, autor_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id""",
+                    UUID.class, negocio, doc, nombre.trim(), telefono, listaId, plazoDias, tipo, dv,
                     autor.correo(), autor.id());
         }
         // `autor_id` es de quien lo REGISTRÓ: editarlo no cambia el autor. La
         // historia de los cambios es `clientes_eventos` (V62), con el autor de aquí.
         fijarAutor(autor);
+        // Sin tipo en la petición, el tipo y el DV guardados no cambian.
         jdbc.update("""
-                UPDATE clientes SET nombre = ?, telefono = ?, lista_precio_id = ?, plazo_dias = ?, actualizado_en = now()
-                 WHERE tenant_id = ? AND id = ?""", nombre.trim(), telefono, listaId, plazoDias, negocio, ids.get(0));
+                UPDATE clientes SET nombre = ?, telefono = ?, lista_precio_id = ?, plazo_dias = ?,
+                       tipo_documento = COALESCE(?, tipo_documento),
+                       dv = CASE WHEN ?::text IS NULL THEN dv ELSE ?::smallint END,
+                       actualizado_en = now()
+                 WHERE tenant_id = ? AND id = ?""", nombre.trim(), telefono, listaId, plazoDias,
+                tipo, tipo, dv, negocio, ids.get(0));
         return ids.get(0);
     }
 

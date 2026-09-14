@@ -261,14 +261,15 @@ public class MayoristaController {
         }
     }
 
+    /** {@code tipoDocumento} opcional (F4.10): con NIT, el documento puede traer el DV pegado. */
     public record NuevoCliente(@NotBlank String documento, @NotBlank String nombre, String telefono,
-                               UUID listaPrecioId, Integer plazoDias) {}
+                               UUID listaPrecioId, Integer plazoDias, String tipoDocumento) {}
 
     @PostMapping("/clientes")
     @ResponseStatus(HttpStatus.CREATED)
     public Map<String, Object> guardarCliente(@RequestBody NuevoCliente cuerpo, HttpServletRequest http) {
         return Map.of("id", listas.guardarCliente(TenantContext.get(), cuerpo.documento(), cuerpo.nombre(),
-                cuerpo.telefono(), cuerpo.listaPrecioId(), cuerpo.plazoDias(), autor(http)));
+                cuerpo.telefono(), cuerpo.listaPrecioId(), cuerpo.plazoDias(), cuerpo.tipoDocumento(), autor(http)));
     }
 
     @GetMapping("/precio")
