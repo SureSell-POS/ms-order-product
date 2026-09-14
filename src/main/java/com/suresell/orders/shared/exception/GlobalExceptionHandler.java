@@ -266,6 +266,17 @@ public class GlobalExceptionHandler {
     }
 
     /** 400 DATOS_INVALIDOS con `campo`: el dato que no vale, dicho para la persona. */
+    /** 400 con {@code maximo} numérico además de {@code campo} (F4.4). */
+    @ExceptionHandler(MontoPorEncimaDelMaximoException.class)
+    public ResponseEntity<Map<String, Object>> handleMontoPorEncimaDelMaximo(MontoPorEncimaDelMaximoException ex) {
+        logger.info("Monto rechazado ({}, maximo {}): {}", ex.campo(), ex.maximo(), ex.getMessage());
+        Map<String, Object> m = new LinkedHashMap<>(cuerpo("DATOS_INVALIDOS", ex.getMessage()));
+        m.put("codigo", "DATOS_INVALIDOS");
+        m.put("campo", ex.campo());
+        m.put("maximo", ex.maximo());
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(m);
+    }
+
     @ExceptionHandler(DatoInvalidoException.class)
     public ResponseEntity<Map<String, String>> handleDatoInvalido(DatoInvalidoException ex) {
         logger.info("Dato rechazado ({}): {}", ex.campo(), ex.getMessage());

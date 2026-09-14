@@ -138,6 +138,9 @@ public class Cartera {
             throw new DatoInvalidoException("desde", "«desde» no puede ser posterior a «hasta».");
         }
         Map<String, Object> cliente = resumenVisible(quien, documento);
+        // Solo aquí y no en la lista: es dato personal, y el panel lo necesita para el enlace de WhatsApp.
+        cliente.put("whatsapp", jdbc.queryForList("SELECT whatsapp FROM clientes WHERE tenant_id = ? AND documento = ?",
+                String.class, quien.negocio(), cliente.get("clienteDocumento")).stream().findFirst().orElse(null));
 
         List<Map<String, Object>> documentos = jdbc.queryForList("""
                 SELECT d.debito_tx_id, d.order_uuid, d.fecha, d.vence_el, d.monto, d.aplicado, d.saldo,
@@ -305,8 +308,9 @@ public class Cartera {
         BigDecimal debe = deudaFacturas.min(deudaLibro);
         if (monto.compareTo(debe) > 0) {
             // Sin anticipos ni saldo a favor en esta fase (ECM, 2026-09-14): el libro dejaría de cuadrar con la vista.
-            throw new DatoInvalidoException("monto", "El cliente debe " + pesos(debe.max(BigDecimal.ZERO))
-                    + "; no se puede abonar más.");
+            BigDecimal maximo = debe.max(BigDecimal.ZERO);
+            throw new com.suresell.orders.shared.exception.MontoPorEncimaDelMaximoException("monto", maximo,
+                    "El cliente debe " + pesos(maximo) + "; no se puede abonar más.");
         }
 
         List<Object[]> reparto = repartir(vivas, monto, r.aplicaciones());

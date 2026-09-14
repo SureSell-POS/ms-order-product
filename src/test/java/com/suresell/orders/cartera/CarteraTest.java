@@ -117,6 +117,7 @@ class CarteraTest {
         long pedro = usuario(PEDRO, "vendedor", "Pedro");
         dueno.update("INSERT INTO clientes (tenant_id, documento, nombre, vendedor_id, plazo_dias, creado_por) VALUES "
                 + "(?, ?, 'Tienda A', ?, 8, 's'), (?, ?, 'Tienda B', ?, 8, 's')", T, TIENDA_A, ana, T, TIENDA_B, pedro);
+        dueno.update("UPDATE clientes SET whatsapp = '3001234567' WHERE tenant_id = ? AND documento = ?", T, TIENDA_A);
         String cuentaA = cuenta(T, TIENDA_A, "Tienda A", 500000, 110000);
         ventaVieja = UUID.randomUUID();
         ventaNueva = UUID.randomUUID();
@@ -206,6 +207,10 @@ class CarteraTest {
         assertThat(estado.get("documentos").get(0).get("edad").asText()).isEqualTo("31_60");
         assertThat(estado.get("recibos")).hasSize(1);
         assertThat(estado.get("frase").asText()).contains("Tienda A", "Distribuidora QA", "$90.000", "$40.000", "vencidos");
+        assertThat(estado.get("cliente").get("whatsapp").asText()).isEqualTo("3001234567");
+        // El WhatsApp es dato personal: la lista no lo lleva.
+        JsonNode lista = leer(mockMvc.perform(get("/api/cartera/clientes").header("Authorization", bearer(ADMIN, "admin"))));
+        assertThat(lista.get(0).has("whatsapp")).isFalse();
     }
 
     @Test
@@ -229,7 +234,8 @@ class CarteraTest {
         abonar(CAJA, "cajero", abono(TIENDA_A, 10000, "EFECTIVO", "n-1")).andExpect(jsonPath("$.numero").value(1));
         abonar(CAJA, "cajero", abono(TIENDA_A, 200000, "EFECTIVO", "n-malo"))
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("monto"))
-                .andExpect(jsonPath("$.message").value("El cliente debe $100.000; no se puede abonar más."));
+                .andExpect(jsonPath("$.message").value("El cliente debe $100.000; no se puede abonar más."))
+                .andExpect(jsonPath("$.maximo").value(100000));
         abonar(CAJA, "cajero", abono(TIENDA_A, 1000, "PAGARE", "n-medio"))
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("medio"));
         abonar(CAJA, "cajero", abono(TIENDA_B, 5000, "BRE_B", "n-2")).andExpect(jsonPath("$.numero").value(2));
