@@ -202,7 +202,29 @@ public record OrderRequestRecord(
      */
     @Schema(description = "V58 — Cliente de la factura electrónica. Opcional; se guarda tal cual "
             + "con la orden. No se emite nada todavía.")
-    FacturaElectronicaRecord facturaElectronica
+    FacturaElectronicaRecord facturaElectronica,
+
+    /**
+     * Plan de mayoristas, F1.3 (V60). Quién VENDIÓ: {@code users.id} del mismo
+     * negocio con rol vendedor, admin o cajero. No es quien opera la caja
+     * ({@code created_by}, sale del token). OPCIONAL: ausente = sin asignar, salvo
+     * que el token sea de un vendedor, que vende a su nombre.
+     *
+     * <p><b>Fuera del hash del evento</b>, como en {@code hash-del-evento.ts}
+     * (F1.7): atribuir la venta no cambia el hecho económico.
+     */
+    @Schema(description = "F1.3 — users.id de quien vendió (mismo negocio). Opcional.", example = "42")
+    Long vendedorId,
+
+    /**
+     * Plan de mayoristas, F1.3 (V60). {@code CONTADO} o {@code CREDITO}: la forma
+     * de pago de la factura, que no se deduce del medio. OPCIONAL: ausente =
+     * {@code CREDITO} si el medio es {@code CREDITO}, si no {@code CONTADO}.
+     * Fuera del hash, igual que {@code vendedorId}.
+     */
+    @Schema(description = "F1.3 — CONTADO o CREDITO. Opcional.", example = "CREDITO",
+            allowableValues = {"CONTADO", "CREDITO"})
+    String condicionPago
 ) {
 
     /**
@@ -227,7 +249,7 @@ public record OrderRequestRecord(
         return new OrderRequestRecord(
                 pagerColor, pagerNumber, items, discountCode, paymentMethod, payments,
                 idempotencyKey, skipPagerCheck, tableSessionId, preparadoEnComanda,
-                null, null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     /** Split de multipago: método + monto. */

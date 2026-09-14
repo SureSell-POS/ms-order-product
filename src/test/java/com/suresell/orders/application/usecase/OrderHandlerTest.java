@@ -117,7 +117,11 @@ class OrderHandlerTest {
                 resolucionDePrecios,
                 // V48: estas pruebas son del flujo de siempre (RASTREADOR):
                 // el rastreador es obligatorio y se comprueba que no esté ocupado.
-                siteServiceConRastreador());
+                siteServiceConRastreador(),
+                // F1.3: vendedor y condición de pago. Real sobre un JdbcTemplate
+                // simulado: sin vendedorId no consulta nada, y la condición es pura.
+                new com.suresell.orders.mayorista.AtribucionDeLaVenta(
+                        org.mockito.Mockito.mock(org.springframework.jdbc.core.JdbcTemplate.class)));
     }
 
     private com.suresell.orders.mayorista.ResolucionDePrecios resolucionDePrecios =
@@ -357,8 +361,8 @@ class OrderHandlerTest {
                 null, "MIXED",
                 List.of(new OrderRequestRecord.PaymentSplitRecord("CASH", BigDecimal.valueOf(4000)),
                         new OrderRequestRecord.PaymentSplitRecord("NEQUI", BigDecimal.valueOf(6000))),
-                // V58: el ultimo es `facturaElectronica`, que esta venta no pide.
-                null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+                // V58/V60: los ultimos son `facturaElectronica`, `vendedorId` y `condicionPago`.
+                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
 
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
                 () -> orderHandler.createOrUpdateOrder(request));

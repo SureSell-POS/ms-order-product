@@ -234,6 +234,26 @@ public class Order implements org.springframework.data.domain.Persistable<java.u
     private Long createdBy;
 
     /**
+     * V60 — Quién VENDIÓ (plan de mayoristas, F1.3). No es {@code createdBy}
+     * (quien operó la caja) ni {@code waiterId} (el mesero). La base rechaza un
+     * vendedor de otro negocio (P0001). NULL = sin asignar o anterior a V60.
+     */
+    @Column(name = "vendedor_id")
+    private Long vendedorId;
+
+    /** V60 — CONTADO | CREDITO. No se deduce del medio. NULL = anterior a V60. */
+    @Column(name = "condicion_pago")
+    private String condicionPago;
+
+    /** V60 — caja | app_meseros | pedido. NULL = anterior a V60. */
+    @Column(name = "origen")
+    private String origen;
+
+    /** V60 — Referencia blanda a pedidos.pedidos (F5). Sin FK entre cadenas. */
+    @Column(name = "pedido_id")
+    private java.util.UUID pedidoId;
+
+    /**
      * V58 — Cliente de la factura electrónica, como JSON tal y como lo mandó el
      * POS: {@code { nombre, documento, correo, telefono? }}. NULL = esta venta
      * no pidió factura.

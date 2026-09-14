@@ -41,7 +41,7 @@ public interface OrderRepository extends JpaRepository<Order, java.util.UUID> {
     @Modifying
     @Query("""
             UPDATE Order o SET o.idempotencyKey = :key, o.waiterId = :waiterId,
-                   o.waiterSessionId = :sessionId
+                   o.waiterSessionId = :sessionId, o.origen = 'app_meseros'
             WHERE o.uuidId = :uuid
             """)
     int tagWaiterOrder(@Param("uuid") java.util.UUID uuid,

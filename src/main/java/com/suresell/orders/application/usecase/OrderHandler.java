@@ -100,6 +100,9 @@ public class OrderHandler implements OrderPort {
      * obligatorio. Va al FINAL: @RequiredArgsConstructor.
      */
     private final SiteService siteService;
+    // Plan de mayoristas, F1.3 — vendedor, condición de pago y cuenta de crédito.
+    // AL FINAL, por la misma razón que los de arriba.
+    private final com.suresell.orders.mayorista.AtribucionDeLaVenta atribucion;
     // N2/D2: en el perfil cloud este servicio ES la nube (no hay outbox saliente),
     // así que las órdenes nacen ya sincronizadas. Ver createOrUpdateOrder.
     @org.springframework.beans.factory.annotation.Value("${sync.cloud.enabled:false}")
@@ -254,6 +257,16 @@ public class OrderHandler implements OrderPort {
         // UsuarioDeSistema, no con nulo.
         order.setCreatedBy(usuarioDeLaPeticion.id().orElse(null));
 
+        // F1.3 (V60) — quién VENDIÓ, que no es quien operó la caja, y de dónde
+        // viene la venta. `caja` por defecto: la app de meseros la reetiqueta al
+        // marcarla (OrderRepository.tagWaiterOrder).
+        String negocio = com.suresell.orders.multitenant.TenantContext.get();
+        order.setVendedorId(atribucion.vendedor(negocio, dto.vendedorId(),
+                usuarioDeLaPeticion.id(), usuarioDeLaPeticion.rol()));
+        order.setOrigen("caja");
+        order.setCondicionPago(atribucion.condicionPago(dto.condicionPago(),
+                multipago ? null : normalizePaymentMethod(dto.paymentMethod())));
+
         if (idempotencyKey != null && !idempotencyKey.isBlank()) {
             order.setIdempotencyKey(idempotencyKey);
         }
@@ -282,6 +295,11 @@ public class OrderHandler implements OrderPort {
                     .findFirst().ifPresent(order::setListaPrecioId);
         } else if ("CREDITO".equals(normalizePaymentMethod(dto.paymentMethod()))) {
             throw new IllegalArgumentException("Una venta a crédito necesita el documento del cliente.");
+        }
+        // F1.3 — La primera venta a crédito de un cliente registrado abre su
+        // cuenta (cupo 0: entra y avisa). Antes el disparador de V45 la negaba.
+        if (cliente != null && !multipago && "CREDITO".equals(normalizePaymentMethod(dto.paymentMethod()))) {
+            atribucion.asegurarCuentaDeCredito(negocio, cliente);
         }
         BigDecimal subtotal = lineas.stream()
                 .map(item -> item.unitPrice().multiply(BigDecimal.valueOf(item.quantity())))

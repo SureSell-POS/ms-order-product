@@ -137,8 +137,17 @@ public class CadenaDelServidor {
      * <p>Mismo subconjunto que {@code formaCanonica} del POS, y por las mismas
      * razones: entra lo que constituye el hecho económico y no entra lo
      * operativo. Ver la tabla de exclusiones en {@code hash-del-evento.ts}.
+     *
+     * <p><b>Fuera del hash por construcción</b> (plan de mayoristas F1.4, pareja
+     * de F1.7 en el POS): {@code clienteDocumento}, {@code vendedorId} y
+     * {@code condicionPago}, igual que {@code origen} y {@code pedidoId}. A quién
+     * se le vendió, quién lo vendió y con qué condición no cambian el hecho
+     * económico; {@code CadenaDelServidorExclusionesTest} lo fija.
+     * {@code paymentMethod = CREDITO} sí entra, por {@code medioDePago}.
+     *
+     * <p>Visibilidad de paquete para esa prueba.
      */
-    private static GramaticaCanonica.Hechos hechosDe(Order orden, Instant ocurrido) {
+    static GramaticaCanonica.Hechos hechosDe(Order orden, Instant ocurrido) {
         List<GramaticaCanonica.Linea> lineas = new ArrayList<>();
         if (orden.getItems() != null) {
             for (OrderItem it : orden.getItems()) {

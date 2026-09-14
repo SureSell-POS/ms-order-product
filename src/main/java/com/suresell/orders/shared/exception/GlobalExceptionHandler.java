@@ -231,6 +231,16 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(m);
     }
 
+    /** 400 DATOS_INVALIDOS con `campo`: el dato que no vale, dicho para la persona. */
+    @ExceptionHandler(DatoInvalidoException.class)
+    public ResponseEntity<Map<String, String>> handleDatoInvalido(DatoInvalidoException ex) {
+        logger.info("Dato rechazado ({}): {}", ex.campo(), ex.getMessage());
+        Map<String, String> m = cuerpo("DATOS_INVALIDOS", ex.getMessage());
+        m.put("codigo", "DATOS_INVALIDOS");
+        m.put("campo", ex.campo());
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(m);
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Map<String, String>> handleIllegalArgumentException(IllegalArgumentException ex) {
         logger.info("Dato rechazado: {}", ex.getMessage());

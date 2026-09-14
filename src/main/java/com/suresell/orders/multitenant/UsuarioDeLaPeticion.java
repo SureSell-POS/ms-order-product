@@ -38,6 +38,15 @@ public class UsuarioDeLaPeticion {
         this.usuarios = usuarios;
     }
 
+    /** Rol del token de la petición actual (claim {@code role}), si lo hay. */
+    public Optional<String> rol() {
+        RequestAttributes attrs = RequestContextHolder.getRequestAttributes();
+        if (!(attrs instanceof ServletRequestAttributes sra)) {
+            return Optional.empty();
+        }
+        return resolver.resolveRole(sra.getRequest().getHeader("Authorization"));
+    }
+
     /** Id de {@code users} del autor de la petición actual, si lo hay. */
     public Optional<Long> id() {
         try {
