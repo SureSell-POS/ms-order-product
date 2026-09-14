@@ -8,8 +8,10 @@
 #
 # Números: de quien escribe el fichero, contra la última aplicada en staging
 # justo antes. Una reserva sin fichero caduca (V56 y V133 de las otras cadenas).
-# Orden acordado al abrirla: V1 conjunta (Agente-mt), V2 red, V3 pedido,
-# V4-V5 red; desde V6, por orden de llegada.
+# V1 conjunta (Agente-mt). Desde V2, POR ORDEN DE LLEGADA: el reparto que se
+# acordó al abrirla (V2 red, V3 pedido, V4-V5 red) ya no vale, porque eran
+# reservas sin fichero y una reserva sin fichero caduca. Quien escribe la
+# siguiente toma la siguiente libre y la anota en ESTADO-AGENTES al escribirla.
 #
 # Al añadir una: ./gradlew test --tests '*GuardaDeMigracionesPedidos*'
 # y copiar build/MIGRACIONES-pedidos.txt.nuevo sobre este archivo.
