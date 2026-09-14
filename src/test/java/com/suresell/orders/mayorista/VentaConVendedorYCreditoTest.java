@@ -91,7 +91,10 @@ class VentaConVendedorYCreditoTest {
             dueno.update("DELETE FROM accounts_receivable WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM order_item WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM orders WHERE tenant_id = ?", t);
+            dueno.update("DELETE FROM clientes_eventos WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM clientes WHERE tenant_id = ?", t);
+            dueno.update("DELETE FROM listas_precio_items WHERE tenant_id = ?", t);
+            dueno.update("DELETE FROM listas_precio WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM menu_products WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM users WHERE tenant_id = ?", t);
             dueno.update("INSERT INTO tenants (id, name, plan) VALUES (?, ?, 'pro') ON CONFLICT (id) DO NOTHING", t, t);
@@ -202,6 +205,35 @@ class VentaConVendedorYCreditoTest {
                         .content(venta("\"paymentMethod\":\"CASH\",\"condicionPago\":\"FIADO\",", "inventada")))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.campo").value("condicionPago"));
+    }
+
+    @Test
+    @DisplayName("🔴 F1.15: la respuesta dice cuánto corrigió el servidor: el POS pide base, el cliente tiene lista")
+    void laRespuestaTraeLaDiscrepancia() throws Exception {
+        java.util.UUID lista = dueno.queryForObject("INSERT INTO listas_precio (tenant_id, codigo, nombre, creado_por) "
+                + "VALUES (?, 'dist', 'Distribuidor', 's') RETURNING id", java.util.UUID.class, T);
+        dueno.update("INSERT INTO listas_precio_items (tenant_id, lista_id, producto_id, cantidad_minima, precio, usuario_id, "
+                + "fuente, confianza) VALUES (?, ?, ?, 1, 100000, 's', 'declarado_comerciante', 1)", T, lista, "aceite-x12-" + T);
+        dueno.update("UPDATE clientes SET lista_precio_id = ? WHERE tenant_id = ? AND documento = ?", lista, T, DOC);
+
+        // 3 cajas: el POS declara precio base (3 × 112.000 = 336.000); con su lista son 300.000.
+        String conLista = "{\"pagerColor\":\"MESA\",\"pagerNumber\":\"140\",\"paymentMethod\":\"CASH\","
+                + "\"clienteDocumento\":\"" + DOC + "\",\"total\":336000,"
+                + "\"items\":[{\"productId\":\"aceite-x12-" + T + "\",\"quantity\":3,\"unitPrice\":112000}],"
+                + "\"idempotencyKey\":\"discrepancia-lista\"}";
+        mockMvc.perform(post("/orders/create").header("Authorization", bearer(LUIS, "cajero"))
+                        .contentType(MediaType.APPLICATION_JSON).content(conLista))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.totalDiscrepancia").value(36000.0));
+
+        // Sin cliente y con el total correcto: 0, no null.
+        String exacta = "{\"pagerColor\":\"MESA\",\"pagerNumber\":\"141\",\"paymentMethod\":\"CASH\",\"total\":112000,"
+                + "\"items\":[{\"productId\":\"aceite-x12-" + T + "\",\"quantity\":1,\"unitPrice\":112000}],"
+                + "\"idempotencyKey\":\"discrepancia-cero\"}";
+        mockMvc.perform(post("/orders/create").header("Authorization", bearer(LUIS, "cajero"))
+                        .contentType(MediaType.APPLICATION_JSON).content(exacta))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.totalDiscrepancia").value(0.0));
     }
 
     @Test

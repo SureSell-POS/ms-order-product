@@ -84,6 +84,7 @@ class MayoristaEndpointTest {
         dueno = new JdbcTemplate(new DriverManagerDataSource(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword()));
         for (String t : new String[] {A, B}) {
             dueno.update("DELETE FROM accounts_receivable WHERE tenant_id = ?", t);
+            dueno.update("DELETE FROM clientes_eventos WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM clientes WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM listas_precio_items WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM listas_precio WHERE tenant_id = ?", t);

@@ -107,6 +107,10 @@ public class OrderController {
         // F1.3 (plan §7.1): aditivo. null = la venta no es a crédito; true = superó
         // el cupo y entró con aviso (D9).
         body.put("excedeCupo", created != null ? created.getExcedeCupo() : null);
+        // F1.15 (aditivo): lo que el POS declaró (`total`) menos lo que cobró el servidor.
+        // 0 = coinciden; positivo = el POS pedía de más (p. ej. precio base y el cliente
+        // tiene lista); null = el POS no declaró total y no hubo con qué comparar.
+        body.put("totalDiscrepancia", created != null ? created.getTotalDiscrepancia() : null);
         return ResponseEntity.status(HttpStatus.CREATED).body(body);
     }
     @PutMapping("/{orderId}")
