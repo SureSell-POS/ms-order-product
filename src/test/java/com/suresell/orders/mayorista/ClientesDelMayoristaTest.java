@@ -263,6 +263,12 @@ class ClientesDelMayoristaTest {
                 .andExpect(status().isOk()).andExpect(jsonPath("$.activo").value(true));
         assertThat(dueno.queryForList("SELECT valor_nuevo FROM clientes_eventos WHERE tenant_id = ? AND campo = 'activo' "
                 + "ORDER BY ocurrido_en, valor_nuevo DESC", String.class, T)).containsExactly("false", "true");
+        // La fecha de insolvencia viaja como fecha ISO (YYYY-MM-DD), en la lista y en la ficha: el POS la cachea así.
+        dueno.update("UPDATE clientes SET en_insolvencia_desde = DATE '2026-09-01' WHERE tenant_id = ? AND documento = '100'", T);
+        mockMvc.perform(get("/api/mayorista/clientes/100").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.en_insolvencia_desde").value("2026-09-01"));
+        mockMvc.perform(get("/api/mayorista/clientes").param("q", "Tienda de Ana").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$[0].en_insolvencia_desde").value("2026-09-01"));
         mockMvc.perform(post("/api/mayorista/clientes/999/reactivar").header("Authorization", bearer(ADMIN, "admin")))
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("documento"));
     }
