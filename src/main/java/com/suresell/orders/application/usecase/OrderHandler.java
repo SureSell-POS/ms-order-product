@@ -180,6 +180,8 @@ public class OrderHandler implements OrderPort {
                             com.suresell.orders.multitenant.TenantContext.get(), previa.getUuidId()));
                     previa.setSaldoAFavorAplicado(atribucion.saldoAFavorAplicado(
                             com.suresell.orders.multitenant.TenantContext.get(), previa.getUuidId()));
+                    previa.setSaldoAFavorRestante(atribucion.saldoAFavorRestante(
+                            com.suresell.orders.multitenant.TenantContext.get(), previa.getUuidId()));
                 }
                 return previa;
             }
@@ -375,6 +377,7 @@ public class OrderHandler implements OrderPort {
             savedOrder.setExcedeCupo(orderRepositoryPort.findExcedeCupoByUuid(savedOrder.getUuidId()).orElse(null));
             savedOrder.setRevisionPorInsolvencia(atribucion.quedoPorRevisarPorInsolvencia(negocio, savedOrder.getUuidId()));
             savedOrder.setSaldoAFavorAplicado(atribucion.saldoAFavorAplicado(negocio, savedOrder.getUuidId()));
+            savedOrder.setSaldoAFavorRestante(atribucion.saldoAFavorRestante(negocio, savedOrder.getUuidId()));
         }
 
         // 3. Crear y Guardar Items individualmente con el ID numérico poblado

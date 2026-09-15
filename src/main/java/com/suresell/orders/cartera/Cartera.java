@@ -802,10 +802,11 @@ public class Cartera {
                  ORDER BY e.numero""", negocio, documento, java.sql.Date.valueOf(inicio), java.sql.Date.valueOf(fin))
                 .stream().map(Cartera::egreso).toList());
         estado.put("aplicacionesARevisarPorInsolvencia", insolvente.map(desde -> jdbc.queryForList("""
-                SELECT a.id, r.numero AS recibo_numero, d.order_uuid, a.monto, a.ocurrido_en
+                SELECT a.id, r.numero AS recibo_numero, d.order_uuid, o.id_order, a.monto, a.ocurrido_en
                   FROM cartera_aplicaciones a
                   JOIN recibos_de_caja r ON r.tenant_id = a.tenant_id AND r.id = a.recibo_id
                   JOIN debt_transactions d ON d.tenant_id = a.tenant_id AND d.id = a.debito_tx_id
+                  LEFT JOIN orders o ON o.tenant_id = d.tenant_id AND o.uuid_id = d.order_uuid
                  WHERE a.tenant_id = ? AND r.cliente_documento = ? AND a.regla = 'SALDO_A_FAVOR_AUTOMATICO'
                    AND (a.ocurrido_en AT TIME ZONE 'America/Bogota')::date >= ?
                  ORDER BY a.ocurrido_en""", negocio, documento, java.sql.Date.valueOf(desde)).stream().map(f -> {
@@ -813,6 +814,7 @@ public class Cartera {
             m.put("id", f.get("id"));
             m.put("reciboNumero", f.get("recibo_numero"));
             m.put("orderUuid", f.get("order_uuid"));
+            m.put("idOrder", f.get("id_order"));
             m.put("monto", f.get("monto"));
             m.put("aplicadaEn", instante(f.get("ocurrido_en")));
             return m;

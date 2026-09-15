@@ -236,6 +236,11 @@ public class Order implements org.springframework.data.domain.Persistable<java.u
     @com.fasterxml.jackson.annotation.JsonIgnore
     private BigDecimal saldoAFavorAplicado;
 
+    /** V74 (F4.12) — saldo a favor que le queda al cliente después de esta venta a crédito. No es columna. */
+    @Transient
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private BigDecimal saldoAFavorRestante;
+
     @Column(name = "total_discrepancia")
     private BigDecimal totalDiscrepancia;
 

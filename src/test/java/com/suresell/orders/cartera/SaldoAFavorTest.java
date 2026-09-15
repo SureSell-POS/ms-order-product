@@ -264,6 +264,7 @@ class SaldoAFavorTest {
         vender(ventaACredito(TIENDA, "i-venta", false))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.saldoAFavorAplicado").value(20000))
+                .andExpect(jsonPath("$.saldoAFavorRestante").value(0))
                 .andExpect(jsonPath("$.revisionPorInsolvencia").value(false));
 
         assertThat(saldoDeLaVenta("i-venta")).isEqualByComparingTo("30000");
@@ -291,6 +292,11 @@ class SaldoAFavorTest {
         BigDecimal efectivoAntes = previewAntes.get("totalExpectedCash").decimalValue();
 
         abonarConSaldoAFavor("ii-abono");
+        // 120.000 en efectivo sobre 100.000: el esperado sube 120.000, y 20.000 van en su propia línea (ya dentro del recaudo).
+        JsonNode trasElAbono = preview();
+        assertThat(trasElAbono.get("recaudoCarteraEfectivo").decimalValue()).isEqualByComparingTo("120000");
+        assertThat(trasElAbono.get("recaudoComoSaldoAFavorEfectivo").decimalValue()).isEqualByComparingTo("20000");
+        assertThat(trasElAbono.get("totalExpectedCash").decimalValue()).isEqualByComparingTo(efectivoAntes.add(new BigDecimal("120000")));
         JsonNode egreso = leer(devolver(ADMIN, "admin", TIENDA, devolucion(20000, "CLIENTE_LO_PIDIO", null, "ii-devolucion"))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.numero").value(1))
@@ -338,11 +344,42 @@ class SaldoAFavorTest {
                 .isEqualByComparingTo(antesDeCerrar.get("devolucionesSaldoAFavorEfectivo").decimalValue());
         assertThat(cierre.get("recaudoCarteraEfectivo").decimalValue())
                 .isEqualByComparingTo(antesDeCerrar.get("recaudoCarteraEfectivo").decimalValue());
+        assertThat(cierre.get("recaudoComoSaldoAFavorEfectivo").decimalValue()).isEqualByComparingTo("20000")
+                .isEqualByComparingTo(antesDeCerrar.get("recaudoComoSaldoAFavorEfectivo").decimalValue());
         assertThat(cierre.get("shortages").has("Efectivo")).as(cierre.toString()).isFalse();
         assertThat(dueno.queryForObject("SELECT total_expected_cash FROM daily_closures WHERE tenant_id = ?", BigDecimal.class, T))
                 .isEqualByComparingTo(antesDeCerrar.get("totalExpectedCash").decimalValue());
         // El turno siguiente arranca sin la devolución del anterior.
         assertThat(preview().get("devolucionesSaldoAFavorEfectivo").decimalValue()).isZero();
+    }
+
+    @Test
+    @DisplayName("🔴 cierre: sin excedente la línea «recibido como saldo a favor» es 0; con excedente lleva lo que sobró; anularlo la resta; el esperado cuadra siempre")
+    void recibidoComoSaldoAFavorEnElCierre() throws Exception {
+        BigDecimal efectivoAntes = preview().get("totalExpectedCash").decimalValue();
+        abonar(abono(TIENDA, 100000, "rc-exacto", null)).andExpect(status().isCreated());
+        JsonNode exacto = preview();
+        assertThat(exacto.get("recaudoCarteraEfectivo").decimalValue()).isEqualByComparingTo("100000");
+        assertThat(exacto.get("recaudoComoSaldoAFavorEfectivo").decimalValue()).isZero();
+        assertThat(exacto.get("totalExpectedCash").decimalValue()).isEqualByComparingTo(efectivoAntes.add(new BigDecimal("100000")));
+
+        String anticipo = leer(abonar(abono(TIENDA, 30000, "rc-anticipo", "SALDO_A_FAVOR")).andExpect(status().isCreated())).get("id").asText();
+        JsonNode conAnticipo = preview();
+        assertThat(conAnticipo.get("recaudoCarteraEfectivo").decimalValue()).isEqualByComparingTo("130000");
+        assertThat(conAnticipo.get("recaudoComoSaldoAFavorEfectivo").decimalValue()).isEqualByComparingTo("30000");
+        assertThat(conAnticipo.get("totalExpectedCash").decimalValue()).isEqualByComparingTo(efectivoAntes.add(new BigDecimal("130000")));
+
+        // Aplicado después a una venta sigue contando como recibido a favor: la línea dice cómo entró el dinero, no qué pasó luego.
+        vender(ventaACredito(TIENDA, "rc-venta", false)).andExpect(jsonPath("$.saldoAFavorAplicado").value(30000));
+        assertThat(preview().get("recaudoComoSaldoAFavorEfectivo").decimalValue()).isEqualByComparingTo("30000");
+
+        mockMvc.perform(post("/api/cartera/recibos/" + anticipo + "/anular").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"motivo\":\"ERROR_DE_MONTO\"}"))
+                .andExpect(status().isCreated());
+        JsonNode anulado = preview();
+        assertThat(anulado.get("recaudoCarteraEfectivo").decimalValue()).isEqualByComparingTo("100000");
+        assertThat(anulado.get("recaudoComoSaldoAFavorEfectivo").decimalValue()).isZero();
+        assertThat(anulado.get("totalExpectedCash").decimalValue()).isEqualByComparingTo(efectivoAntes.add(new BigDecimal("100000")));
     }
 
     @Test
@@ -387,7 +424,8 @@ class SaldoAFavorTest {
         vender(ventaACredito(TIENDA, "ins-venta", true))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.revisionPorInsolvencia").value(true))
-                .andExpect(jsonPath("$.saldoAFavorAplicado").value(0));
+                .andExpect(jsonPath("$.saldoAFavorAplicado").value(0))
+                .andExpect(jsonPath("$.saldoAFavorRestante").value(20000));
         // Vía 3: levantar la insolvencia no aplica nada en ese momento.
         JsonNode levantada = leer(mockMvc.perform(post("/api/cartera/clientes/" + TIENDA + "/insolvencia")
                         .header("Authorization", bearer(ADMIN, "admin")).contentType(MediaType.APPLICATION_JSON).content("{\"desde\":null}"))
@@ -454,6 +492,8 @@ class SaldoAFavorTest {
         JsonNode estado = estadoDeCuenta(TIENDA);
         assertThat(estado.get("aplicacionesARevisarPorInsolvencia")).hasSize(1);
         assertThat(estado.get("aplicacionesARevisarPorInsolvencia").get(0).get("monto").decimalValue()).isEqualByComparingTo("20000");
+        assertThat(estado.get("aplicacionesARevisarPorInsolvencia").get(0).get("idOrder").asLong()).as("el número de la venta")
+                .isEqualTo(dueno.queryForObject("SELECT id_order FROM orders WHERE tenant_id = ? AND idempotency_key = 'rev-venta'", Long.class, T));
         assertThat(saldoDeLaVenta("rev-venta")).as("no se deshace solo").isEqualByComparingTo("30000");
     }
 
@@ -513,7 +553,8 @@ class SaldoAFavorTest {
         abonarConSaldoAFavor("ctl-abono");
         vender(ventaACredito(VECINA, "ctl-venta", false))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.saldoAFavorAplicado").value(0));
+                .andExpect(jsonPath("$.saldoAFavorAplicado").value(0))
+                .andExpect(jsonPath("$.saldoAFavorRestante").value(0));
         assertThat(saldoDeLaVenta("ctl-venta")).isEqualByComparingTo("50000");
         assertThat(estadoDeCuenta(TIENDA).get("saldoAFavor").decimalValue()).isEqualByComparingTo("20000");
         assertThat(contar("SELECT count(*) FROM cartera_aplicaciones WHERE tenant_id = ? AND regla = 'SALDO_A_FAVOR_AUTOMATICO'", T)).isZero();
@@ -525,7 +566,8 @@ class SaldoAFavorTest {
         abonarConSaldoAFavor("cont-abono");
         vender(ventaACredito(TIENDA, "cont-venta", false).replace("\"CREDITO\"", "\"CASH\""))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.saldoAFavorAplicado").doesNotExist());
+                .andExpect(jsonPath("$.saldoAFavorAplicado").doesNotExist())
+                .andExpect(jsonPath("$.saldoAFavorRestante").doesNotExist());
         assertThat(estadoDeCuenta(TIENDA).get("saldoAFavor").decimalValue()).isEqualByComparingTo("20000");
     }
 }

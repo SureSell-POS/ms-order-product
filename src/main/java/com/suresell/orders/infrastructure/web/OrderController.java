@@ -117,6 +117,8 @@ public class OrderController {
         // F4.12 (aditivo): el saldo a favor del cliente que se aplicó solo a esta venta. null = la venta
         // no es a crédito; 0 = a crédito sin saldo a favor aplicado. La tirilla dice «Se aplicó $X de saldo a favor».
         body.put("saldoAFavorAplicado", created != null ? created.getSaldoAFavorAplicado() : null);
+        // F4.12 (aditivo): el saldo a favor que le queda al cliente, para «Saldo a favor restante: $Y». null = no es a crédito.
+        body.put("saldoAFavorRestante", created != null ? created.getSaldoAFavorRestante() : null);
         return ResponseEntity.status(HttpStatus.CREATED).body(body);
     }
     @PutMapping("/{orderId}")

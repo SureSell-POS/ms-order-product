@@ -168,6 +168,21 @@ public class AtribucionDeLaVenta {
     }
 
     /**
+     * V74 (F4.12): el saldo a favor que le queda al cliente de esta venta, leído ahora (en el reintento, el de ese momento).
+     */
+    public java.math.BigDecimal saldoAFavorRestante(String negocio, java.util.UUID venta) {
+        if (negocio == null || venta == null) {
+            return java.math.BigDecimal.ZERO;
+        }
+        return jdbc.queryForObject("""
+                SELECT COALESCE(sum(s.saldo_a_favor), 0)
+                  FROM v_saldo_a_favor_por_recibo s
+                 WHERE s.tenant_id = ?
+                   AND s.cliente_documento = (SELECT o.cliente_documento FROM orders o WHERE o.tenant_id = ? AND o.uuid_id = ?)""",
+                java.math.BigDecimal.class, negocio, negocio, venta);
+    }
+
+    /**
      * F4.3: a un cliente con la insolvencia ya cumplida (día de Bogotá) no se le
      * vende a crédito: 409 {@code CLIENTE_EN_INSOLVENCIA}, antes de escribir nada.
      * La base (V65) lo vuelve a comprobar.

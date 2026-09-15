@@ -25,6 +25,9 @@ import java.util.Map;
  * <p>{@code devolucionesSaldoAFavorEfectivo} (F4.12, aditivo): devoluciones de saldo a
  * favor pagadas en efectivo en el turno. YA están restadas del efectivo esperado; se
  * informan aparte porque no son gasto ni venta.
+ *
+ * <p>{@code recaudoComoSaldoAFavorEfectivo} (F4.12, aditivo): de {@code recaudoCarteraEfectivo}, la parte que quedó
+ * como saldo a favor. YA está dentro del recaudo y del efectivo esperado; es su línea propia.
  */
 public record CashierClosureResponse(
         String status,
@@ -36,5 +39,6 @@ public record CashierClosureResponse(
         Integer turno,
         BigDecimal vendidoACredito,
         BigDecimal recaudoCarteraEfectivo,
-        BigDecimal devolucionesSaldoAFavorEfectivo
+        BigDecimal devolucionesSaldoAFavorEfectivo,
+        BigDecimal recaudoComoSaldoAFavorEfectivo
 ) {}

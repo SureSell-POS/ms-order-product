@@ -26,6 +26,8 @@ import java.time.LocalDateTime;
  * {@code devolucionesSaldoAFavorEfectivo} (F4.12, aditivo): devoluciones de saldo a
  * favor pagadas en efectivo en el turno. YA están restadas de {@code totalExpectedCash}
  * y {@code totalExpected} (salieron del cajón); se informan aparte porque no son gasto.
+ * {@code recaudoComoSaldoAFavorEfectivo} (F4.12, aditivo): de {@code recaudoCarteraEfectivo}, la parte que quedó como
+ * saldo a favor del cliente. YA está dentro del recaudo y del efectivo esperado; es su línea propia, no se suma otra vez.
  * {@code previousBaseBalance} se conserva con el mismo valor que
  * {@code baseInicial} para los clientes que ya lo leían.
  */
@@ -46,5 +48,6 @@ public record ClosurePreviewResponse(
         BigDecimal baseSugerida,
         BigDecimal vendidoACredito,
         BigDecimal recaudoCarteraEfectivo,
-        BigDecimal devolucionesSaldoAFavorEfectivo) {
+        BigDecimal devolucionesSaldoAFavorEfectivo,
+        BigDecimal recaudoComoSaldoAFavorEfectivo) {
 }
