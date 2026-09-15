@@ -7,6 +7,10 @@ import java.util.Map;
 import java.util.Set;
 public interface ProductCatalogPort {
     Map<String, ProductResponse> findProductsByIds(Set<String> productIds);
-    List<MenuCategory> findAllCategoriesWithProducts();
+    /** Las categorías del negocio de la sesión, por nombre (F5.8e: filtro escrito). */
+    List<MenuCategory> findAllCategories();
+    /** Los productos del negocio de la sesión, por nombre (F5.8e: filtro escrito). */
     List<MenuProduct> findAllProducts();
+    /** Los productos del negocio de la sesión, por id (F5.8e: el orden de las categorías del POS, ver MenuCatalogHandler). */
+    List<MenuProduct> findAllProductsById();
 }

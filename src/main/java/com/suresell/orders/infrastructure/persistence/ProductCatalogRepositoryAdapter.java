@@ -28,11 +28,18 @@ public class ProductCatalogRepositoryAdapter implements ProductCatalogPort {
         return result;
     }
     @Override
-    public List<MenuCategory> findAllCategoriesWithProducts() {
-        return menuCategoryRepository.findAllWithProducts();
+    public List<MenuCategory> findAllCategories() {
+        String negocio = com.suresell.orders.multitenant.TenantContext.get();
+        return negocio == null ? List.of() : menuCategoryRepository.findDelNegocio(negocio);
+    }
+    @Override
+    public List<MenuProduct> findAllProductsById() {
+        String negocio = com.suresell.orders.multitenant.TenantContext.get();
+        return negocio == null ? List.of() : menuProductRepository.findDelNegocioPorId(negocio);
     }
     @Override
     public List<MenuProduct> findAllProducts() {
-        return menuProductRepository.findAllWithCategory();
+        String negocio = com.suresell.orders.multitenant.TenantContext.get();
+        return negocio == null ? List.of() : menuProductRepository.findAllWithCategory(negocio);
     }
 }

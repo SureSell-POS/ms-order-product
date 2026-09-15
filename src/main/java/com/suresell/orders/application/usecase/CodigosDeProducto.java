@@ -24,11 +24,11 @@ import java.util.Set;
  * productos, lo contrario eran 2.000 consultas para pintar una pantalla
  * ({@code costo-de-infra-al-minimo}).
  *
- * <h2>El aislamiento lo pone la base</h2>
+ * <h2>El aislamiento: filtro escrito y RLS</h2>
  *
- * Todas las consultas van sin {@code tenant_id} en el WHERE: la política RLS
- * de V51 filtra por {@code app.tenant_id}, y el INSERT toma el negocio del
- * DEFAULT de la columna. Igual que {@code ResolucionDePrecios} (V45).
+ * Las lecturas llevan {@code tenant_id = ?} escrito (F5.8e, regla «RLS no es
+ * lógica de negocio»); la política RLS de V51 sigue debajo. Sin negocio en la
+ * sesión no se lee nada. El INSERT toma el negocio del DEFAULT de la columna.
  *
  * <h2>Retirar no es borrar</h2>
  *
@@ -51,29 +51,37 @@ public class CodigosDeProducto {
     /** Los códigos vigentes del negocio, agrupados por producto. Una consulta. */
     public Map<String, List<CodigoDeProductoResponse>> vigentesPorProducto() {
         Map<String, List<CodigoDeProductoResponse>> porProducto = new LinkedHashMap<>();
+        String negocio = com.suresell.orders.multitenant.TenantContext.get();
+        if (negocio == null) {
+            return porProducto;
+        }
         jdbc.query("""
                 SELECT producto_id, codigo, cantidad, tipo
                   FROM public.codigos_de_producto
-                 WHERE retirado_en IS NULL
+                 WHERE tenant_id = ? AND retirado_en IS NULL
                  ORDER BY producto_id, creado_en""",
                 rs -> {
                     porProducto.computeIfAbsent(rs.getString("producto_id"), k -> new ArrayList<>())
                             .add(new CodigoDeProductoResponse(
                                     rs.getString("codigo"), rs.getBigDecimal("cantidad"), rs.getString("tipo")));
-                });
+                }, negocio);
         return porProducto;
     }
 
     /** Los códigos vigentes de un producto. */
     public List<CodigoDeProductoResponse> deProducto(String productoId) {
+        String negocio = com.suresell.orders.multitenant.TenantContext.get();
+        if (negocio == null) {
+            return List.of();
+        }
         return jdbc.query("""
                 SELECT codigo, cantidad, tipo
                   FROM public.codigos_de_producto
-                 WHERE producto_id = ? AND retirado_en IS NULL
+                 WHERE tenant_id = ? AND producto_id = ? AND retirado_en IS NULL
                  ORDER BY creado_en""",
                 (rs, i) -> new CodigoDeProductoResponse(
                         rs.getString("codigo"), rs.getBigDecimal("cantidad"), rs.getString("tipo")),
-                productoId);
+                negocio, productoId);
     }
 
     /**

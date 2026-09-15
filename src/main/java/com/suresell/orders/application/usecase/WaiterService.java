@@ -267,7 +267,9 @@ public class WaiterService {
     /** Menú anidado con los mismos nombres de campo del legacy (id/name/products). */
     @Transactional(readOnly = true)
     public List<MenuCategoryDto> getMenu() {
-        Map<String, List<MenuProduct>> byCategory = menuProductRepository.findAllWithCategory().stream()
+        // F5.8e: el mismo método del catálogo, ahora con el negocio escrito.
+        Map<String, List<MenuProduct>> byCategory = menuProductRepository.findAllWithCategory(
+                        com.suresell.orders.multitenant.TenantContext.get()).stream()
                 .filter(p -> p.getCategory() != null)
                 .collect(Collectors.groupingBy(p -> p.getCategory().getIdCategory(),
                         LinkedHashMap::new, Collectors.toList()));
@@ -275,7 +277,7 @@ public class WaiterService {
         // no garantiza ningún orden, y la app lo arreglaba reordenando con una
         // lista de nombres de un cliente ("hamburguesas primero…"). El orden es
         // del negocio, así que sale de sus datos y llega ya resuelto.
-        return menuCategoryRepository.findAllOrdenadas().stream()
+        return menuCategoryRepository.findAllOrdenadas(com.suresell.orders.multitenant.TenantContext.get()).stream()
                 .map(c -> new MenuCategoryDto(
                         c.getIdCategory(),
                         c.getNameCategory(),

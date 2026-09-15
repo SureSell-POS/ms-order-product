@@ -18,11 +18,28 @@ public class MenuCatalogHandler implements MenuCatalogPort {
     /** V51: los códigos se leen con UNA consulta para todo el catálogo y se adjuntan en memoria. */
     private final CodigosDeProducto codigosDeProducto;
     @Override
+    /**
+     * Las categorías del negocio por nombre (el orden de siempre) y, dentro de cada una, sus productos POR ID.
+     *
+     * <p>F5.8e: por {@code id_product} y no por nombre, a propósito (ECM, 2026-09-15). El POS pinta la cuadrícula en el
+     * orden en que llega, y SIN red la saca de Dexie, que la ordena por clave primaria ({@code idProduct}). Antes el
+     * servidor no fijaba ningún orden (la colección {@code @OneToMany} no tenía {@code @OrderBy}); con el id la caja ve
+     * lo mismo con red y sin red, sin inventar un criterio nuevo.
+     */
     public List<MenuCategoryResponse> getCategoriesWithProducts() {
         java.util.Map<String, List<com.suresell.orders.application.dto.CodigoDeProductoResponse>> codigos =
                 codigosDeProducto.vigentesPorProducto();
-        return productCatalogPort.findAllCategoriesWithProducts().stream()
-                .map(c -> toCategoryResponse(c, codigos))
+        java.util.Map<String, List<MenuProduct>> porCategoria = new java.util.HashMap<>();
+        for (MenuProduct p : productCatalogPort.findAllProductsById()) {
+            if (p.getCategory() != null) {
+                porCategoria.computeIfAbsent(p.getCategory().getIdCategory(), k -> new java.util.ArrayList<>()).add(p);
+            }
+        }
+        return productCatalogPort.findAllCategories().stream()
+                .map(c -> new MenuCategoryResponse(c.getIdCategory(), c.getNameCategory(),
+                        porCategoria.getOrDefault(c.getIdCategory(), List.of()).stream()
+                                .map(p -> toProductResponse(p, codigos))
+                                .toList()))
                 .toList();
     }
     @Override
@@ -36,16 +53,6 @@ public class MenuCatalogHandler implements MenuCatalogPort {
     @Override
     public void syncCatalog() {
         catalogSyncService.syncCatalogFromCloud();
-    }
-    private MenuCategoryResponse toCategoryResponse(
-            MenuCategory category,
-            java.util.Map<String, List<com.suresell.orders.application.dto.CodigoDeProductoResponse>> codigos) {
-        List<MenuProductResponse> products = category.getProducts() == null
-                ? List.of()
-                : category.getProducts().stream()
-                        .map(p -> toProductResponse(p, codigos))
-                        .toList();
-        return new MenuCategoryResponse(category.getIdCategory(), category.getNameCategory(), products);
     }
     private MenuProductResponse toProductResponse(
             MenuProduct product,

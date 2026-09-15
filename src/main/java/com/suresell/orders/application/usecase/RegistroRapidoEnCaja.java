@@ -193,21 +193,25 @@ public class RegistroRapidoEnCaja {
 
     /**
      * Los productos del negocio con {@code creado_en_caja_en}, lo más reciente
-     * primero, como mucho {@value #MAX_LISTA}. Solo lectura; RLS acota al
-     * negocio. Ni el core ni el catálogo del POS mapean esas columnas: sin
+     * primero, como mucho {@value #MAX_LISTA}. Solo lectura; el negocio va
+     * escrito en el WHERE (F5.8e) y RLS sigue debajo. Ni el core ni el catálogo del POS mapean esas columnas: sin
      * esto, el panel no tenía de dónde leerlas.
      */
     @Transactional(readOnly = true)
     public List<RegistradoEnCaja> registradosEnCaja() {
+        String negocio = com.suresell.orders.multitenant.TenantContext.get();
+        if (negocio == null) {
+            return List.of();
+        }
         return jdbc.query("""
                 SELECT id_product, name_product, creado_en_caja_por, creado_en_caja_en
                   FROM public.menu_products
-                 WHERE creado_en_caja_en IS NOT NULL
+                 WHERE tenant_id = ? AND creado_en_caja_en IS NOT NULL
                  ORDER BY creado_en_caja_en DESC, id_product
                  LIMIT ?""",
                 (rs, i) -> new RegistradoEnCaja(rs.getString(1), rs.getString(2), rs.getString(3),
                         rs.getObject(4, OffsetDateTime.class)),
-                MAX_LISTA);
+                negocio, MAX_LISTA);
     }
 
     // ------------------------------------------------------------------

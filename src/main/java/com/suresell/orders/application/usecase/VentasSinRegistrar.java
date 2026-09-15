@@ -42,6 +42,10 @@ public class VentasSinRegistrar {
     /** Lo vendido sin registrar en los últimos `dias` días, lo más reciente primero. */
     public List<Pendiente> pendientes(int dias) {
         int ventana = Math.max(1, Math.min(dias, 365));
+        String negocio = com.suresell.orders.multitenant.TenantContext.get();
+        if (negocio == null) {
+            return List.of();
+        }
         return jdbc.query("""
                 SELECT nombre, codigo, precio, count(*) AS veces,
                        max(created_at) AS ultima_venta, max(orden) AS ultima_orden
@@ -67,7 +71,7 @@ public class VentasSinRegistrar {
                         ON (o.uuid_id = oi.order_uuid_id
                             OR (oi.order_uuid_id IS NULL AND o.id_order = oi.order_id))
                        AND o.tenant_id = oi.tenant_id
-                     WHERE oi.product_id LIKE ?
+                     WHERE oi.tenant_id = ? AND oi.product_id LIKE ?
                        AND COALESCE(oi.created_at, o.created_at) >= now() - make_interval(days => ?)
                   ) lineas
                  -- Fuera lo que ya tiene dueño: si el código leído es hoy un código
@@ -100,7 +104,7 @@ public class VentasSinRegistrar {
                         rs.getLong("veces"),
                         rs.getObject("ultima_venta", OffsetDateTime.class),
                         rs.getObject("ultima_orden", Long.class)),
-                PREFIJO + "%", ventana);
+                negocio, PREFIJO + "%", ventana);
     }
 
     /** Para pintar «N sin registrar» sin traer la lista. */
