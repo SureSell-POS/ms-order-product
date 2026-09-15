@@ -59,6 +59,13 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * (F5.5a ya aplicado: la clave de intención ya es {@code venta-<uuid>}). Si una
  * diferencia es a propósito, se regraba copiando {@code build/la-venta-de-siempre.json.nuevo}
  * y se dice en el commit por qué; nunca en silencio.
+ *
+ * <p><b>La cadena, cubierta de punta a punta</b> (condición de ECM, 2026-09-15): esta
+ * misma prueba corrida sobre el commit ANTERIOR a F5.5a (49ade2e) contra este fichero
+ * dio 14 diferencias y solo esas, dos por cada una de las 7 ventas que se crean:
+ * {@code inventario_intenciones[0].idempotency_key} {@code orden-N → venta-<uuid>} y
+ * {@code clave_de_intencion_es_la_de_la_venta} {@code false → true}. Ninguna otra
+ * columna de orden, líneas, pagos, cocina, débito ni cuenta cambió con 5.5a.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @AutoConfigureMockMvc
