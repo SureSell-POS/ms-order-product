@@ -99,8 +99,22 @@ public class RegistroDeIntencionDeInventario {
         // La clave de idempotencia lleva la orden y nada más: una venta produce
         // UNA intención. Si el POS reenvía la orden, la orden ya rebota antes
         // por su propia idempotencia; si algo llegara hasta aquí dos veces, el
-        // índice único lo para.
-        String clave = "orden-" + orden.getIdOrder();
+        // índice único lo para (`ux_int_idempotencia`, y desde V70 también
+        // `ux_int_orden_uuid`: una intención por venta, sea cual sea la clave).
+        //
+        // 🔴 POR UUID, NO POR `id_order` (plan de mayoristas F5.5a). El número de
+        // orden vuelve a empezar en cada sede (`uq_orders_sede_consecutivo`, V28):
+        // en un negocio con dos sedes, «orden-7» de la segunda chocaba con la de la
+        // primera y se tomaba por repetida, y esa venta no descontaba inventario,
+        // sin aviso. Las intenciones ya escritas conservan su clave «orden-N».
+        if (orden.getUuidId() == null) {
+            // No pasa: `orders.uuid_id` es NOT NULL. Si pasara, la venta no cae por
+            // esto; queda a la vista como intención perdida, nunca con una clave
+            // inventada que pudiera chocar con otra venta.
+            log.error("[intencion-perdida] orden {} sin uuid: no se registra su intención de inventario", orden.getIdOrder());
+            return;
+        }
+        String clave = "venta-" + orden.getUuidId();
 
         // `ocurrido_en` de la orden si existe -- una venta tomada sin cobertura
         // trae la hora del dispositivo. Que el movimiento nazca con la fecha

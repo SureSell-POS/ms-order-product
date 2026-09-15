@@ -123,7 +123,7 @@ CREATE TABLE pedidos.pedidos (
     despachado_en           TIMESTAMPTZ NULL,
     entregado_en            TIMESTAMPTZ NULL,
     recibido_en             TIMESTAMPTZ NULL,
-    order_uuid              UUID        NULL,
+    -- La venta del despacho NO se copia aquí: se encuentra por public.orders.pedido_id (F5.5, una sola fuente).
     ocurrido_en             TIMESTAMPTZ NOT NULL,
     registrado_en           TIMESTAMPTZ NOT NULL DEFAULT now(),
     idempotency_key         TEXT        NOT NULL,
