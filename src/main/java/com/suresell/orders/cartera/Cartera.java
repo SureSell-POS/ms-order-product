@@ -239,6 +239,142 @@ public class Cartera {
         return r;
     }
 
+    /**
+     * GET /api/cartera/clientes/{documento}/comportamiento-de-pago (plan de mayoristas F10.3):
+     * cómo paga este cliente sus facturas, para el propio mayorista. Solo lectura, calculado
+     * al leer desde el mismo libro que el estado de cuenta.
+     *
+     * <ul>
+     *   <li>Una factura queda <b>pagada</b> el día (Bogotá) del recibo con el que sus
+     *       aplicaciones llegan a su monto. Lo de un recibo anulado no cuenta.</li>
+     *   <li><b>A tiempo</b>: pagada hasta su vencimiento. <b>Tarde</b>: pagada después. Una
+     *       vencida sin pagar también cuenta en contra. Las que no vencen todavía y las que
+     *       no tienen plazo pactado no entran en el porcentaje.</li>
+     *   <li>Sin facturas que midan, el porcentaje es {@code null} («sin dato»), nunca 0.</li>
+     *   <li>Un abono del panel viejo no dice qué factura pagó: se informa aparte como
+     *       {@code abonosSinFacturaAsignada}, porque con él las facturas parecen menos pagadas.</li>
+     * </ul>
+     */
+    public Map<String, Object> comportamientoDePago(Quien quien, String documento, LocalDate desde, LocalDate hasta) {
+        LocalDate hoy = LocalDate.now(BOGOTA);
+        LocalDate fin = hasta == null ? hoy : hasta;
+        LocalDate inicio = desde == null ? fin.minusDays(365) : desde;
+        if (inicio.isAfter(fin)) {
+            throw new DatoInvalidoException("desde", "«desde» no puede ser posterior a «hasta».");
+        }
+        Map<String, Object> cliente = resumenVisible(quien, documento);
+        String doc = (String) cliente.get("clienteDocumento");
+        List<Map<String, Object>> filas = jdbc.queryForList("""
+                WITH facturas AS (
+                    SELECT d.id, d.order_uuid, d.transaction_date AS fecha, d.vence_el, d.amount AS monto
+                      FROM debt_transactions d
+                      JOIN accounts_receivable ar ON ar.tenant_id = d.tenant_id AND ar.id = d.account_id
+                     WHERE d.tenant_id = ? AND ar.customer_document = ? AND d.type = 'DEBIT' AND d.recibo_id IS NULL
+                       AND d.transaction_date BETWEEN ? AND ?
+                ), abonos AS (
+                    SELECT f.id, f.monto, (r.ocurrido_en AT TIME ZONE 'America/Bogota')::date AS dia,
+                           sum(a.monto) OVER (PARTITION BY f.id ORDER BY r.ocurrido_en, r.numero, a.id) AS acumulado
+                      FROM facturas f
+                      JOIN cartera_aplicaciones a ON a.tenant_id = ? AND a.debito_tx_id = f.id
+                      JOIN recibos_de_caja r ON r.tenant_id = a.tenant_id AND r.id = a.recibo_id
+                     WHERE NOT EXISTS (SELECT 1 FROM recibos_de_caja x WHERE x.tenant_id = a.tenant_id AND x.anula_recibo_id = a.recibo_id)
+                ), pagadas AS (
+                    SELECT id, min(dia) AS pagada_el FROM abonos WHERE acumulado >= monto GROUP BY id
+                )
+                SELECT f.id, f.order_uuid, f.fecha, f.vence_el, f.monto, p.pagada_el
+                  FROM facturas f LEFT JOIN pagadas p ON p.id = f.id
+                 ORDER BY f.fecha DESC, f.id""", quien.negocio(), doc, java.sql.Date.valueOf(inicio), java.sql.Date.valueOf(fin),
+                quien.negocio());
+
+        int pagadas = 0;
+        int aTiempo = 0;
+        int tarde = 0;
+        int vencidasSinPagar = 0;
+        long diasDePago = 0;
+        long diasDeAtraso = 0;
+        Map<String, Integer> porEstado = new LinkedHashMap<>();
+        for (String e : List.of("PAGADA_A_TIEMPO", "PAGADA_TARDE", "PAGADA_SIN_PLAZO", "VENCIDA_SIN_PAGAR", "POR_VENCER", "SIN_PLAZO_PENDIENTE")) {
+            porEstado.put(e, 0);
+        }
+        List<Map<String, Object>> facturas = new ArrayList<>();
+        for (Map<String, Object> f : filas) {
+            LocalDate fecha = ((java.sql.Date) f.get("fecha")).toLocalDate();
+            LocalDate vence = f.get("vence_el") == null ? null : ((java.sql.Date) f.get("vence_el")).toLocalDate();
+            LocalDate pagada = f.get("pagada_el") == null ? null : ((java.sql.Date) f.get("pagada_el")).toLocalDate();
+            String estado;
+            Long diasParaPagar = null;
+            Long atraso = null;
+            if (pagada != null) {
+                pagadas++;
+                diasParaPagar = java.time.temporal.ChronoUnit.DAYS.between(fecha, pagada);
+                diasDePago += diasParaPagar;
+                if (vence == null) {
+                    estado = "PAGADA_SIN_PLAZO";
+                } else if (!pagada.isAfter(vence)) {
+                    estado = "PAGADA_A_TIEMPO";
+                    aTiempo++;
+                    atraso = 0L;
+                } else {
+                    estado = "PAGADA_TARDE";
+                    tarde++;
+                    atraso = java.time.temporal.ChronoUnit.DAYS.between(vence, pagada);
+                    diasDeAtraso += atraso;
+                }
+            } else if (vence == null) {
+                estado = "SIN_PLAZO_PENDIENTE";
+            } else if (hoy.isAfter(vence)) {
+                estado = "VENCIDA_SIN_PAGAR";
+                vencidasSinPagar++;
+                atraso = java.time.temporal.ChronoUnit.DAYS.between(vence, hoy);
+            } else {
+                estado = "POR_VENCER";
+            }
+            porEstado.merge(estado, 1, Integer::sum);
+            if (facturas.size() < MAX_FACTURAS_DEL_COMPORTAMIENTO) {
+                Map<String, Object> r = new LinkedHashMap<>();
+                r.put("orderUuid", f.get("order_uuid"));
+                r.put("fecha", fecha.toString());
+                r.put("venceEl", vence == null ? null : vence.toString());
+                r.put("monto", f.get("monto"));
+                r.put("pagadaEl", pagada == null ? null : pagada.toString());
+                r.put("diasParaPagar", diasParaPagar);
+                r.put("diasDeAtraso", atraso);
+                r.put("estado", estado);
+                facturas.add(r);
+            }
+        }
+        int medibles = aTiempo + tarde + vencidasSinPagar;
+        BigDecimal abonosSinAsignar = jdbc.queryForObject("""
+                SELECT COALESCE(sum(d.amount), 0)
+                  FROM debt_transactions d
+                  JOIN accounts_receivable ar ON ar.tenant_id = d.tenant_id AND ar.id = d.account_id
+                 WHERE d.tenant_id = ? AND ar.customer_document = ? AND d.type = 'CREDIT' AND d.recibo_id IS NULL
+                   AND d.transaction_date BETWEEN ? AND ?""", BigDecimal.class,
+                quien.negocio(), doc, java.sql.Date.valueOf(inicio), java.sql.Date.valueOf(fin));
+
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("clienteDocumento", doc);
+        r.put("nombre", cliente.get("nombre"));
+        r.put("desde", inicio.toString());
+        r.put("hasta", fin.toString());
+        r.put("facturas", filas.size());
+        r.put("pagadas", pagadas);
+        r.put("diasPromedioDePago", pagadas == 0 ? null
+                : BigDecimal.valueOf(diasDePago).divide(BigDecimal.valueOf(pagadas), 1, RoundingMode.HALF_UP));
+        r.put("porcentajeATiempo", medibles == 0 ? null
+                : BigDecimal.valueOf(aTiempo * 100L).divide(BigDecimal.valueOf(medibles), 1, RoundingMode.HALF_UP));
+        r.put("diasPromedioDeAtraso", tarde == 0 ? null
+                : BigDecimal.valueOf(diasDeAtraso).divide(BigDecimal.valueOf(tarde), 1, RoundingMode.HALF_UP));
+        r.put("porEstado", porEstado);
+        r.put("abonosSinFacturaAsignada", abonosSinAsignar);
+        r.put("detalle", facturas);
+        r.put("detalleCompleto", filas.size() <= MAX_FACTURAS_DEL_COMPORTAMIENTO);
+        return r;
+    }
+
+    /** Las más recientes primero; con más, el resumen sigue contando todas. */
+    static final int MAX_FACTURAS_DEL_COMPORTAMIENTO = 200;
+
     // ------------------------------------------------------------------ recibos
 
     public record Aplicacion(UUID orderUuid, BigDecimal monto) {}

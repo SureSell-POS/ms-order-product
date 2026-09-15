@@ -96,6 +96,26 @@ class CostoDeLaCarteraTest {
                   JOIN debt_transactions d ON d.tenant_id = v.tenant_id AND d.id = v.debito_tx_id
                  WHERE v.tenant_id = 'perf-a' AND v.account_id = 'perf-a-777' AND v.saldo > 0
                  ORDER BY v.fecha, d.created_at, v.debito_tx_id""");
+        CONSULTAS.put("comportamiento de pago de un cliente (F10.3)", """
+                WITH facturas AS (
+                    SELECT d.id, d.order_uuid, d.transaction_date AS fecha, d.vence_el, d.amount AS monto
+                      FROM debt_transactions d
+                      JOIN accounts_receivable ar ON ar.tenant_id = d.tenant_id AND ar.id = d.account_id
+                     WHERE d.tenant_id = 'perf-a' AND ar.customer_document = 'D777' AND d.type = 'DEBIT' AND d.recibo_id IS NULL
+                       AND d.transaction_date BETWEEN current_date - 365 AND current_date
+                ), abonos AS (
+                    SELECT f.id, f.monto, (r.ocurrido_en AT TIME ZONE 'America/Bogota')::date AS dia,
+                           sum(a.monto) OVER (PARTITION BY f.id ORDER BY r.ocurrido_en, r.numero, a.id) AS acumulado
+                      FROM facturas f
+                      JOIN cartera_aplicaciones a ON a.tenant_id = 'perf-a' AND a.debito_tx_id = f.id
+                      JOIN recibos_de_caja r ON r.tenant_id = a.tenant_id AND r.id = a.recibo_id
+                     WHERE NOT EXISTS (SELECT 1 FROM recibos_de_caja x WHERE x.tenant_id = a.tenant_id AND x.anula_recibo_id = a.recibo_id)
+                ), pagadas AS (
+                    SELECT id, min(dia) AS pagada_el FROM abonos WHERE acumulado >= monto GROUP BY id
+                )
+                SELECT f.id, f.order_uuid, f.fecha, f.vence_el, f.monto, p.pagada_el
+                  FROM facturas f LEFT JOIN pagadas p ON p.id = f.id
+                 ORDER BY f.fecha DESC, f.id""");
     }
 
     @Test

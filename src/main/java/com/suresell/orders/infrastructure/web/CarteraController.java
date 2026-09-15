@@ -61,6 +61,15 @@ public class CarteraController {
         return cartera.estadoDeCuenta(quien(http, ROLES_QUE_COBRAN, "ver la cartera"), documento, desde, hasta);
     }
 
+    @GetMapping("/clientes/{documento}/comportamiento-de-pago")
+    @Operation(summary = "F10.3 — Cómo paga el cliente: días promedio de pago por factura, % a tiempo, atraso; solo lectura")
+    public Map<String, Object> comportamientoDePago(@PathVariable String documento,
+                                                    @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate desde,
+                                                    @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate hasta,
+                                                    HttpServletRequest http) {
+        return cartera.comportamientoDePago(quien(http, ROLES_QUE_COBRAN, "ver la cartera"), documento, desde, hasta);
+    }
+
     @PostMapping("/recibos")
     @Operation(summary = "F4.4 — Registrar un abono: recibo con número, aplicado a la más antigua si no se eligen facturas. "
             + "201 nuevo; 200 si es el reintento de la misma clave")
