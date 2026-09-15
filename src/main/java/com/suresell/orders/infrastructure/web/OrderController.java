@@ -114,6 +114,9 @@ public class OrderController {
         // F4.11 (aditivo): true = la caja le vendió a crédito a un cliente ya en insolvencia;
         // la venta entró con su deuda y quedó por revisar en Cuentas por cobrar.
         body.put("revisionPorInsolvencia", created != null && Boolean.TRUE.equals(created.getRevisionPorInsolvencia()));
+        // F4.12 (aditivo): el saldo a favor del cliente que se aplicó solo a esta venta. null = la venta
+        // no es a crédito; 0 = a crédito sin saldo a favor aplicado. La tirilla dice «Se aplicó $X de saldo a favor».
+        body.put("saldoAFavorAplicado", created != null ? created.getSaldoAFavorAplicado() : null);
         return ResponseEntity.status(HttpStatus.CREATED).body(body);
     }
     @PutMapping("/{orderId}")

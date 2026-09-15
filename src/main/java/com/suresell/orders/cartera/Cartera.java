@@ -150,6 +150,8 @@ public class Cartera {
                   FROM v_cartera_por_documento d
                  WHERE d.tenant_id = ? AND d.cliente_documento = ?
                    AND (d.saldo > 0 OR d.fecha BETWEEN ? AND ?)
+                   -- F4.12: el DEBIT de una devolución de saldo a favor no es una factura.
+                   AND NOT EXISTS (SELECT 1 FROM egresos_de_cartera e WHERE e.tenant_id = d.tenant_id AND e.debito_tx_id = d.debito_tx_id)
                  ORDER BY d.fecha, d.debito_tx_id""",
                 quien.negocio(), cliente.get("clienteDocumento"), java.sql.Date.valueOf(inicio), java.sql.Date.valueOf(fin))
                 .stream().map(f -> {
@@ -184,6 +186,7 @@ public class Cartera {
         estado.put("hasta", fin.toString());
         estado.put("documentos", documentos);
         estado.put("recibos", recibos);
+        saldoAFavorDelCliente(quien.negocio(), (String) cliente.get("clienteDocumento"), inicio, fin, estado);
         estado.put("frase", frase(quien.negocio(), cliente, hoy));
         return estado;
     }
@@ -238,6 +241,10 @@ public class Cartera {
         r.put("clientesConSaldo", totales.get("clientes_con_saldo"));
         r.put("porEdad", porEdad);
         r.put("topDeudores", top);
+        // F4.12: lo que el negocio le debe a sus clientes (pasivo; no resta de lo que tiene por cobrar).
+        r.put("saldoAFavorDeClientes", jdbc.queryForObject(
+                "SELECT COALESCE(sum(saldo_a_favor), 0) FROM v_saldo_a_favor_por_recibo WHERE tenant_id = ?",
+                BigDecimal.class, quien.negocio()));
         // F4.11: el aviso del tablero. Ventas de caja a clientes en insolvencia sin decisión.
         r.put("ventasAInsolventePorRevisar", jdbc.queryForObject("""
                 SELECT count(*) FROM ventas_a_insolvente m
@@ -279,6 +286,7 @@ public class Cartera {
                       FROM debt_transactions d
                       JOIN accounts_receivable ar ON ar.tenant_id = d.tenant_id AND ar.id = d.account_id
                      WHERE d.tenant_id = ? AND ar.customer_document = ? AND d.type = 'DEBIT' AND d.recibo_id IS NULL
+                       AND NOT EXISTS (SELECT 1 FROM egresos_de_cartera e WHERE e.tenant_id = d.tenant_id AND e.debito_tx_id = d.id)
                        AND d.transaction_date BETWEEN ? AND ?
                 ), abonos AS (
                     SELECT f.id, f.monto, (r.ocurrido_en AT TIME ZONE 'America/Bogota')::date AS dia,
@@ -388,9 +396,21 @@ public class Cartera {
 
     public record Aplicacion(UUID orderUuid, BigDecimal monto) {}
 
+    /**
+     * {@code excedente} (F4.12, aditivo): {@code SALDO_A_FAVOR} = lo que pase de la deuda queda a favor
+     * del cliente. Sin él, un abono mayor que la deuda sigue siendo 400 {@code monto} con {@code maximo}.
+     */
     public record NuevoRecibo(String clienteDocumento, BigDecimal monto, String medio, String referenciaMedio,
                               List<Aplicacion> aplicaciones, OffsetDateTime ocurridoEn, String idempotencyKey,
-                              UUID liquidacionId, Long siteId) {}
+                              UUID liquidacionId, Long siteId, String excedente) {
+        public NuevoRecibo(String clienteDocumento, BigDecimal monto, String medio, String referenciaMedio,
+                           List<Aplicacion> aplicaciones, OffsetDateTime ocurridoEn, String idempotencyKey,
+                           UUID liquidacionId, Long siteId) {
+            this(clienteDocumento, monto, medio, referenciaMedio, aplicaciones, ocurridoEn, idempotencyKey, liquidacionId, siteId, null);
+        }
+    }
+
+    public static final String EXCEDENTE_A_FAVOR = "SALDO_A_FAVOR";
 
     /** Resultado de registrar: el recibo y si ya existía (reintento). */
     public record Registro(Map<String, Object> recibo, boolean repetido) {}
@@ -451,14 +471,23 @@ public class Cartera {
         BigDecimal deudaFacturas = vivas.stream().map(f -> decimal(f.get("saldo"))).reduce(BigDecimal.ZERO, BigDecimal::add);
         BigDecimal deudaLibro = saldoDelLibro(negocio, cuenta);
         BigDecimal debe = deudaFacturas.min(deudaLibro);
+        BigDecimal aAplicar = monto;
         if (monto.compareTo(debe) > 0) {
-            // Sin anticipos ni saldo a favor en esta fase (ECM, 2026-09-14): el libro dejaría de cuadrar con la vista.
             BigDecimal maximo = debe.max(BigDecimal.ZERO);
-            throw new com.suresell.orders.shared.exception.MontoPorEncimaDelMaximoException("monto", maximo,
-                    "El cliente debe " + pesos(maximo) + "; no se puede abonar más.");
+            // F4.12: la bifurcación. Sin la intención explícita, el 400 de siempre (un POS o panel que no la conoce
+            // no cambia); con SALDO_A_FAVOR, se aplica lo que debe y el resto queda a su favor.
+            if (!EXCEDENTE_A_FAVOR.equals(r.excedente() == null ? null : r.excedente().trim().toUpperCase(Locale.ROOT))) {
+                throw new com.suresell.orders.shared.exception.MontoPorEncimaDelMaximoException("monto", maximo,
+                        "El cliente debe " + pesos(maximo) + "; no se puede abonar más.");
+            }
+            if (r.aplicaciones() != null && !r.aplicaciones().isEmpty()) {
+                throw new DatoInvalidoException("aplicaciones",
+                        "Con saldo a favor, el abono se aplica solo a lo que debe: no se eligen facturas.");
+            }
+            aAplicar = maximo;
         }
 
-        List<Object[]> reparto = repartir(vivas, monto, r.aplicaciones());
+        List<Object[]> reparto = repartir(vivas, aAplicar, aAplicar.compareTo(monto) == 0 ? r.aplicaciones() : null);
         String regla = r.aplicaciones() == null || r.aplicaciones().isEmpty() ? MAS_ANTIGUA_PRIMERO : ELEGIDA_POR_USUARIO;
 
         Map<String, Object> nuevo = jdbc.queryForMap("""
@@ -571,6 +600,13 @@ public class Cartera {
         String documento = (String) original.get("cliente_documento");
         BigDecimal monto = decimal(original.get("monto"));
         String cuenta = cuentaBloqueada(negocio, documento).orElseThrow();
+        // F4.12: si parte de este recibo ya salió del negocio como devolución, anularlo dejaría el libro sin cuadrar.
+        if (Boolean.TRUE.equals(jdbc.queryForObject("""
+                SELECT EXISTS (SELECT 1 FROM cartera_aplicaciones WHERE tenant_id = ? AND recibo_id = ?
+                                  AND regla = 'DEVOLUCION_DE_SALDO_A_FAVOR')""", Boolean.class, negocio, reciboId))) {
+            throw new ConflictoDeCarteraException(ConflictoDeCarteraException.SALDO_A_FAVOR_YA_DEVUELTO,
+                    "Del recibo " + original.get("numero") + " ya se devolvió saldo a favor: no se anula.");
+        }
         LocalDate hoy = LocalDate.now(BOGOTA);
 
         Map<String, Object> anulacion = jdbc.queryForMap("""
@@ -592,6 +628,8 @@ public class Cartera {
         jdbc.update("""
                 UPDATE accounts_receivable SET total_debt = total_debt + ?, last_transaction_date = ?, updated_at = now()
                  WHERE tenant_id = ? AND id = ?""", monto, java.sql.Date.valueOf(hoy), negocio, cuenta);
+        // F4.12: la anulación pudo reabrir facturas; si el cliente tiene saldo a favor de otro recibo, se aplica ya.
+        aplicarSaldoAFavor(negocio, documento);
         return recibo(negocio, anulacionId, false).orElseThrow();
     }
 
@@ -636,6 +674,10 @@ public class Cartera {
         } else {
             r.put("anuladoPor", null);
         }
+        // F4.12: lo que de este recibo sigue a favor del cliente (0 si todo se aplicó o está anulado).
+        r.put("saldoAFavor", jdbc.queryForObject(
+                "SELECT COALESCE(sum(saldo_a_favor), 0) FROM v_saldo_a_favor_por_recibo WHERE tenant_id = ? AND recibo_id = ?",
+                BigDecimal.class, negocio, id));
         r.put("aplicaciones", jdbc.queryForList("""
                 SELECT d.order_uuid, a.debito_tx_id, a.monto, a.regla
                   FROM cartera_aplicaciones a
@@ -712,7 +754,190 @@ public class Cartera {
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("clienteDocumento", doc);
         r.put("enInsolvenciaDesde", desde == null ? null : desde.toString());
+        // F4.12: levantar la insolvencia NO aplica el saldo a favor (compensar en un proceso es ineficaz). Queda visible y
+        // la regla normal vuelve con la siguiente venta a crédito. Límite conocido (V74): levantar sin proceso terminado; F4.13.
         return r;
+    }
+
+    // ------------------------------------------------------------ saldo a favor (F4.12)
+
+    static final Set<String> MOTIVOS_DE_EGRESO = Set.of("CLIENTE_LO_PIDIO", "CIERRE_DE_CUENTA", "DEVUELTO_AL_PROCESO");
+
+    public record Devolucion(BigDecimal monto, String medio, String referenciaMedio, String motivo, String referencia,
+                             OffsetDateTime ocurridoEn, String idempotencyKey, Long siteId) {}
+
+    /** Aplica el saldo a favor del cliente a sus facturas vivas (V74). En insolvencia no cruza nada: compensar es ineficaz. */
+    BigDecimal aplicarSaldoAFavor(String negocio, String documento) {
+        return jdbc.queryForObject("SELECT fn_aplicar_saldo_a_favor(?, ?)",
+                BigDecimal.class, negocio, documento);
+    }
+
+    private Optional<LocalDate> insolventeDesde(String negocio, String documento) {
+        return jdbc.queryForList("""
+                SELECT en_insolvencia_desde FROM clientes WHERE tenant_id = ? AND documento = ?
+                   AND en_insolvencia_desde <= (now() AT TIME ZONE 'America/Bogota')::date""",
+                java.sql.Date.class, negocio, documento).stream().findFirst().map(java.sql.Date::toLocalDate);
+    }
+
+    private BigDecimal saldoAFavor(String negocio, String documento) {
+        return jdbc.queryForObject("""
+                SELECT COALESCE(sum(saldo_a_favor), 0) FROM v_saldo_a_favor_por_recibo
+                 WHERE tenant_id = ? AND cliente_documento = ?""", BigDecimal.class, negocio, documento);
+    }
+
+    /**
+     * En el estado de cuenta: el saldo a favor, si está sin cruzar por un proceso de insolvencia ({@code saldoAFavorCongelado}),
+     * los egresos del periodo y lo aplicado automáticamente desde la fecha de inicio del proceso hasta que se marcó: legalmente
+     * ineficaz, se lista y no se deshace aquí (revertirlo con rastro es F4.13).
+     */
+    private void saldoAFavorDelCliente(String negocio, String documento, LocalDate inicio, LocalDate fin, Map<String, Object> estado) {
+        Optional<LocalDate> insolvente = insolventeDesde(negocio, documento);
+        estado.put("saldoAFavor", saldoAFavor(negocio, documento));
+        estado.put("saldoAFavorCongelado", insolvente.isPresent());
+        estado.put("egresos", jdbc.queryForList("""
+                SELECT e.id, e.numero, e.monto, e.medio, e.motivo, e.referencia, e.pagado_por, u.nombre, e.ocurrido_en
+                  FROM egresos_de_cartera e LEFT JOIN users u ON u.tenant_id = e.tenant_id AND u.id = e.pagado_por
+                 WHERE e.tenant_id = ? AND e.cliente_documento = ?
+                   AND (e.ocurrido_en AT TIME ZONE 'America/Bogota')::date BETWEEN ? AND ?
+                 ORDER BY e.numero""", negocio, documento, java.sql.Date.valueOf(inicio), java.sql.Date.valueOf(fin))
+                .stream().map(Cartera::egreso).toList());
+        estado.put("aplicacionesARevisarPorInsolvencia", insolvente.map(desde -> jdbc.queryForList("""
+                SELECT a.id, r.numero AS recibo_numero, d.order_uuid, a.monto, a.ocurrido_en
+                  FROM cartera_aplicaciones a
+                  JOIN recibos_de_caja r ON r.tenant_id = a.tenant_id AND r.id = a.recibo_id
+                  JOIN debt_transactions d ON d.tenant_id = a.tenant_id AND d.id = a.debito_tx_id
+                 WHERE a.tenant_id = ? AND r.cliente_documento = ? AND a.regla = 'SALDO_A_FAVOR_AUTOMATICO'
+                   AND (a.ocurrido_en AT TIME ZONE 'America/Bogota')::date >= ?
+                 ORDER BY a.ocurrido_en""", negocio, documento, java.sql.Date.valueOf(desde)).stream().map(f -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", f.get("id"));
+            m.put("reciboNumero", f.get("recibo_numero"));
+            m.put("orderUuid", f.get("order_uuid"));
+            m.put("monto", f.get("monto"));
+            m.put("aplicadaEn", instante(f.get("ocurrido_en")));
+            return m;
+        }).toList()).orElse(List.of()));
+    }
+
+    private static Map<String, Object> egreso(Map<String, Object> f) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", f.get("id"));
+        m.put("numero", f.get("numero"));
+        m.put("monto", f.get("monto"));
+        m.put("medio", f.get("medio"));
+        m.put("motivo", f.get("motivo"));
+        m.put("referencia", f.get("referencia"));
+        m.put("pagadoPorId", f.get("pagado_por"));
+        m.put("pagadoPor", f.get("nombre"));
+        m.put("ocurridoEn", instante(f.get("ocurrido_en")));
+        return m;
+    }
+
+    /**
+     * POST /api/cartera/clientes/{documento}/saldo-a-favor/devolver (admin, cualquier medio; S26). Un egreso con número:
+     * DEBIT en el libro cubierto por aplicaciones DEVOLUCION_DE_SALDO_A_FAVOR desde los recibos con saldo, el más viejo
+     * primero. No más que el saldo a favor (400 {@code monto} con {@code maximo}). Procede también con la cuenta en proceso
+     * de insolvencia (concepto jurídico, ECM 2026-09-15). La referencia es obligatoria solo con DEVUELTO_AL_PROCESO.
+     * Beneficiario y forma de pago son de F4.13. Idempotente por clave.
+     */
+    @Transactional
+    public Registro devolverSaldoAFavor(Quien quien, String documento, Devolucion d) {
+        String negocio = quien.negocio();
+        String doc = obligatorio(documento, "clienteDocumento", NO_EXISTE);
+        if (d == null) {
+            throw new DatoInvalidoException("monto", "Falta la devolución.");
+        }
+        String clave = obligatorio(d.idempotencyKey(), "idempotencyKey", "Falta la clave de idempotencia.");
+        if (clave.length() > 100) {
+            throw new DatoInvalidoException("idempotencyKey", "La clave de idempotencia tiene máximo 100 caracteres.");
+        }
+        BigDecimal monto = montoValido(d.monto(), "monto");
+        String medio = d.medio() == null ? null : d.medio().trim().toUpperCase(Locale.ROOT);
+        if (medio == null || !MEDIOS.contains(medio)) {
+            throw new DatoInvalidoException("medio", "El medio es uno de: EFECTIVO, TRANSFERENCIA, BRE_B, QR, TARJETA, CHEQUE.");
+        }
+        String motivo = d.motivo() == null ? null : d.motivo().trim().toUpperCase(Locale.ROOT);
+        if (motivo == null || !MOTIVOS_DE_EGRESO.contains(motivo)) {
+            throw new DatoInvalidoException("motivo", "El motivo es uno de: CLIENTE_LO_PIDIO, CIERRE_DE_CUENTA, DEVUELTO_AL_PROCESO.");
+        }
+        String referencia = recortarONulo(d.referencia());
+        if (quien.usuarioId() == null) {
+            throw new DatoInvalidoException("usuario", "La sesión no tiene un usuario: la devolución necesita autor.");
+        }
+        OffsetDateTime ocurrido = d.ocurridoEn() == null ? OffsetDateTime.now(BOGOTA) : d.ocurridoEn();
+        if (ocurrido.toInstant().isAfter(Instant.now().plusSeconds(300))) {
+            throw new DatoInvalidoException("ocurridoEn", "La devolución no puede ser del futuro.");
+        }
+
+        jdbc.query("SELECT pg_advisory_xact_lock(hashtext(?))", rs -> null, "egreso:" + negocio + ":" + clave);
+        List<Map<String, Object>> previo = jdbc.queryForList(
+                "SELECT id, cliente_documento, monto, medio FROM egresos_de_cartera WHERE tenant_id = ? AND idempotency_key = ?",
+                negocio, clave);
+        if (!previo.isEmpty()) {
+            Map<String, Object> p = previo.get(0);
+            if (doc.equals(p.get("cliente_documento")) && decimal(p.get("monto")).compareTo(monto) == 0 && medio.equals(p.get("medio"))) {
+                return new Registro(egresoPorId(negocio, (UUID) p.get("id")), true);
+            }
+            throw new ConflictoDeCarteraException(ConflictoDeCarteraException.IDEMPOTENCIA_REUTILIZADA,
+                    "Esa clave de idempotencia ya se usó para otra devolución (cliente, monto o medio distintos). No se registró nada.");
+        }
+
+        fichaVisible(quien, doc);
+        if ("DEVUELTO_AL_PROCESO".equals(motivo) && referencia == null) {
+            throw new DatoInvalidoException("referencia", "Una devolución al proceso lleva la referencia de la autorización.");
+        }
+        String cuenta = cuentaBloqueada(negocio, doc)
+                .orElseThrow(() -> new DatoInvalidoException("clienteDocumento", "Ese cliente no tiene cuenta por cobrar."));
+        List<Map<String, Object>> recibos = jdbc.queryForList("""
+                SELECT recibo_id, credito_tx_id, saldo_a_favor FROM v_saldo_a_favor_por_recibo
+                 WHERE tenant_id = ? AND cliente_documento = ? ORDER BY ocurrido_en, numero""", negocio, doc);
+        BigDecimal disponible = recibos.stream().map(f -> decimal(f.get("saldo_a_favor"))).reduce(BigDecimal.ZERO, BigDecimal::add);
+        if (monto.compareTo(disponible) > 0) {
+            throw new com.suresell.orders.shared.exception.MontoPorEncimaDelMaximoException("monto", disponible,
+                    "El saldo a favor del cliente es " + pesos(disponible) + "; no se puede devolver más.");
+        }
+
+        String debito = UUID.randomUUID().toString();
+        LocalDate dia = ocurrido.atZoneSameInstant(BOGOTA).toLocalDate();
+        // El DEBIT primero: el egreso lo referencia y la tabla solo anexa (no hay UPDATE para enlazarlos después).
+        jdbc.update("""
+                INSERT INTO debt_transactions (id, tenant_id, account_id, amount, created_at, description, payment_method,
+                                               reference, transaction_date, type, registrado_por)
+                VALUES (?, ?, ?, ?, now(), 'Devolucion de saldo a favor', NULL, NULL, ?, 'DEBIT', ?)""",
+                debito, negocio, cuenta, monto, java.sql.Date.valueOf(dia), autorDelLibro(quien));
+        UUID egresoId = jdbc.queryForObject("""
+                INSERT INTO egresos_de_cartera (tenant_id, numero, cliente_documento, monto, medio, referencia_medio, motivo,
+                                                referencia, debito_tx_id, pagado_por, site_id, ocurrido_en, idempotency_key)
+                VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING id""", UUID.class, negocio, doc, monto, medio, recortarONulo(d.referenciaMedio()), motivo, referencia,
+                debito, quien.usuarioId(), d.siteId(), Timestamp.from(ocurrido.toInstant()), clave);
+        BigDecimal falta = monto;
+        for (Map<String, Object> f : recibos) {
+            if (falta.signum() <= 0) {
+                break;
+            }
+            BigDecimal parte = falta.min(decimal(f.get("saldo_a_favor")));
+            jdbc.update("""
+                    INSERT INTO cartera_aplicaciones (tenant_id, recibo_id, credito_tx_id, debito_tx_id, monto, regla, usuario_id)
+                    VALUES (?, ?, ?, ?, ?, 'DEVOLUCION_DE_SALDO_A_FAVOR', ?)""",
+                    negocio, f.get("recibo_id"), f.get("credito_tx_id"), debito, parte, quien.usuarioId());
+            falta = falta.subtract(parte);
+        }
+        jdbc.update("""
+                UPDATE accounts_receivable SET total_debt = total_debt + ?, last_transaction_date = ?, updated_at = now()
+                 WHERE tenant_id = ? AND id = ?""", monto, java.sql.Date.valueOf(LocalDate.now(BOGOTA)), negocio, cuenta);
+        return new Registro(egresoPorId(negocio, egresoId), false);
+    }
+
+    private Map<String, Object> egresoPorId(String negocio, UUID id) {
+        Map<String, Object> e = egreso(jdbc.queryForMap("""
+                SELECT e.id, e.numero, e.monto, e.medio, e.motivo, e.referencia, e.pagado_por, u.nombre, e.ocurrido_en,
+                       e.cliente_documento
+                  FROM egresos_de_cartera e LEFT JOIN users u ON u.tenant_id = e.tenant_id AND u.id = e.pagado_por
+                 WHERE e.tenant_id = ? AND e.id = ?""", negocio, id));
+        e.put("saldoAFavorQueda", saldoAFavor(negocio, (String) jdbc.queryForObject(
+                "SELECT cliente_documento FROM egresos_de_cartera WHERE tenant_id = ? AND id = ?", String.class, negocio, id)));
+        return e;
     }
 
     // ------------------------------------------------------------ política de crédito (F5.4)

@@ -22,6 +22,10 @@ import org.springframework.stereotype.Component;
  *       extremos incluidos, como las ventas).</li>
  *   <li>Por negocio y no por sede: el cierre de caja es por negocio y turno (V55).</li>
  * </ul>
+ *
+ * <p>F4.12: la devolución de saldo a favor en efectivo SALE del cajón. Se informa
+ * aparte ({@link #devolucionesDeSaldoAFavorEnEfectivoEntre}) y resta del efectivo
+ * esperado, con la misma ventana. Un egreso no se anula (la tabla solo anexa).
  */
 @Component
 @Profile("cloud")
@@ -46,6 +50,20 @@ public class RecaudoEnCaja {
                    AND COALESCE(o.liquidacion_id, r.liquidacion_id) IS NULL
                    AND r.registrado_en >= (?::timestamp AT TIME ZONE 'America/Bogota')
                    AND r.registrado_en <= (?::timestamp AT TIME ZONE 'America/Bogota')""",
+                BigDecimal.class, negocio, Timestamp.valueOf(desde), Timestamp.valueOf(hasta));
+    }
+
+    public BigDecimal devolucionesDeSaldoAFavorEnEfectivoEntre(String negocio, LocalDateTime desde, LocalDateTime hasta) {
+        if (negocio == null || desde == null || hasta == null) {
+            return BigDecimal.ZERO;
+        }
+        return jdbc.queryForObject("""
+                SELECT COALESCE(sum(e.monto), 0)
+                  FROM egresos_de_cartera e
+                 WHERE e.tenant_id = ?
+                   AND e.medio = 'EFECTIVO'
+                   AND e.registrado_en >= (?::timestamp AT TIME ZONE 'America/Bogota')
+                   AND e.registrado_en <= (?::timestamp AT TIME ZONE 'America/Bogota')""",
                 BigDecimal.class, negocio, Timestamp.valueOf(desde), Timestamp.valueOf(hasta));
     }
 }

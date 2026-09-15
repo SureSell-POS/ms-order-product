@@ -21,6 +21,10 @@ import java.util.Map;
  * <p>{@code recaudoCarteraEfectivo} (F4.5, aditivo): abonos de cartera en efectivo
  * del turno (menos sus anulaciones). YA está sumado al efectivo esperado; se
  * informa aparte porque no es venta.
+ *
+ * <p>{@code devolucionesSaldoAFavorEfectivo} (F4.12, aditivo): devoluciones de saldo a
+ * favor pagadas en efectivo en el turno. YA están restadas del efectivo esperado; se
+ * informan aparte porque no son gasto ni venta.
  */
 public record CashierClosureResponse(
         String status,
@@ -31,5 +35,6 @@ public record CashierClosureResponse(
         BigDecimal roundingAdjustment,
         Integer turno,
         BigDecimal vendidoACredito,
-        BigDecimal recaudoCarteraEfectivo
+        BigDecimal recaudoCarteraEfectivo,
+        BigDecimal devolucionesSaldoAFavorEfectivo
 ) {}

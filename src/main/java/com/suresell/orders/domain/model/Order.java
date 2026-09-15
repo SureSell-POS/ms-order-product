@@ -228,6 +228,14 @@ public class Order implements org.springframework.data.domain.Persistable<java.u
     @com.fasterxml.jackson.annotation.JsonIgnore
     private Boolean revisionPorInsolvencia;
 
+    /**
+     * V74 (F4.12) — saldo a favor del cliente que se aplicó solo a esta venta a crédito.
+     * No es columna: se lee de {@code cartera_aplicaciones} para la respuesta de crear orden.
+     */
+    @Transient
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private BigDecimal saldoAFavorAplicado;
+
     @Column(name = "total_discrepancia")
     private BigDecimal totalDiscrepancia;
 

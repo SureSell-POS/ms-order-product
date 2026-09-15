@@ -115,6 +115,17 @@ public class CarteraController {
                 cuerpo == null ? null : cuerpo.desde());
     }
 
+    @PostMapping("/clientes/{documento}/saldo-a-favor/devolver")
+    @Operation(summary = "F4.12 — Devolver saldo a favor al cliente (solo admin, cualquier medio): egreso con número. "
+            + "201 nuevo; 200 si es el reintento de la misma clave. A un cliente en insolvencia, solo DEVUELTO_AL_PROCESO con referencia")
+    public ResponseEntity<Map<String, Object>> devolverSaldoAFavor(@PathVariable String documento,
+                                                                   @RequestBody Cartera.Devolucion cuerpo,
+                                                                   HttpServletRequest http) {
+        Cartera.Registro registro = cartera.devolverSaldoAFavor(
+                quien(http, Set.of("admin"), "devolver saldo a favor"), documento, cuerpo);
+        return ResponseEntity.status(registro.repetido() ? HttpStatus.OK : HttpStatus.CREATED).body(registro.recibo());
+    }
+
     @GetMapping("/resumen")
     @Operation(summary = "F4.4 — Por cobrar, vencido por edad y los que más deben (solo admin)")
     public Map<String, Object> resumen(HttpServletRequest http) {

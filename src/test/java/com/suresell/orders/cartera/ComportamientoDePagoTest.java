@@ -214,7 +214,11 @@ class ComportamientoDePagoTest {
         assertThat(segunda.get("diasParaPagar").asInt()).isEqualTo(20);
         assertThat(segunda.get("diasDeAtraso").asInt()).isEqualTo(10);
         assertThat(tercera.get("estado").asText()).as("el recibo anulado no paga").isEqualTo("VENCIDA_SIN_PAGAR");
-        assertThat(tercera.get("diasDeAtraso").asInt()).isEqualTo(40);
+        // El «hoy» del servidor es el `hasta` de la respuesta: si la prueba cruza la medianoche de Bogotá entre sembrar y
+        // preguntar, el atraso sube un día y es correcto (fallaba una vez al día comparando con el `hoy` de la prueba).
+        long corrimiento = java.time.temporal.ChronoUnit.DAYS.between(hoy, LocalDate.parse(c.get("hasta").asText()));
+        assertThat(corrimiento).as("el servidor no puede ir por detrás ni más de un día por delante").isBetween(0L, 1L);
+        assertThat(tercera.get("diasDeAtraso").asInt()).isEqualTo(40 + (int) corrimiento);
 
         // Con la ventana ampliada entra F6, pagada a tiempo.
         comportamiento(ADMIN, "admin", TIENDA, "desde", hoy.minusDays(500).toString()).andExpect(status().isOk())

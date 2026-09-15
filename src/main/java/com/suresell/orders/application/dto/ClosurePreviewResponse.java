@@ -23,6 +23,9 @@ import java.time.LocalDateTime;
  * {@code recaudoCarteraEfectivo} (F4.5, aditivo): abonos de cartera en efectivo
  * del turno, menos sus anulaciones. YA está sumado en {@code totalExpectedCash} y
  * {@code totalExpected} (está en el cajón), y se informa aparte porque no es venta.
+ * {@code devolucionesSaldoAFavorEfectivo} (F4.12, aditivo): devoluciones de saldo a
+ * favor pagadas en efectivo en el turno. YA están restadas de {@code totalExpectedCash}
+ * y {@code totalExpected} (salieron del cajón); se informan aparte porque no son gasto.
  * {@code previousBaseBalance} se conserva con el mismo valor que
  * {@code baseInicial} para los clientes que ya lo leían.
  */
@@ -42,5 +45,6 @@ public record ClosurePreviewResponse(
         BigDecimal baseInicial,
         BigDecimal baseSugerida,
         BigDecimal vendidoACredito,
-        BigDecimal recaudoCarteraEfectivo) {
+        BigDecimal recaudoCarteraEfectivo,
+        BigDecimal devolucionesSaldoAFavorEfectivo) {
 }

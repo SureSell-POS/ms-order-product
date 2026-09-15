@@ -71,6 +71,12 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * {@code orders[0].plazo_dias} que aparece con {@code null} (la columna nace en V71 y solo
  * la llena la venta de un pedido). Quitando esa clave, el resultado es idéntico al fichero
  * anterior; comprobado al regrabar.
+ *
+ * <p><b>Forma 9 con F4.12 (V74), a propósito:</b> «venta a crédito de un cliente con saldo a favor». El cliente
+ * {@code 901} tiene un recibo de 20.000 con su CREDIT sin aplicar; la venta de 30.000 aplica esos 20.000 solos y
+ * queda debiendo 10.000. Sus claves extra ({@code saldo_a_favor_aplicado}, {@code saldo_de_la_factura},
+ * {@code cuenta_del_cliente_901}) existen SOLO en esa forma, para que las 8 anteriores no cambien. Al regrabar, las
+ * formas 1 a 8 son idénticas al fichero anterior, comparadas clave a clave: la única diferencia es la forma 9 entera.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @AutoConfigureMockMvc
@@ -131,7 +137,7 @@ class LaVentaDeSiempreTest {
     }
 
     @Test
-    @DisplayName("🔴 F5.5: ocho ventas normales dejan exactamente lo mismo que antes de que el despacho cree ventas")
+    @DisplayName("🔴 F5.5: ocho ventas normales dejan exactamente lo mismo que antes de que el despacho cree ventas (y la 9, F4.12)")
     void laVentaDeSiempre() throws Exception {
         sembrar();
         Map<String, String> formas = new LinkedHashMap<>();
@@ -156,6 +162,9 @@ class LaVentaDeSiempreTest {
         formas.put("8-pos-que-intenta-hacerse-pasar-por-pedido",
                 "{\"pagerColor\":\"MESA\",\"pagerNumber\":\"8\",\"paymentMethod\":\"CASH\",\"origen\":\"pedido\",\"pedidoId\":\"" + UUID.randomUUID()
                         + "\",\"siteId\":999,\"items\":[" + item("oro-hamburguesa", 1, 1) + "],\"idempotencyKey\":\"oro-8\"}");
+        formas.put("9-pos-credito-de-un-cliente-con-saldo-a-favor",
+                "{\"pagerColor\":\"MESA\",\"pagerNumber\":\"9\",\"paymentMethod\":\"CREDITO\",\"clienteDocumento\":\"901\",\"items\":["
+                        + item("oro-gaseosa", 10, 3000) + "],\"idempotencyKey\":\"oro-9\"}");
 
         ObjectNode resultado = json.createObjectNode();
         for (Map.Entry<String, String> forma : formas.entrySet()) {
@@ -201,6 +210,14 @@ class LaVentaDeSiempreTest {
         dueno.update("INSERT INTO listas_precio_items (tenant_id, lista_id, producto_id, cantidad_minima, precio, usuario_id, fuente, confianza, vigente_desde) "
                 + "VALUES (?, ?, 'oro-gaseosa', 1, 2500, 's', 'declarado_comerciante', 1, now() - interval '30 days')", T, lista);
         dueno.update("INSERT INTO clientes (tenant_id, documento, nombre, plazo_dias, lista_precio_id, creado_por) VALUES (?, '900', 'Tienda', 8, ?, 's')", T, lista);
+        // Forma 9 (F4.12): el cliente 901, sin lista, con 20.000 a su favor de un recibo sin aplicar.
+        dueno.update("INSERT INTO clientes (tenant_id, documento, nombre, plazo_dias, creado_por) VALUES (?, '901', 'Tienda con saldo a favor', 8, 's')", T);
+        dueno.update("INSERT INTO accounts_receivable (id, tenant_id, created_at, credit_limit, customer_document, customer_name, status, total_debt, updated_at) "
+                + "VALUES ('oro-cuenta-901', ?, now(), 1000000, '901', 'Tienda con saldo a favor', 'ACTIVE', -20000, now())", T);
+        UUID recibo = dueno.queryForObject("INSERT INTO recibos_de_caja (tenant_id, numero, cliente_documento, monto, medio, ocurrido_en, idempotency_key) "
+                + "VALUES (?, 0, '901', 20000, 'EFECTIVO', now(), 'oro-anticipo') RETURNING id", UUID.class, T);
+        dueno.update("INSERT INTO debt_transactions (id, tenant_id, account_id, amount, created_at, description, transaction_date, type, recibo_id) "
+                + "VALUES ('oro-credito-901', ?, 'oro-cuenta-901', 20000, now(), 'Abono, recibo 1', (now() AT TIME ZONE 'America/Bogota')::date, 'CREDIT', ?)", T, recibo);
     }
 
     /** Todo lo que dejó una venta, normalizado. */
@@ -229,6 +246,16 @@ class LaVentaDeSiempreTest {
         r.set("cuenta_del_cliente", filas("SELECT jsonb_build_object('credit_limit', credit_limit, 'total_debt', total_debt, 'status', status) AS j "
                 + "FROM accounts_receivable WHERE tenant_id = ? AND customer_document = '900'", T, hoy));
         r.put("creada_por", dueno.queryForObject("SELECT u.email FROM orders o LEFT JOIN users u ON u.id = o.created_by WHERE o.uuid_id = ?", String.class, uuid));
+        if (clave.equals("oro-9")) {
+            // Solo en la forma 9: las 8 anteriores no llevan estas claves.
+            r.put("saldo_a_favor_aplicado", dueno.queryForObject("SELECT COALESCE(sum(a.monto), 0) FROM cartera_aplicaciones a "
+                    + "JOIN debt_transactions d ON d.id = a.debito_tx_id WHERE d.order_uuid = ? AND a.regla = 'SALDO_A_FAVOR_AUTOMATICO'",
+                    java.math.BigDecimal.class, uuid));
+            r.put("saldo_de_la_factura", dueno.queryForObject("SELECT saldo FROM v_cartera_por_documento WHERE order_uuid = ?",
+                    java.math.BigDecimal.class, uuid));
+            r.set("cuenta_del_cliente_901", filas("SELECT jsonb_build_object('credit_limit', credit_limit, 'total_debt', total_debt, 'status', status) AS j "
+                    + "FROM accounts_receivable WHERE tenant_id = ? AND customer_document = '901'", T, hoy));
+        }
         return r;
     }
 

@@ -152,6 +152,22 @@ public class AtribucionDeLaVenta {
     }
 
     /**
+     * V74 (F4.12): cuánto saldo a favor del cliente se aplicó solo a la deuda de esta venta. Lo
+     * aplica el disparador al insertar la venta (regla SALDO_A_FAVOR_AUTOMATICO); aquí solo se lee.
+     */
+    public java.math.BigDecimal saldoAFavorAplicado(String negocio, java.util.UUID venta) {
+        if (negocio == null || venta == null) {
+            return java.math.BigDecimal.ZERO;
+        }
+        return jdbc.queryForObject("""
+                SELECT COALESCE(sum(a.monto), 0)
+                  FROM cartera_aplicaciones a
+                  JOIN debt_transactions d ON d.tenant_id = a.tenant_id AND d.id = a.debito_tx_id
+                 WHERE a.tenant_id = ? AND d.order_uuid = ? AND d.type = 'DEBIT'
+                   AND a.regla = 'SALDO_A_FAVOR_AUTOMATICO'""", java.math.BigDecimal.class, negocio, venta);
+    }
+
+    /**
      * F4.3: a un cliente con la insolvencia ya cumplida (día de Bogotá) no se le
      * vende a crédito: 409 {@code CLIENTE_EN_INSOLVENCIA}, antes de escribir nada.
      * La base (V65) lo vuelve a comprobar.

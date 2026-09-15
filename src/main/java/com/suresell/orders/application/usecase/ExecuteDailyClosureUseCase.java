@@ -207,8 +207,13 @@ public class ExecuteDailyClosureUseCase {
         BigDecimal recaudoCartera = recaudoEnCaja
                 .map(r -> r.efectivoEntre(com.suresell.orders.multitenant.TenantContext.get(), openingTime, closingTime))
                 .orElse(BigDecimal.ZERO);
+        // F4.12: la devolución de saldo a favor en efectivo salió del cajón.
+        BigDecimal devolucionesSaldoAFavor = recaudoEnCaja
+                .map(r -> r.devolucionesDeSaldoAFavorEnEfectivoEntre(com.suresell.orders.multitenant.TenantContext.get(), openingTime, closingTime))
+                .orElse(BigDecimal.ZERO);
         BigDecimal trueExpectedCash = salesCash.add(previousBase).subtract(totalPettyCashExpenses)
-                .add(recaudoCartera); // Ventas + Base Inicial - Gastos Menores + Recaudo de cartera en efectivo
+                .add(recaudoCartera) // Ventas + Base Inicial - Gastos Menores + Recaudo de cartera en efectivo
+                .subtract(devolucionesSaldoAFavor); // - Devoluciones de saldo a favor en efectivo
 
         expected.put("CASH", trueExpectedCash);
 
@@ -277,7 +282,8 @@ public class ExecuteDailyClosureUseCase {
                 turno,
                 // F1.13: informativo; `expected` lo trae del GROUP BY y no entra en pureSales ni en caja.
                 expected.getOrDefault("CREDITO", BigDecimal.ZERO),
-                recaudoCartera
+                recaudoCartera,
+                devolucionesSaldoAFavor
         );
     }
 

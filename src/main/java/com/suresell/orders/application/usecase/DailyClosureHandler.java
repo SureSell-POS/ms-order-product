@@ -109,7 +109,11 @@ implements DailyClosurePort {
         BigDecimal recaudoCartera = recaudoEnCaja
                 .map(r -> r.efectivoEntre(com.suresell.orders.multitenant.TenantContext.get(), ventanaDesde, endOfDay))
                 .orElse(BigDecimal.ZERO);
-        totalCash = totalCash.add(recaudoCartera);
+        // F4.12: la devolución de saldo a favor en efectivo salió del cajón.
+        BigDecimal devolucionesSaldoAFavor = recaudoEnCaja
+                .map(r -> r.devolucionesDeSaldoAFavorEnEfectivoEntre(com.suresell.orders.multitenant.TenantContext.get(), ventanaDesde, endOfDay))
+                .orElse(BigDecimal.ZERO);
+        totalCash = totalCash.add(recaudoCartera).subtract(devolucionesSaldoAFavor);
         BigDecimal totalExpected = totalCash.add(totalCard).add(totalQr);
         LocalDateTime currentTime = LocalDateTime.now(BOGOTA_ZONE);
         // "Turno iniciado" en la pantalla del POS. Antes era la hora de la
@@ -134,7 +138,8 @@ implements DailyClosurePort {
                 baseBalance,
                 baseSugerida,
                 vendidoACredito,
-                recaudoCartera);
+                recaudoCartera,
+                devolucionesSaldoAFavor);
     }
     @Transactional
     public ClosureResponse executeClosure(ClosureRequest request) {
