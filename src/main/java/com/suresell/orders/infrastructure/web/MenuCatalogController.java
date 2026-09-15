@@ -18,17 +18,29 @@ public class MenuCatalogController {
     private final com.suresell.orders.multitenant.JwtTenantResolver jwt;
     private final com.suresell.orders.application.usecase.VentasSinRegistrar ventasSinRegistrar;
     private final com.suresell.orders.application.usecase.RegistroRapidoEnCaja registroRapido;
+    private final com.suresell.orders.application.usecase.BusquedaDeProductos busqueda;
 
     public MenuCatalogController(MenuCatalogPort menuCatalogPort,
                                  com.suresell.orders.application.usecase.CodigosDeProducto codigosDeProducto,
                                  com.suresell.orders.multitenant.JwtTenantResolver jwt,
                                  com.suresell.orders.application.usecase.VentasSinRegistrar ventasSinRegistrar,
-                                 com.suresell.orders.application.usecase.RegistroRapidoEnCaja registroRapido) {
+                                 com.suresell.orders.application.usecase.RegistroRapidoEnCaja registroRapido,
+                                 com.suresell.orders.application.usecase.BusquedaDeProductos busqueda) {
         this.menuCatalogPort = menuCatalogPort;
         this.codigosDeProducto = codigosDeProducto;
         this.jwt = jwt;
         this.ventasSinRegistrar = ventasSinRegistrar;
         this.registroRapido = registroRapido;
+        this.busqueda = busqueda;
+    }
+
+    /** F5.8e: buscar productos activos del negocio por código (exacto o prefijo) o nombre, sin tildes; sin precio. */
+    @GetMapping("/products/buscar")
+    @Operation(summary = "F5.8e — Buscar productos activos por código o nombre (q de 3+ caracteres; limit 20 por defecto, máx. 50). Sin precio")
+    public List<com.suresell.orders.application.usecase.BusquedaDeProductos.Encontrado> buscar(
+            @org.springframework.web.bind.annotation.RequestParam(value = "q", required = false) String q,
+            @org.springframework.web.bind.annotation.RequestParam(value = "limit", required = false) Integer limit) {
+        return busqueda.buscar(q, limit);
     }
 
     /**
