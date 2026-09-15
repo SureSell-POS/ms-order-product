@@ -16,6 +16,7 @@ import org.springframework.http.HttpStatus;
  *   <li>403 {@code SIN_USUARIO}: el token no corresponde a un usuario del negocio; el rastro no admite autor desconocido.</li>
  *   <li>400 {@code SIN_PRECIO} (F5.3f): una línea con cantidad tiene precio 0; lleva {@code productoId}.</li>
  *   <li>409 {@code VENTA_EN_CERO} (F5.3f): el despacho daría una venta de $0; no se crea venta ni deuda.</li>
+ *   <li>400 {@code PRODUCTO_INACTIVO} (F5.3g): una línea con cantidad es de un producto inactivo; lleva {@code productoId}.</li>
  * </ul>
  */
 public class PedidoRechazadoException extends RuntimeException {
@@ -28,6 +29,7 @@ public class PedidoRechazadoException extends RuntimeException {
     public static final String SIN_USUARIO = "SIN_USUARIO";
     public static final String SIN_PRECIO = "SIN_PRECIO";
     public static final String VENTA_EN_CERO = "VENTA_EN_CERO";
+    public static final String PRODUCTO_INACTIVO = "PRODUCTO_INACTIVO";
 
     private final HttpStatus estado;
     private final String codigo;
@@ -44,7 +46,7 @@ public class PedidoRechazadoException extends RuntimeException {
         this.productoId = productoId;
     }
 
-    /** El producto sin precio (solo en {@code SIN_PRECIO}); null en los demás. */
+    /** El producto de la línea rechazada ({@code SIN_PRECIO}, {@code PRODUCTO_INACTIVO}); null en los demás. */
     public String productoId() {
         return productoId;
     }

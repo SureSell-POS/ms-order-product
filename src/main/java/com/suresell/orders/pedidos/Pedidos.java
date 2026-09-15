@@ -209,7 +209,7 @@ public class Pedidos {
                 documento, origen, modalidad, vendedorFinal, cuerpo.siteId(),
                 cuerpo.entregaEl() == null ? null : java.sql.Date.valueOf(cuerpo.entregaEl()),
                 aJson(paraLaFuncion), Timestamp.from(ocurrido.toInstant()), clave));
-        exigirPrecios(quien.negocio(), id);
+        exigirActivosYConPrecio(quien.negocio(), id);
         // F5.4: con la política RETENER_PEDIDO, el pedido de un cliente con una factura vencida hace más de
         // N días nace RETENIDO (FACTURA_VENCIDA) y no se confirma. Se evalúa aquí, al tomarlo; nunca después.
         java.util.Optional<com.suresell.orders.cartera.Cartera.Retencion> retencion =
@@ -230,6 +230,32 @@ public class Pedidos {
      * (SIN_EXISTENCIA) no cuenta. Se llama después de escribir, dentro de la transacción: si falla, no queda nada.
      * Una bonificación a $0 hecha a propósito no existe todavía; cuando exista tendrá su propio origen de precio.
      */
+    private void exigirActivosYConPrecio(String negocio, UUID pedido) {
+        exigirActivos(negocio, pedido);
+        exigirPrecios(negocio, pedido);
+    }
+
+    /**
+     * F5.3g: toda línea con cantidad vigente mayor que 0 es de un producto activo (la venta 26 era de un producto
+     * precargado inactivo). Dejar esa línea en 0 sí se puede. El despacho no lo vuelve a comprobar: si el producto se
+     * desactiva después de confirmar, la mercancía ya está comprometida.
+     */
+    private void exigirActivos(String negocio, UUID pedido) {
+        List<Map<String, Object>> inactivos = jdbc.queryForList("""
+                SELECT v.producto_id, COALESCE(m.name_product, v.producto_id) AS nombre
+                  FROM pedidos.v_pedidos_lineas v
+                  JOIN menu_products m ON m.tenant_id = v.tenant_id AND m.id_product = v.producto_id
+                 WHERE v.tenant_id = ? AND v.pedido_id = ? AND COALESCE(v.confirmada, v.pedida) > 0
+                   AND NOT COALESCE(m.active, false)
+                 ORDER BY v.n""", negocio, pedido);
+        if (!inactivos.isEmpty()) {
+            String nombres = String.join(", ", inactivos.stream().map(f -> (String) f.get("nombre")).toList());
+            throw new PedidoRechazadoException(HttpStatus.BAD_REQUEST, PedidoRechazadoException.PRODUCTO_INACTIVO,
+                    "Producto inactivo: " + nombres + ". Actívalo en el catálogo o deja esa línea en 0.",
+                    (String) inactivos.get(0).get("producto_id"));
+        }
+    }
+
     private void exigirPrecios(String negocio, UUID pedido) {
         List<Map<String, Object>> sinPrecio = jdbc.queryForList("""
                 SELECT v.producto_id, COALESCE(m.name_product, v.producto_id) AS nombre
@@ -272,7 +298,7 @@ public class Pedidos {
         } else {
             transicionar(quien, id, "CONFIRMADO", null, a.nota(), null, ocurrido, clave + ":confirmado");
         }
-        exigirPrecios(quien.negocio(), id);
+        exigirActivosYConPrecio(quien.negocio(), id);
         return detalleVisible(quien, (UUID) pedido.get("id"));
     }
 
@@ -303,7 +329,7 @@ public class Pedidos {
         }
         OffsetDateTime ocurrido = a.ocurridoEn() == null ? OffsetDateTime.now(BOGOTA) : a.ocurridoEn();
         transicionar(quien, id, "AJUSTADO", motivo, a.nota(), lineas, ocurrido, clave);
-        exigirPrecios(quien.negocio(), id);
+        exigirActivosYConPrecio(quien.negocio(), id);
         return detalleVisible(quien, id);
     }
 

@@ -37,6 +37,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * (pedido 3 de ponyferrelectrico: la cerradura con precio base 0, el anticorrosivo ajustado a 0 por SIN_EXISTENCIA).
  * Tomar, ajustar o confirmar una línea con cantidad y precio 0 → 400 SIN_PRECIO con el producto; despachar lo que suma
  * $0 → 409 VENTA_EN_CERO sin venta ni deuda. Una factura de $0 en cartera no se crea nunca.
+ *
+ * <p>F5.3g: la cerradura era un producto precargado INACTIVO. Tomar, ajustar o confirmar una línea con cantidad de un
+ * producto inactivo → 400 PRODUCTO_INACTIVO; el despacho no lo vuelve a comprobar.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @AutoConfigureMockMvc
@@ -229,5 +232,78 @@ class PrecioCeroTest {
         assertThat(estado(id)).isEqualTo("CONFIRMADO");
         assertThat(contar("SELECT count(*) FROM orders WHERE tenant_id = ?")).isZero();
         assertThat(contar("SELECT count(*) FROM debt_transactions WHERE tenant_id = ?")).isZero();
+    }
+
+    // ---------------------------------------------------------------- F5.3g: producto inactivo
+
+    private void desactivar(String producto) {
+        dueno.update("UPDATE menu_products SET active = false WHERE tenant_id = ? AND id_product = ?", T, producto);
+    }
+
+    @Test
+    @DisplayName("🔴 F5.3g: tomar un pedido con un producto INACTIVO con precio → 400 PRODUCTO_INACTIVO con el producto, y no nace el pedido")
+    void tomarConProductoInactivo() throws Exception {
+        desactivar(CERRADURA);
+        tomar("inactivo-tomar")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.codigo").value("PRODUCTO_INACTIVO"))
+                .andExpect(jsonPath("$.campo").value("lineas"))
+                .andExpect(jsonPath("$.productoId").value(CERRADURA));
+        assertThat(contar("SELECT count(*) FROM pedidos.pedidos WHERE tenant_id = ?")).isZero();
+    }
+
+    @Test
+    @DisplayName("control F5.3g: con los dos productos activos el pedido nace")
+    void tomarConProductosActivos() throws Exception {
+        tomar("activo-tomar").andExpect(status().isCreated());
+        assertThat(contar("SELECT count(*) FROM pedidos.pedidos WHERE tenant_id = ?")).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("🔴 F5.3g: desactivado después de tomarlo, confirmar o ajustar su cantidad → 400; dejar esa línea en 0 sí confirma")
+    void confirmarYAjustarConProductoInactivo() throws Exception {
+        UUID id = UUID.fromString(leer(tomar("inactivo-confirmar").andExpect(status().isCreated())).get("id").asText());
+        desactivar(CERRADURA);
+        accion(CAJA, "cajero", id, "confirmar", "{\"idempotencyKey\":\"inactivo-confirmar-c\"}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.codigo").value("PRODUCTO_INACTIVO"))
+                .andExpect(jsonPath("$.productoId").value(CERRADURA));
+        accion(CAJA, "cajero", id, "ajustar", "{\"lineas\":[{\"lineaId\":\"" + linea(id, CERRADURA) + "\",\"cantidad\":1}],"
+                        + "\"motivo\":\"SIN_EXISTENCIA\",\"idempotencyKey\":\"inactivo-ajustar\"}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.codigo").value("PRODUCTO_INACTIVO"));
+        assertThat(estado(id)).isEqualTo("ENVIADO");
+
+        accion(CAJA, "cajero", id, "confirmar", "{\"lineas\":[{\"lineaId\":\"" + linea(id, CERRADURA) + "\",\"cantidad\":0}],"
+                + "\"motivo\":\"PRODUCTO_DESCONTINUADO\",\"idempotencyKey\":\"inactivo-confirmar-c2\"}").andExpect(status().isOk());
+        assertThat(estado(id)).isEqualTo("CONFIRMADO");
+    }
+
+    @Test
+    @DisplayName("F5.3g: desactivado después de confirmar, el despacho NO lo vuelve a comprobar: la mercancía ya está comprometida")
+    void despacharConProductoDesactivadoDespuesDeConfirmar() throws Exception {
+        UUID id = UUID.fromString(leer(tomar("inactivo-despachar").andExpect(status().isCreated())).get("id").asText());
+        accion(CAJA, "cajero", id, "confirmar", "{\"idempotencyKey\":\"inactivo-despachar-c\"}").andExpect(status().isOk());
+        desactivar(CERRADURA);
+        accion(CAJA, "cajero", id, "despachar", "{\"idempotencyKey\":\"inactivo-despachar-d\"}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.venta.total").value(114000));
+    }
+
+    @Test
+    @DisplayName("🔒 F5.3g: la venta de CAJA con un producto inactivo SIGUE entrando (201). No añadir aquí la guarda del pedido")
+    void laCajaVendeUnProductoInactivo() throws Exception {
+        // Decisión de ECM (2026-09-15), fijada a propósito. Una venta de caja YA OCURRIÓ: la mercancía salió y puede
+        // llegar horas después por el outbox, con el producto desactivado entre tanto. Rechazarla perdería una venta real
+        // (el mismo criterio de F4.11, y el de lo que tumbó a los meseros el 03/09). El POS ya no ofrece inactivos en su
+        // búsqueda. El pedido es otra cosa: su mercancía todavía no salió, y por eso él sí da PRODUCTO_INACTIVO.
+        desactivar(ANTICORROSIVO);
+        mockMvc.perform(post("/orders/create").header("Authorization", bearer(CAJA, "cajero")).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"pagerColor\":\"MESA\",\"pagerNumber\":\"1\",\"paymentMethod\":\"CASH\",\"items\":[{\"productId\":\""
+                                + ANTICORROSIVO + "\",\"quantity\":1,\"unitPrice\":18000}],\"idempotencyKey\":\"caja-inactivo\"}"))
+                .andExpect(status().isCreated());
+        assertThat(contar("SELECT count(*) FROM orders WHERE tenant_id = ?")).isEqualTo(1);
+        assertThat(dueno.queryForObject("SELECT active FROM menu_products WHERE tenant_id = ? AND id_product = ?", Boolean.class, T, ANTICORROSIVO))
+                .as("control: el producto seguía inactivo").isFalse();
     }
 }
