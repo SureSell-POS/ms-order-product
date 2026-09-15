@@ -719,4 +719,48 @@ class SaldoAFavorTest {
         vender(ventaACredito(VECINA, "dis-vecina-venta", false)).andExpect(status().isCreated())
                 .andExpect(jsonPath("$.saldoAFavorAplicado").value(10000));
     }
+
+    // ---------------------------------------------------------------- F4.13e: lo anterior de un acuerdo cumplido
+
+    /** La Tienda entra en proceso con su factura vieja viva, deja 20.000 a favor dentro del proceso y el proceso se cierra. */
+    private void procesoCerradoCon(String cierre) throws Exception {
+        mockMvc.perform(post("/api/cartera/clientes/" + TIENDA + "/insolvencia/etapas").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"etapa\":\"INICIO\",\"fecha\":\"" + hoy.minusDays(10) + "\",\"documento\":\"Auto\",\"informadoPor\":\"abogado\"}"))
+                .andExpect(status().isCreated());
+        // En proceso y sin deuda posterior, con excedente: todo a favor, sin tocar la vieja (F4.13 b).
+        abonar(abono(TIENDA, 20000, cierre + "-anticipo", "SALDO_A_FAVOR")).andExpect(status().isCreated());
+        if ("CUMPLIDO_TERMINADO".equals(cierre)) {
+            etapaDeLaTienda("ACUERDO_CONFIRMADO");
+        }
+        etapaDeLaTienda(cierre);
+        assertThat(estadoDeCuenta(TIENDA).get("saldoAFavor").decimalValue()).isEqualByComparingTo("20000");
+    }
+
+    @Test
+    @DisplayName("🔴 F4.13e: cerrado por CUMPLIDO_TERMINADO, el saldo a favor solo cubre la venta nueva; la factura anterior viva no se cruza")
+    void acuerdoCumplidoNoCruzaLoAnterior() throws Exception {
+        procesoCerradoCon("CUMPLIDO_TERMINADO");
+        vender(ventaACredito(TIENDA, "e-venta", false))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.saldoAFavorAplicado").value(20000))
+                .andExpect(jsonPath("$.saldoAFavorRestante").value(0));
+        assertThat(saldoDeLaVenta("e-venta")).isEqualByComparingTo("30000");
+        assertThat(dueno.queryForObject("SELECT saldo FROM v_cartera_por_documento WHERE tenant_id = ? AND order_uuid IS DISTINCT FROM "
+                + "(SELECT uuid_id FROM orders WHERE tenant_id = ? AND idempotency_key = 'e-venta') AND cliente_documento = ?",
+                BigDecimal.class, T, T, TIENDA)).as("la factura anterior sigue entera").isEqualByComparingTo("100000");
+    }
+
+    @Test
+    @DisplayName("🔴 F4.13e control: cerrado por CORRECCION_DE_ERROR (no hubo proceso), la regla normal vuelve entera y el saldo va a la factura vieja")
+    void marcadoPorErrorVuelveLaRegla() throws Exception {
+        procesoCerradoCon("CORRECCION_DE_ERROR");
+        vender(ventaACredito(TIENDA, "e-venta-error", false))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.saldoAFavorAplicado").value(0));
+        assertThat(saldoDeLaVenta("e-venta-error")).isEqualByComparingTo("50000");
+        assertThat(dueno.queryForObject("SELECT saldo FROM v_cartera_por_documento WHERE tenant_id = ? AND cliente_documento = ? "
+                + "AND order_uuid IS DISTINCT FROM (SELECT uuid_id FROM orders WHERE tenant_id = ? AND idempotency_key = 'e-venta-error')",
+                BigDecimal.class, T, TIENDA, T)).as("la más vieja primero").isEqualByComparingTo("80000");
+    }
 }

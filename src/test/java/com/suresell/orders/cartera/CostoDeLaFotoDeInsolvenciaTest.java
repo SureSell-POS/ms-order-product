@@ -259,6 +259,9 @@ class CostoDeLaFotoDeInsolvenciaTest {
                     if (l.startsWith("Trigger trg_devolucion_solo_cubre_un_egreso")) {
                         tiempos.put("disparador V78 en el INSERT (abono normal)", Double.parseDouble(l.replaceAll(".*time=([0-9.]+).*", "$1")));
                     }
+                    if (l.startsWith("Trigger trg_saldo_a_favor_no_cruza_lo_extinguido")) {
+                        tiempos.put("disparador V79 en el INSERT (abono normal)", Double.parseDouble(l.replaceAll(".*time=([0-9.]+).*", "$1")));
+                    }
                 }
             }
             c.rollback();
@@ -302,11 +305,14 @@ class CostoDeLaFotoDeInsolvenciaTest {
             assertThat(enProceso).isEqualTo(10);
             assertThat(habilitados).isEqualTo(5);
             // La lectura que añade fn_venta_a_credito, solo con el cliente en proceso.
+            tiempos.put("F4.13e: corte de acuerdo cumplido, cliente sin procesos", ejecucion(st,
+                    "EXPLAIN (ANALYZE) SELECT fn_corte_de_acuerdo_cumplido('lista-500', 'L400')"));
             tiempos.put("venta a crédito: lectura del crédito posterior (cliente en proceso)", ejecucion(st,
                     "EXPLAIN (ANALYZE) SELECT cp.plazo_maximo_dias FROM v_insolvencia_credito_posterior cp "
                             + "WHERE cp.tenant_id = 'lista-500' AND cp.cliente_documento = 'L3' AND cp.vigente"));
         }
         assertThat(tiempos).as("el disparador de V78 corre sobre el abono normal").containsKey("disparador V78 en el INSERT (abono normal)");
+        assertThat(tiempos).as("el disparador de V79 corre sobre el abono normal").containsKey("disparador V79 en el INSERT (abono normal)");
         System.out.println("── plan de la lectura del disparador V76 ──\n" + planDelDisparador);
         assertThat(planDelDisparador).contains("Index Scan using pk_recibos_de_caja", "Index Scan using ux_clientes_documento")
                 .contains("Index Cond: ((tenant_id = 'foto-vecino'::text) AND (documento = 'V4999'::text))")
