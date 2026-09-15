@@ -14,6 +14,8 @@ import org.springframework.http.HttpStatus;
  *   <li>409 {@code IDEMPOTENCIA_REUTILIZADA}: la clave ya se usó con otro pedido u otro evento.</li>
  *   <li>409 {@code AUTOVENTA_SIN_DESPACHO}: la autoventa despacha en la captura, y el despacho llega con F5.5.</li>
  *   <li>403 {@code SIN_USUARIO}: el token no corresponde a un usuario del negocio; el rastro no admite autor desconocido.</li>
+ *   <li>400 {@code SIN_PRECIO} (F5.3f): una línea con cantidad tiene precio 0; lleva {@code productoId}.</li>
+ *   <li>409 {@code VENTA_EN_CERO} (F5.3f): el despacho daría una venta de $0; no se crea venta ni deuda.</li>
  * </ul>
  */
 public class PedidoRechazadoException extends RuntimeException {
@@ -24,14 +26,27 @@ public class PedidoRechazadoException extends RuntimeException {
     public static final String IDEMPOTENCIA_REUTILIZADA = "IDEMPOTENCIA_REUTILIZADA";
     public static final String AUTOVENTA_SIN_DESPACHO = "AUTOVENTA_SIN_DESPACHO";
     public static final String SIN_USUARIO = "SIN_USUARIO";
+    public static final String SIN_PRECIO = "SIN_PRECIO";
+    public static final String VENTA_EN_CERO = "VENTA_EN_CERO";
 
     private final HttpStatus estado;
     private final String codigo;
+    private final String productoId;
 
     public PedidoRechazadoException(HttpStatus estado, String codigo, String mensaje) {
+        this(estado, codigo, mensaje, null);
+    }
+
+    public PedidoRechazadoException(HttpStatus estado, String codigo, String mensaje, String productoId) {
         super(mensaje);
         this.estado = estado;
         this.codigo = codigo;
+        this.productoId = productoId;
+    }
+
+    /** El producto sin precio (solo en {@code SIN_PRECIO}); null en los demás. */
+    public String productoId() {
+        return productoId;
     }
 
     public HttpStatus estado() {

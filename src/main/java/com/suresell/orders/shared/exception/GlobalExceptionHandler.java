@@ -214,6 +214,10 @@ public class GlobalExceptionHandler {
         logger.info("{} {}: {}", ex.estado().value(), ex.codigo(), ex.getMessage());
         Map<String, String> m = cuerpo(ex.codigo(), ex.getMessage());
         m.put("codigo", ex.codigo());
+        if (ex.productoId() != null) {
+            m.put("campo", "lineas");
+            m.put("productoId", ex.productoId());
+        }
         return ResponseEntity.status(ex.estado()).body(m);
     }
 

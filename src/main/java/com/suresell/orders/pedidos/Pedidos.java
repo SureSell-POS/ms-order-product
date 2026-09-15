@@ -209,6 +209,7 @@ public class Pedidos {
                 documento, origen, modalidad, vendedorFinal, cuerpo.siteId(),
                 cuerpo.entregaEl() == null ? null : java.sql.Date.valueOf(cuerpo.entregaEl()),
                 aJson(paraLaFuncion), Timestamp.from(ocurrido.toInstant()), clave));
+        exigirPrecios(quien.negocio(), id);
         // F5.4: con la política RETENER_PEDIDO, el pedido de un cliente con una factura vencida hace más de
         // N días nace RETENIDO (FACTURA_VENCIDA) y no se confirma. Se evalúa aquí, al tomarlo; nunca después.
         java.util.Optional<com.suresell.orders.cartera.Cartera.Retencion> retencion =
@@ -222,6 +223,27 @@ public class Pedidos {
             transicionar(quien, id, "CONFIRMADO", null, null, null, ocurrido, clave + ":confirmado");
         }
         return new Resultado(detalleVisible(quien, id), false);
+    }
+
+    /**
+     * F5.3f: toda línea con cantidad vigente mayor que 0 tiene precio mayor que 0. Una línea en 0 por ajuste
+     * (SIN_EXISTENCIA) no cuenta. Se llama después de escribir, dentro de la transacción: si falla, no queda nada.
+     * Una bonificación a $0 hecha a propósito no existe todavía; cuando exista tendrá su propio origen de precio.
+     */
+    private void exigirPrecios(String negocio, UUID pedido) {
+        List<Map<String, Object>> sinPrecio = jdbc.queryForList("""
+                SELECT v.producto_id, COALESCE(m.name_product, v.producto_id) AS nombre
+                  FROM pedidos.v_pedidos_lineas v
+                  LEFT JOIN menu_products m ON m.tenant_id = v.tenant_id AND m.id_product = v.producto_id
+                 WHERE v.tenant_id = ? AND v.pedido_id = ? AND COALESCE(v.confirmada, v.pedida) > 0
+                   AND COALESCE(v.precio_confirmado, v.precio_visto, 0) <= 0
+                 ORDER BY v.n""", negocio, pedido);
+        if (!sinPrecio.isEmpty()) {
+            String nombres = String.join(", ", sinPrecio.stream().map(f -> (String) f.get("nombre")).toList());
+            throw new PedidoRechazadoException(HttpStatus.BAD_REQUEST, PedidoRechazadoException.SIN_PRECIO,
+                    "Sin precio (queda en $0): " + nombres + ". Pon su precio en el catálogo o en la lista del cliente, o corrígelo con ERROR_DE_PRECIO.",
+                    (String) sinPrecio.get(0).get("producto_id"));
+        }
     }
 
     // ------------------------------------------------------------ transiciones
@@ -250,6 +272,7 @@ public class Pedidos {
         } else {
             transicionar(quien, id, "CONFIRMADO", null, a.nota(), null, ocurrido, clave + ":confirmado");
         }
+        exigirPrecios(quien.negocio(), id);
         return detalleVisible(quien, (UUID) pedido.get("id"));
     }
 
@@ -280,6 +303,7 @@ public class Pedidos {
         }
         OffsetDateTime ocurrido = a.ocurridoEn() == null ? OffsetDateTime.now(BOGOTA) : a.ocurridoEn();
         transicionar(quien, id, "AJUSTADO", motivo, a.nota(), lineas, ocurrido, clave);
+        exigirPrecios(quien.negocio(), id);
         return detalleVisible(quien, id);
     }
 
@@ -350,6 +374,18 @@ public class Pedidos {
         if (items.isEmpty()) {
             throw new DatoInvalidoException("lineas", "Un despacho lleva al menos una línea con cantidad mayor que 0.");
         }
+        // F5.3f: una factura de $0 en cartera no se crea nunca (la venta 26 de staging). La transacción revierte el DESPACHADO.
+        BigDecimal totalDeLaVenta = items.stream()
+                .map(i -> (i.unitPrice() == null ? BigDecimal.ZERO : i.unitPrice()).multiply(BigDecimal.valueOf(i.quantity())))
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        if (totalDeLaVenta.signum() <= 0) {
+            throw new PedidoRechazadoException(HttpStatus.CONFLICT, PedidoRechazadoException.VENTA_EN_CERO,
+                    "Lo despachado suma $0: no se crea una venta ni una deuda de $0. Corrige el precio (ajustar, ERROR_DE_PRECIO) o no despaches esas líneas.");
+        }
+        items.stream().filter(i -> i.unitPrice() == null || i.unitPrice().signum() <= 0).findFirst().ifPresent(i -> {
+            throw new PedidoRechazadoException(HttpStatus.BAD_REQUEST, PedidoRechazadoException.SIN_PRECIO,
+                    "La línea de " + i.productId() + " se despacharía a $0: corrige su precio antes de despachar.", i.productId());
+        });
         Short plazo = pedido.get("plazo_dias") == null ? null : ((Number) pedido.get("plazo_dias")).shortValue();
         String condicion = plazo != null && plazo == 0 ? "CONTADO" : "CREDITO";
         var dto = new com.suresell.orders.application.dto.OrderRequestRecord(
