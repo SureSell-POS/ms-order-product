@@ -79,6 +79,13 @@ class CostoDelPedidoTest {
             }
             // Uno de cada diez sigue por despachar, con entrega en la semana: lo que mira la bandeja.
             s.execute("UPDATE pedidos.pedidos SET estado = 'ENVIADO', fecha_entrega_prometida = current_date + (numero % 7)::int WHERE numero % 10 = 0");
+            // Siete de cada diez ya se entregaron (la vista de pendiente de reversa los recorre).
+            s.execute("UPDATE pedidos.pedidos SET estado = 'ENTREGADO' WHERE numero % 10 BETWEEN 3 AND 9");
+            // Y uno de cada cien, con novedad: su prueba de entrega con diferencias (lo único que la vista recorre).
+            s.execute("UPDATE pedidos.pedidos SET estado = 'ENTREGADO_CON_NOVEDAD' WHERE numero % 100 = 3");
+            s.execute("INSERT INTO pedidos.entregas (tenant_id, pedido_id, evento_id, resultado, recibe_nombre, recibe_documento, registrado_por, ocurrido_en) "
+                    + "SELECT e.tenant_id, e.pedido_id, e.id, 'ENTREGADO_CON_NOVEDAD', 'x', '1', p.capturado_por, now() "
+                    + "FROM pedidos.pedidos_eventos e JOIN pedidos.pedidos p ON p.id = e.pedido_id WHERE p.estado = 'ENTREGADO_CON_NOVEDAD' AND e.tipo = 'DESPACHADO'");
             s.execute("ANALYZE");
             try (ResultSet rs = s.executeQuery("SELECT id FROM pedidos.pedidos WHERE tenant_id = 'perf-a' AND numero = 7777")) {
                 rs.next();
@@ -118,6 +125,16 @@ class CostoDelPedidoTest {
                     SELECT p.id, p.numero FROM pedidos.pedidos p
                      WHERE p.tenant_id = 'perf-a'
                      ORDER BY COALESCE(p.fecha_entrega_prometida, 'infinity'::date), p.numero LIMIT 51""");
+            plan(s, "conteo de pendientes de reversa (F5.7)", """
+                    SELECT count(*) FROM pedidos.pedidos p
+                      JOIN pedidos.v_pedidos_pendiente_de_reversa pr ON pr.tenant_id = p.tenant_id AND pr.pedido_id = p.id
+                     WHERE p.tenant_id = 'perf-a'""");
+            plan(s, "bandeja: primera página con la marca de pendiente de reversa (F5.7)", """
+                    SELECT p.id, p.numero, pr.valor
+                      FROM pedidos.pedidos p
+                      LEFT JOIN pedidos.v_pedidos_pendiente_de_reversa pr ON pr.tenant_id = p.tenant_id AND pr.pedido_id = p.id
+                     WHERE p.tenant_id = 'perf-a'
+                     ORDER BY COALESCE(p.fecha_entrega_prometida, 'infinity'::date), p.numero LIMIT 51""");
             plan(s, "detalle: cantidades de un pedido", """
                     SELECT * FROM pedidos.v_pedidos_lineas WHERE tenant_id = 'perf-a' AND pedido_id = '%s'""".formatted(unPedido));
         }
@@ -131,6 +148,8 @@ class CostoDelPedidoTest {
     }
 
     private static void plan(Statement s, String nombre, String sql) throws SQLException {
+        // Sin JIT: su compilación (cientos de ms) taparía el costo del plan, que es lo que se mide.
+        s.execute("SET jit = off");
         StringBuilder salida = new StringBuilder("── F5 costo: " + nombre + " ──\n");
         try (ResultSet rs = s.executeQuery("EXPLAIN (ANALYZE, BUFFERS) " + sql)) {
             while (rs.next()) {

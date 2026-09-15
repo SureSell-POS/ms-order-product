@@ -63,6 +63,9 @@ public class Pedidos {
     public static final Set<String> MOTIVOS_DE_CANCELACION = Set.of("CLIENTE_DESISTIO", "DUPLICADO", "SIN_EXISTENCIA", "FUERA_DE_VENTANA");
     public static final Set<String> MOTIVOS_DE_RETENCION = Set.of("CUPO_EXCEDIDO", "FACTURA_VENCIDA", "MORA");
     public static final Set<String> MOTIVOS_DE_LIBERACION = Set.of("PAGO_RECIBIDO", "ACUERDO_DE_PAGO", "AUTORIZADO_POR_ADMIN");
+    public static final Set<String> RESULTADOS_DE_ENTREGA = Set.of("ENTREGADO", "ENTREGADO_CON_NOVEDAD", "ENTREGA_FALLIDA");
+    public static final Set<String> MOTIVOS_DE_NOVEDAD = Set.of("FALTANTE", "SOBRANTE", "AVERIA", "PRODUCTO_NO_PEDIDO", "VENCIDO");
+    public static final Set<String> MOTIVOS_DE_ENTREGA_FALLIDA = Set.of("CERRADO", "SIN_DINERO", "DIRECCION_ERRADA", "RECHAZO_EN_PUERTA", "FUERA_DE_VENTANA");
     /**
      * Lo despachado ya es venta (F5.5): cancelarlo sin la reversa dejaría la venta, su deuda y el
      * inventario descontado (D7). ENTREGA_FALLIDA también: la mercancía salió con su venta.
@@ -76,11 +79,14 @@ public class Pedidos {
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
     private final com.suresell.orders.domain.port.in.OrderPort ventas;
+    private final com.suresell.orders.cartera.Cartera cartera;
 
-    public Pedidos(JdbcTemplate jdbc, ObjectMapper json, com.suresell.orders.domain.port.in.OrderPort ventas) {
+    public Pedidos(JdbcTemplate jdbc, ObjectMapper json, com.suresell.orders.domain.port.in.OrderPort ventas,
+                   com.suresell.orders.cartera.Cartera cartera) {
         this.jdbc = jdbc;
         this.json = json;
         this.ventas = ventas;
+        this.cartera = cartera;
     }
 
     /** Quién pide: su negocio, su rol y su id de {@code users}. */
@@ -102,6 +108,18 @@ public class Pedidos {
                               String idempotencyKey, Boolean confirmar) {}
 
     public record LineaDeEvento(UUID lineaId, Integer cantidad, BigDecimal precio) {}
+
+    public record QuienRecibe(String nombre, String documento) {}
+
+    public record ReciboEnLaEntrega(BigDecimal monto, String medio, String referenciaMedio) {}
+
+    /**
+     * POST /api/pedidos/{id}/entregar. Sin foto ni firma hasta F5.7b (ECM): el cuerpo las rechaza
+     * como campos desconocidos.
+     */
+    public record Entrega(String resultado, List<LineaDeEvento> lineas, String motivo, String nota, QuienRecibe recibe,
+                          BigDecimal latitud, BigDecimal longitud, ReciboEnLaEntrega recibo, OffsetDateTime ocurridoEn,
+                          String idempotencyKey) {}
 
     /** POST /api/pedidos/{id}/despachar. */
     public record Despacho(List<LineaDeEvento> lineas, Long siteId, String nota, OffsetDateTime ocurridoEn,
@@ -332,6 +350,107 @@ public class Pedidos {
         return detalleVisible(quien, id);
     }
 
+    /**
+     * POST /api/pedidos/{id}/entregar (F5.7): la entrega con su prueba por {@code fn_pedido_entregar}
+     * y, en contraentrega, el recibo de caja aplicado a la venta del pedido, en UNA transacción.
+     *
+     * <ul>
+     *   <li>Vendedor (solo sus pedidos), admin y cajero.</li>
+     *   <li>Hecha: quién recibe (nombre y documento). Con novedad: líneas y motivo. Fallida: motivo,
+     *       sin quién recibe y sin recibo.</li>
+     *   <li>Lo que no llega no toca venta, cartera ni inventario: queda en
+     *       {@code v_pedidos_pendiente_de_reversa} hasta que exista la reversa (D7).</li>
+     *   <li>El recibo es el de F4.4 (número, CREDIT, aplicación), con sus validaciones; si no entra,
+     *       la entrega tampoco.</li>
+     * </ul>
+     */
+    @Transactional
+    public Map<String, Object> entregar(Quien quien, UUID id, Entrega cuerpo) {
+        exigirRol(quien, Set.of("admin", "cajero", "vendedor"), "entregar un pedido");
+        exigirUsuario(quien);
+        if (cuerpo == null) {
+            throw new DatoInvalidoException("idempotencyKey", "Falta el cuerpo de la entrega.");
+        }
+        String clave = obligatorio(cuerpo.idempotencyKey(), "idempotencyKey", "Falta la clave de idempotencia.");
+        String resultado = obligatorio(cuerpo.resultado(), "resultado", "Falta el resultado de la entrega.").toUpperCase(Locale.ROOT);
+        if (!RESULTADOS_DE_ENTREGA.contains(resultado)) {
+            throw new DatoInvalidoException("resultado", "El resultado es ENTREGADO, ENTREGADO_CON_NOVEDAD o ENTREGA_FALLIDA.");
+        }
+        boolean fallida = resultado.equals("ENTREGA_FALLIDA");
+        String motivo = switch (resultado) {
+            case "ENTREGADO_CON_NOVEDAD" -> motivo(cuerpo.motivo(), MOTIVOS_DE_NOVEDAD, true);
+            case "ENTREGA_FALLIDA" -> motivo(cuerpo.motivo(), MOTIVOS_DE_ENTREGA_FALLIDA, true);
+            default -> motivo(cuerpo.motivo(), Set.of(), false);
+        };
+        List<LineaDeEvento> lineas = lineasDeEvento(cuerpo.lineas(), false);
+        if (fallida && !lineas.isEmpty()) {
+            throw new DatoInvalidoException("lineas", "Una entrega fallida no lleva cantidades: no se entregó nada.");
+        }
+        if (resultado.equals("ENTREGADO_CON_NOVEDAD") && lineas.isEmpty()) {
+            throw new DatoInvalidoException("lineas", "Una entrega con novedad dice qué se entregó de cada línea.");
+        }
+        String nombre = null;
+        String documento = null;
+        if (fallida) {
+            if (cuerpo.recibe() != null) {
+                throw new DatoInvalidoException("recibe", "En una entrega fallida nadie recibe.");
+            }
+            if (cuerpo.recibo() != null) {
+                throw new DatoInvalidoException("recibo", "En una entrega fallida no se cobra: no se entregó nada.");
+            }
+        } else {
+            nombre = obligatorio(cuerpo.recibe() == null ? null : cuerpo.recibe().nombre(), "recibe", "Di quién recibe: nombre.");
+            documento = obligatorio(cuerpo.recibe().documento(), "recibe", "Di quién recibe: documento.");
+        }
+        if ((cuerpo.latitud() == null) != (cuerpo.longitud() == null)) {
+            throw new DatoInvalidoException("latitud", "El lugar va con latitud y longitud, o sin ninguna.");
+        }
+        cabeceraVisible(quien, id);
+
+        // El reintento: la misma clave ya entregó ESTE pedido → lo mismo que la primera vez (el recibo, por su clave).
+        List<Map<String, Object>> previo = jdbc.queryForList(
+                "SELECT pedido_id, tipo FROM pedidos.pedidos_eventos WHERE tenant_id = ? AND idempotency_key = ?", quien.negocio(), clave);
+        if (!previo.isEmpty() && (!id.equals(previo.get(0).get("pedido_id")) || !resultado.equals(previo.get(0).get("tipo")))) {
+            throw new PedidoRechazadoException(HttpStatus.CONFLICT, PedidoRechazadoException.IDEMPOTENCIA_REUTILIZADA,
+                    "Esa clave ya se usó con otra acción. No se escribió nada.");
+        }
+
+        OffsetDateTime ahora = OffsetDateTime.now(BOGOTA);
+        OffsetDateTime ocurrido = cuerpo.ocurridoEn() == null || cuerpo.ocurridoEn().isAfter(ahora) ? ahora : cuerpo.ocurridoEn();
+        fijarAutor(quien);
+        String lineasJson = null;
+        if (!lineas.isEmpty()) {
+            List<Map<String, Object>> l = new ArrayList<>();
+            for (LineaDeEvento e : lineas) {
+                l.add(Map.of("linea_id", e.lineaId().toString(), "cantidad", e.cantidad()));
+            }
+            lineasJson = aJson(l);
+        }
+        final String lj = lineasJson;
+        final String nom = nombre;
+        final String doc = documento;
+        traducir(() -> jdbc.queryForObject("""
+                SELECT pedidos.fn_pedido_entregar(?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?)""", UUID.class,
+                id, resultado, motivo, cuerpo.nota(), lj, nom, doc, cuerpo.latitud(), cuerpo.longitud(),
+                Timestamp.from(ocurrido.toInstant()), clave));
+
+        if (cuerpo.recibo() != null) {
+            List<Map<String, Object>> venta = jdbc.queryForList("""
+                    SELECT o.uuid_id, o.site_id, o.cliente_documento FROM orders o
+                     WHERE o.tenant_id = ? AND o.pedido_id = ? AND o.deleted_at IS NULL""", quien.negocio(), id);
+            if (venta.isEmpty()) {
+                throw new DatoInvalidoException("recibo", "Este pedido no tiene venta a la que aplicar el cobro.");
+            }
+            ReciboEnLaEntrega r = cuerpo.recibo();
+            cartera.registrarRecibo(new com.suresell.orders.cartera.Cartera.Quien(quien.negocio(), quien.rol(), quien.usuarioId()),
+                    new com.suresell.orders.cartera.Cartera.NuevoRecibo((String) venta.get(0).get("cliente_documento"), r.monto(), r.medio(),
+                            r.referenciaMedio(),
+                            List.of(new com.suresell.orders.cartera.Cartera.Aplicacion((UUID) venta.get(0).get("uuid_id"), r.monto())),
+                            ocurrido, clave + ":recibo", null, toLong(venta.get(0).get("site_id"))));
+        }
+        return detalleVisible(quien, id);
+    }
+
     @Transactional
     public Map<String, Object> rechazar(Quien quien, UUID id, Accion cuerpo) {
         return conMotivo(quien, id, cuerpo, "RECHAZADO", MOTIVOS_DE_RECHAZO, "rechazar un pedido");
@@ -404,11 +523,18 @@ public class Pedidos {
      */
     public Map<String, Object> bandeja(Quien quien, String estado, String origen, Long vendedorId, LocalDate fecha,
                                        LocalDate entregaEl, String clienteDocumento, Integer limite, String despuesDe) {
+        return bandeja(quien, estado, origen, vendedorId, fecha, entregaEl, clienteDocumento, limite, despuesDe, null);
+    }
+
+    public Map<String, Object> bandeja(Quien quien, String estado, String origen, Long vendedorId, LocalDate fecha,
+                                       LocalDate entregaEl, String clienteDocumento, Integer limite, String despuesDe,
+                                       Boolean pendienteDeReversa) {
         exigirRol(quien, Set.of("admin", "cajero", "vendedor"), "ver los pedidos");
         StringBuilder sql = new StringBuilder("""
                 SELECT p.id, p.numero, p.estado, p.origen, p.modalidad, p.cliente_documento, c.nombre AS cliente,
                        p.vendedor_id, u.nombre AS vendedor, p.fecha_entrega_prometida, p.ocurrido_en, p.plazo_dias,
-                       p.condicion_pago, t.lineas, t.total, COALESCE(p.fecha_entrega_prometida, 'infinity'::date)::text AS entrega_orden
+                       p.condicion_pago, t.lineas, t.total, COALESCE(p.fecha_entrega_prometida, 'infinity'::date)::text AS entrega_orden,
+                       pr.valor AS valor_pendiente
                   FROM pedidos.pedidos p
                   LEFT JOIN clientes c ON c.tenant_id = p.tenant_id AND c.documento = p.cliente_documento
                   LEFT JOIN users u ON u.tenant_id = p.tenant_id AND u.id = p.vendedor_id
@@ -416,6 +542,7 @@ public class Pedidos {
                                             sum(COALESCE(v.confirmada, v.pedida) * COALESCE(v.precio_confirmado, v.precio_visto)) AS total
                                        FROM pedidos.v_pedidos_lineas v
                                       WHERE v.tenant_id = p.tenant_id AND v.pedido_id = p.id) t ON true
+                  LEFT JOIN pedidos.v_pedidos_pendiente_de_reversa pr ON pr.tenant_id = p.tenant_id AND pr.pedido_id = p.id
                  WHERE p.tenant_id = ?""");
         List<Object> args = new ArrayList<>(List.of(quien.negocio()));
         filtrosComunes(quien, origen, vendedorId, fecha, entregaEl, clienteDocumento, sql, args);
@@ -430,6 +557,9 @@ public class Pedidos {
             }
             sql.append(" AND p.estado = ANY (?)");
             args.add(estados.toArray(new String[0]));
+        }
+        if (pendienteDeReversa != null) {
+            sql.append(pendienteDeReversa ? " AND pr.pedido_id IS NOT NULL" : " AND pr.pedido_id IS NULL");
         }
         if (despuesDe != null && !despuesDe.isBlank()) {
             String[] partes = despuesDe.trim().split("_", 2);
@@ -472,6 +602,8 @@ public class Pedidos {
             r.put("condicionPago", f.get("condicion_pago"));
             r.put("lineas", f.get("lineas"));
             r.put("total", f.get("total"));
+            r.put("pendienteDeReversa", f.get("valor_pendiente") != null);
+            r.put("valorPendienteDeReversa", f.get("valor_pendiente") == null ? BigDecimal.ZERO : f.get("valor_pendiente"));
             r.put("cursor", f.get("entrega_orden") + "_" + f.get("numero"));
             pedidos.add(r);
         }
@@ -503,7 +635,16 @@ public class Pedidos {
         for (Map<String, Object> f : jdbc.queryForList(sql.toString(), args.toArray())) {
             porEstado.put((String) f.get("estado"), ((Number) f.get("n")).longValue());
         }
-        return Map.of("conteos", porEstado);
+        StringBuilder pend = new StringBuilder("""
+                SELECT count(*) FROM pedidos.pedidos p
+                  JOIN pedidos.v_pedidos_pendiente_de_reversa pr ON pr.tenant_id = p.tenant_id AND pr.pedido_id = p.id
+                 WHERE p.tenant_id = ?""");
+        List<Object> pargs = new ArrayList<>(List.of(quien.negocio()));
+        filtrosComunes(quien, origen, vendedorId, fecha, entregaEl, clienteDocumento, pend, pargs);
+        Map<String, Object> salida = new LinkedHashMap<>();
+        salida.put("conteos", porEstado);
+        salida.put("pendientesDeReversa", jdbc.queryForObject(pend.toString(), Long.class, pargs.toArray()));
+        return salida;
     }
 
     /** Visibilidad por rol y los filtros que comparten la bandeja y los conteos. */
@@ -571,6 +712,28 @@ public class Pedidos {
         r.put("precioCongeladoEn", momento(p.get("precio_congelado_en")));
         r.put("ocurridoEn", momento(p.get("ocurrido_en")));
         r.put("registradoEn", momento(p.get("registrado_en")));
+        // La última prueba de entrega y lo pendiente de reversa (F5.7, derivado de las cantidades).
+        List<Map<String, Object>> entregas = jdbc.queryForList("""
+                SELECT resultado, recibe_nombre, recibe_documento, latitud, longitud, ocurrido_en
+                  FROM pedidos.entregas WHERE tenant_id = ? AND pedido_id = ? ORDER BY registrado_en DESC LIMIT 1""",
+                quien.negocio(), p.get("id"));
+        if (entregas.isEmpty()) {
+            r.put("entrega", null);
+        } else {
+            Map<String, Object> e = new LinkedHashMap<>();
+            e.put("resultado", entregas.get(0).get("resultado"));
+            e.put("recibeNombre", entregas.get(0).get("recibe_nombre"));
+            e.put("recibeDocumento", entregas.get(0).get("recibe_documento"));
+            e.put("latitud", entregas.get(0).get("latitud"));
+            e.put("longitud", entregas.get(0).get("longitud"));
+            e.put("ocurridoEn", momento(entregas.get(0).get("ocurrido_en")));
+            r.put("entrega", e);
+        }
+        List<Map<String, Object>> pendiente = jdbc.queryForList("""
+                SELECT valor, lineas_pendientes FROM pedidos.v_pedidos_pendiente_de_reversa WHERE tenant_id = ? AND pedido_id = ?""",
+                quien.negocio(), p.get("id"));
+        r.put("pendienteDeReversa", !pendiente.isEmpty());
+        r.put("valorPendienteDeReversa", pendiente.isEmpty() ? BigDecimal.ZERO : pendiente.get(0).get("valor"));
         // La venta del despacho: la única fuente es orders.pedido_id (F5.5).
         List<Map<String, Object>> venta = jdbc.queryForList("""
                 SELECT uuid_id, id_order, total, condicion_pago, site_id FROM orders
@@ -876,6 +1039,12 @@ public class Pedidos {
             }
             if (texto.contains("del futuro")) {
                 throw new DatoInvalidoException("ocurridoEn", "La hora de la captura no puede estar en el futuro.");
+            }
+            if (texto.startsWith("Una entrega con diferencias")) {
+                throw new DatoInvalidoException("resultado", "Una entrega con diferencias es ENTREGADO_CON_NOVEDAD, con su motivo.");
+            }
+            if (texto.startsWith("Una linea no puede entregar mas")) {
+                throw new DatoInvalidoException("lineas", "Una línea no puede entregar más de lo que se despachó.");
             }
             if (texto.startsWith("Una linea no es de este pedido") || texto.contains("precio")) {
                 throw new DatoInvalidoException("lineas", texto);

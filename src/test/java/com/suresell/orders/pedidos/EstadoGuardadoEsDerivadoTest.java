@@ -201,8 +201,29 @@ class EstadoGuardadoEsDerivadoTest {
             if (tipo.equals("AJUSTADO")) {
                 motivo = precio ? "ERROR_DE_PRECIO" : "SIN_EXISTENCIA";
             }
-            lineas = "[{\"linea_id\":\"" + linea + "\",\"cantidad\":" + azar.nextInt(11)
+            // Una entrega no pasa de lo despachado en su línea (V4): se sortea dentro de ese tope.
+            // Y ENTREGADO es todo lo despachado: una diferencia es ENTREGADO_CON_NOVEDAD.
+            int tope = ENTREGAS.contains(tipo) ? despachada(c, linea) : 10;
+            int cantidad = tipo.equals("ENTREGADO") ? tope : azar.nextInt(tope + 1);
+            lineas = "[{\"linea_id\":\"" + linea + "\",\"cantidad\":" + cantidad
                     + (precio ? ",\"precio\":" + (500 + azar.nextInt(3000)) : "") + "}]";
+        }
+        if (ENTREGAS.contains(tipo)) {
+            // Desde V4 de pedidos una entrega va con su prueba, por fn_pedido_entregar.
+            boolean fallida = tipo.equals("ENTREGA_FALLIDA");
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT pedidos.fn_pedido_entregar(?, ?, ?, NULL, ?::jsonb, ?, ?, NULL, NULL, ?, ?)")) {
+                ps.setObject(1, pedido);
+                ps.setString(2, tipo);
+                ps.setString(3, motivo);
+                ps.setString(4, lineas);
+                ps.setString(5, fallida ? null : "Quien recibe");
+                ps.setString(6, fallida ? null : "1000" + i);
+                ps.setTimestamp(7, desordenado(azar));
+                ps.setString(8, "prop-" + i + "-" + paso);
+                ps.executeQuery().close();
+            }
+            return;
         }
         try (PreparedStatement ps = c.prepareStatement(
                 "SELECT pedidos.fn_pedido_transicionar(?, ?, ?, NULL, ?::jsonb, ?, ?)")) {
@@ -213,6 +234,19 @@ class EstadoGuardadoEsDerivadoTest {
             ps.setTimestamp(5, desordenado(azar));
             ps.setString(6, "prop-" + i + "-" + paso);
             ps.executeQuery().close();
+        }
+    }
+
+    static final java.util.Set<String> ENTREGAS = java.util.Set.of("ENTREGADO", "ENTREGADO_CON_NOVEDAD", "ENTREGA_FALLIDA");
+
+    private static int despachada(Connection c, UUID linea) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("SELECT COALESCE(despachada, 0) FROM pedidos.v_pedidos_lineas WHERE tenant_id = ? AND linea_id = ?")) {
+            ps.setString(1, NEGOCIO);
+            ps.setObject(2, linea);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getInt(1);
+            }
         }
     }
 
