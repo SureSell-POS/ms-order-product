@@ -30,6 +30,8 @@ class CostoDeLaMarcaDeCambioTest {
     static final String T = "perf-marca";
     static final int VUELTAS = 7;
     static final int POR_VUELTA = 400;
+    /** El guardado de producto es rápido: con 400 una vuelta dura ~60 ms en el runner de CI y el ruido pesa. ECM: 2.000. */
+    static final int POR_VUELTA_PRODUCTO = 2000;
 
     @Container
     static final PostgreSQLContainer<?> PG = new PostgreSQLContainer<>("postgres:16-alpine");
@@ -96,14 +98,14 @@ class CostoDeLaMarcaDeCambioTest {
 
     private int guardados = 0;
 
-    /** POR_VUELTA guardados de producto como core: UPDATE de todas las columnas con otro precio, y un INSERT cada diez. Devuelve ms. */
+    /** POR_VUELTA_PRODUCTO guardados de producto como core: UPDATE de todas las columnas con otro precio, y un INSERT cada diez. Devuelve ms. */
     private double vueltaDeProductos(Connection app) throws SQLException {
         try (PreparedStatement up = app.prepareStatement("UPDATE menu_products SET name_product = ?, price = ?, active = true, category_id = NULL, "
                 + "tenant_id = '" + T + "' WHERE id_product = ?");
              PreparedStatement in = app.prepareStatement("INSERT INTO menu_products (id_product, tenant_id, name_product, price, active) "
                      + "VALUES (?, '" + T + "', 'Nuevo', 500, true)")) {
             long t0 = System.nanoTime();
-            for (int i = 0; i < POR_VUELTA; i++) {
+            for (int i = 0; i < POR_VUELTA_PRODUCTO; i++) {
                 int g = guardados++;
                 if (i % 10 == 0) {
                     in.setString(1, T + "-n" + g);
@@ -148,8 +150,8 @@ class CostoDeLaMarcaDeCambioTest {
         }
         double vc = mediana(ventaCon), vs = mediana(ventaSin), pc = mediana(productoCon), ps = mediana(productoSin);
         System.out.printf(java.util.Locale.ROOT,
-                "── F6.0b A/B (%d vueltas × %d, mediana, ms) ── venta a crédito con marca %.1f · sin %.1f (%+.1f %%) · producto con marca %.1f · sin %.1f (%+.1f %%)%n",
-                VUELTAS, POR_VUELTA, vc, vs, 100 * (vc / vs - 1), pc, ps, 100 * (pc / ps - 1));
+                "── F6.0b A/B (%d vueltas; %d ventas y %d guardados por vuelta; mediana, ms) ── venta a crédito con marca %.1f · sin %.1f (%+.1f %%) · producto con marca %.1f · sin %.1f (%+.1f %%)%n",
+                VUELTAS, POR_VUELTA, POR_VUELTA_PRODUCTO, vc, vs, 100 * (vc / vs - 1), pc, ps, 100 * (pc / ps - 1));
         // Control: los cuatro disparadores quedan encendidos al final.
         try (Connection d = dueno(); Statement s = d.createStatement(); var rs = s.executeQuery(
                 "SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_ar_marca_cliente_cupo', 'trg_ar_marca_cliente_insert', "
