@@ -51,6 +51,38 @@ class EstadoGuardadoEsDerivadoTest {
             "ENTREGA_FALLIDA", List.of("CERRADO", "SIN_DINERO", "DIRECCION_ERRADA", "RECHAZO_EN_PUERTA"),
             "ENTREGADO_CON_NOVEDAD", List.of("FALTANTE", "AVERIA", "VENCIDO"));
     static long usuario;
+    /**
+     * La forma de {@code v_pedidos_lineas} anterior a la de LATERAL (DISTINCT ON sobre
+     * todas las cantidades), guardada aquí para comprobar que la nueva da las mismas filas.
+     */
+    static final String V_PEDIDOS_LINEAS_ANTERIOR = """
+            WITH ultimos AS (
+                SELECT DISTINCT ON (el.linea_id, grupo)
+                       el.linea_id, e.secuencia, el.cantidad,
+                       CASE WHEN e.tipo IN ('CONFIRMADO', 'AJUSTADO') THEN 'confirmada'
+                            WHEN e.tipo = 'DESPACHADO' THEN 'despachada'
+                            WHEN e.tipo IN ('ENTREGADO', 'ENTREGADO_CON_NOVEDAD') THEN 'entregada'
+                            ELSE 'recibida' END AS grupo
+                  FROM pedidos.pedidos_eventos_lineas el
+                  JOIN pedidos.pedidos_eventos e ON e.tenant_id = el.tenant_id AND e.pedido_id = el.pedido_id AND e.id = el.evento_id
+                 ORDER BY el.linea_id, grupo, e.secuencia DESC
+            )
+            SELECT l.tenant_id, l.pedido_id, l.id AS linea_id, l.n, l.producto_id,
+                   l.cantidad_pedida                                     AS pedida,
+                   c.cantidad                                            AS confirmada,
+                   d.cantidad                                            AS despachada,
+                   -- Una entrega vale si es posterior al último despacho (un ENTREGA_FALLIDA y un segundo despacho la anulan).
+                   CASE WHEN en.secuencia > d.secuencia THEN en.cantidad END AS entregada,
+                   CASE WHEN r.secuencia > d.secuencia THEN r.cantidad END   AS recibida,
+                   COALESCE(c.cantidad, l.cantidad_pedida)
+                     - COALESCE(CASE WHEN en.secuencia > d.secuencia THEN en.cantidad END, 0) AS pendiente,
+                   l.precio_visto, l.precio_confirmado, l.precio_origen, l.lista_precio_item_id
+              FROM pedidos.pedidos_lineas l
+              LEFT JOIN ultimos c  ON c.linea_id = l.id  AND c.grupo = 'confirmada'
+              LEFT JOIN ultimos d  ON d.linea_id = l.id  AND d.grupo = 'despachada'
+              LEFT JOIN ultimos en ON en.linea_id = l.id AND en.grupo = 'entregada'
+              LEFT JOIN ultimos r  ON r.linea_id = l.id  AND r.grupo = 'recibida'
+            """;
 
     @BeforeAll
     static void migrar() throws SQLException {
@@ -119,6 +151,22 @@ class EstadoGuardadoEsDerivadoTest {
                 assertThat(rs.getInt(2)).as("pedidos creados").isEqualTo(SECUENCIAS);
             }
         }
+        // Y las cantidades por línea: la vista de LATERAL da exactamente las filas de la forma anterior.
+        int lineas;
+        int distintas;
+        try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
+             Statement s = c.createStatement(); ResultSet rs = s.executeQuery(
+                "WITH nueva AS (SELECT * FROM pedidos.v_pedidos_lineas), anterior AS (" + V_PEDIDOS_LINEAS_ANTERIOR + ") "
+                        + "SELECT (SELECT count(*) FROM nueva), "
+                        + "(SELECT count(*) FROM (SELECT * FROM nueva EXCEPT ALL SELECT * FROM anterior) x) "
+                        + "+ (SELECT count(*) FROM (SELECT * FROM anterior EXCEPT ALL SELECT * FROM nueva) y)")) {
+            rs.next();
+            lineas = rs.getInt(1);
+            distintas = rs.getInt(2);
+        }
+        System.out.println("── F5.2: v_pedidos_lineas frente a la forma anterior: " + lineas + " líneas, " + distintas + " filas distintas ──");
+        assertThat(lineas).as("la comparación mira líneas de verdad").isEqualTo(SECUENCIAS * 2);
+        assertThat(distintas).as("semilla " + semilla + ": la vista nueva da las mismas filas").isZero();
         System.out.println("── F5.2: " + SECUENCIAS + " pedidos, " + eventos + " eventos, " + diferencias + " diferencias ──");
         assertThat(primeras).as("semilla " + semilla).isEmpty();
         assertThat(diferencias).as("semilla " + semilla).isZero();

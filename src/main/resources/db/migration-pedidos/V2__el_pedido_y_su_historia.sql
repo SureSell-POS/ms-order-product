@@ -240,18 +240,15 @@ END
 $rls$;
 
 -- ── 4 · Las vistas ──────────────────────────────────────────────────
+-- Una fila por línea, y cada cantidad es la del ÚLTIMO evento (por secuencia) de su
+-- etapa para ESA línea. Se escribe con LATERAL por línea, no con un DISTINCT ON sobre
+-- todas las cantidades: medido (CostoDelPedidoTest, 2 negocios × 10.000 pedidos ×
+-- 5 líneas × 2 eventos con líneas), el DISTINCT ON calculaba las 200.000 filas de
+-- TODOS los negocios en cada transición (dentro de la DEFINER no hay RLS) y en cada
+-- detalle: 232 ms y 459 ms. Así cada filtro por pedido baja a `ix_pel_linea`.
+-- Mismo resultado fila a fila que la forma anterior: EstadoGuardadoEsDerivadoTest
+-- compara las dos sobre sus 1.000 recorridos aleatorios.
 CREATE VIEW pedidos.v_pedidos_lineas WITH (security_invoker = true) AS
-WITH ultimos AS (
-    SELECT DISTINCT ON (el.linea_id, grupo)
-           el.linea_id, e.secuencia, el.cantidad,
-           CASE WHEN e.tipo IN ('CONFIRMADO', 'AJUSTADO') THEN 'confirmada'
-                WHEN e.tipo = 'DESPACHADO' THEN 'despachada'
-                WHEN e.tipo IN ('ENTREGADO', 'ENTREGADO_CON_NOVEDAD') THEN 'entregada'
-                ELSE 'recibida' END AS grupo
-      FROM pedidos.pedidos_eventos_lineas el
-      JOIN pedidos.pedidos_eventos e ON e.tenant_id = el.tenant_id AND e.pedido_id = el.pedido_id AND e.id = el.evento_id
-     ORDER BY el.linea_id, grupo, e.secuencia DESC
-)
 SELECT l.tenant_id, l.pedido_id, l.id AS linea_id, l.n, l.producto_id,
        l.cantidad_pedida                                     AS pedida,
        c.cantidad                                            AS confirmada,
@@ -263,10 +260,23 @@ SELECT l.tenant_id, l.pedido_id, l.id AS linea_id, l.n, l.producto_id,
          - COALESCE(CASE WHEN en.secuencia > d.secuencia THEN en.cantidad END, 0) AS pendiente,
        l.precio_visto, l.precio_confirmado, l.precio_origen, l.lista_precio_item_id
   FROM pedidos.pedidos_lineas l
-  LEFT JOIN ultimos c  ON c.linea_id = l.id  AND c.grupo = 'confirmada'
-  LEFT JOIN ultimos d  ON d.linea_id = l.id  AND d.grupo = 'despachada'
-  LEFT JOIN ultimos en ON en.linea_id = l.id AND en.grupo = 'entregada'
-  LEFT JOIN ultimos r  ON r.linea_id = l.id  AND r.grupo = 'recibida';
+  LEFT JOIN LATERAL (SELECT el.cantidad, e.secuencia FROM pedidos.pedidos_eventos_lineas el
+                       JOIN pedidos.pedidos_eventos e ON e.tenant_id = el.tenant_id AND e.pedido_id = el.pedido_id AND e.id = el.evento_id
+                      WHERE el.tenant_id = l.tenant_id AND el.linea_id = l.id AND e.tipo IN ('CONFIRMADO', 'AJUSTADO')
+                      ORDER BY e.secuencia DESC LIMIT 1) c ON true
+  LEFT JOIN LATERAL (SELECT el.cantidad, e.secuencia FROM pedidos.pedidos_eventos_lineas el
+                       JOIN pedidos.pedidos_eventos e ON e.tenant_id = el.tenant_id AND e.pedido_id = el.pedido_id AND e.id = el.evento_id
+                      WHERE el.tenant_id = l.tenant_id AND el.linea_id = l.id AND e.tipo = 'DESPACHADO'
+                      ORDER BY e.secuencia DESC LIMIT 1) d ON true
+  LEFT JOIN LATERAL (SELECT el.cantidad, e.secuencia FROM pedidos.pedidos_eventos_lineas el
+                       JOIN pedidos.pedidos_eventos e ON e.tenant_id = el.tenant_id AND e.pedido_id = el.pedido_id AND e.id = el.evento_id
+                      WHERE el.tenant_id = l.tenant_id AND el.linea_id = l.id AND e.tipo IN ('ENTREGADO', 'ENTREGADO_CON_NOVEDAD')
+                      ORDER BY e.secuencia DESC LIMIT 1) en ON true
+  -- Solo RECIBIDO y RECIBIDO_CON_NOVEDAD traen líneas en esta etapa: ningún otro tipo declara cantidades (lo impone la función).
+  LEFT JOIN LATERAL (SELECT el.cantidad, e.secuencia FROM pedidos.pedidos_eventos_lineas el
+                       JOIN pedidos.pedidos_eventos e ON e.tenant_id = el.tenant_id AND e.pedido_id = el.pedido_id AND e.id = el.evento_id
+                      WHERE el.tenant_id = l.tenant_id AND el.linea_id = l.id AND e.tipo IN ('RECIBIDO', 'RECIBIDO_CON_NOVEDAD')
+                      ORDER BY e.secuencia DESC LIMIT 1) r ON true;
 COMMENT ON VIEW pedidos.v_pedidos_lineas IS
     'Cantidades por linea derivadas de los eventos: pedida, confirmada, despachada, entregada, recibida, pendiente. '
     'Sin estado PARCIAL. Filtrar SIEMPRE por tenant_id. V2 pedidos.';
