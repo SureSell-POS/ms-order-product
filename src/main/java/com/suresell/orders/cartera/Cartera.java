@@ -339,6 +339,8 @@ public class Cartera {
                       JOIN cartera_aplicaciones a ON a.tenant_id = ? AND a.debito_tx_id = f.id
                       JOIN recibos_de_caja r ON r.tenant_id = a.tenant_id AND r.id = a.recibo_id
                      WHERE NOT EXISTS (SELECT 1 FROM recibos_de_caja x WHERE x.tenant_id = a.tenant_id AND x.anula_recibo_id = a.recibo_id)
+                       -- F4.13b: lo revertido con rastro no pagó nada.
+                       AND NOT EXISTS (SELECT 1 FROM cartera_aplicaciones_revertidas rv WHERE rv.aplicacion_id = a.id)
                 ), pagadas AS (
                     SELECT id, min(dia) AS pagada_el FROM abonos WHERE acumulado >= monto GROUP BY id
                 )
@@ -753,16 +755,24 @@ public class Cartera {
                 "SELECT COALESCE(sum(saldo_a_favor), 0) FROM v_saldo_a_favor_por_recibo WHERE tenant_id = ? AND recibo_id = ?",
                 BigDecimal.class, negocio, id));
         r.put("aplicaciones", jdbc.queryForList("""
-                SELECT d.order_uuid, a.debito_tx_id, a.monto, a.regla
+                SELECT a.id, d.order_uuid, o.id_order, a.debito_tx_id, a.monto, a.regla, rv.revertida_en
                   FROM cartera_aplicaciones a
                   JOIN debt_transactions d ON d.tenant_id = a.tenant_id AND d.id = a.debito_tx_id
+                  LEFT JOIN orders o ON o.tenant_id = d.tenant_id AND o.uuid_id = d.order_uuid
+                  LEFT JOIN cartera_aplicaciones_revertidas rv ON rv.aplicacion_id = a.id
                  WHERE a.tenant_id = ? AND a.recibo_id = ?
                  ORDER BY d.transaction_date, d.created_at""", negocio, id).stream().map(a -> {
                     Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("aplicacionId", a.get("id"));
                     m.put("orderUuid", a.get("order_uuid"));
+                    // F4.13b (aditivo): el número de la venta (null sin venta) para «Venta N.º N».
+                    m.put("idOrder", a.get("id_order"));
                     m.put("debitoTxId", a.get("debito_tx_id"));
                     m.put("monto", a.get("monto"));
                     m.put("regla", a.get("regla"));
+                    // F4.13b (aditivo): true si se revirtió con rastro (ya no cuenta), y cuándo.
+                    m.put("revertida", a.get("revertida_en") != null);
+                    m.put("revertidaEn", instante(a.get("revertida_en")));
                     return m;
                 }).toList());
         r.put("saldoCliente", jdbc.queryForList(
@@ -868,15 +878,22 @@ public class Cartera {
                  WHERE e.tenant_id = ? AND e.cliente_documento = ?
                    AND (e.ocurrido_en AT TIME ZONE 'America/Bogota')::date BETWEEN ? AND ?
                  ORDER BY e.numero""", negocio, documento, java.sql.Date.valueOf(inicio), java.sql.Date.valueOf(fin))));
-        estado.put("aplicacionesARevisarPorInsolvencia", insolvente.map(desde -> jdbc.queryForList("""
+        // F4.13b: la línea es el CORTE del proceso en curso (la misma que la foto); lo revertido sale de la lista. Con la
+        // columna puesta sin proceso (escrita a mano), la fecha como antes.
+        Optional<Timestamp> corte = insolvente.flatMap(desde -> jdbc.queryForList(
+                "SELECT corte FROM v_insolvencia_vigente WHERE tenant_id = ? AND cliente_documento = ? AND en_proceso AND corte IS NOT NULL",
+                Timestamp.class, negocio, documento).stream().findFirst()
+                .or(() -> Optional.of(Timestamp.from(desde.atStartOfDay(BOGOTA).toInstant()))));
+        estado.put("aplicacionesARevisarPorInsolvencia", corte.map(desde -> jdbc.queryForList("""
                 SELECT a.id, r.numero AS recibo_numero, d.order_uuid, o.id_order, a.monto, a.ocurrido_en
                   FROM cartera_aplicaciones a
                   JOIN recibos_de_caja r ON r.tenant_id = a.tenant_id AND r.id = a.recibo_id
                   JOIN debt_transactions d ON d.tenant_id = a.tenant_id AND d.id = a.debito_tx_id
                   LEFT JOIN orders o ON o.tenant_id = d.tenant_id AND o.uuid_id = d.order_uuid
                  WHERE a.tenant_id = ? AND r.cliente_documento = ? AND a.regla = 'SALDO_A_FAVOR_AUTOMATICO'
-                   AND (a.ocurrido_en AT TIME ZONE 'America/Bogota')::date >= ?
-                 ORDER BY a.ocurrido_en""", negocio, documento, java.sql.Date.valueOf(desde)).stream().map(f -> {
+                   AND a.ocurrido_en >= ?
+                   AND NOT EXISTS (SELECT 1 FROM cartera_aplicaciones_revertidas rv WHERE rv.aplicacion_id = a.id)
+                 ORDER BY a.ocurrido_en""", negocio, documento, desde).stream().map(f -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", f.get("id"));
             m.put("reciboNumero", f.get("recibo_numero"));
@@ -886,6 +903,10 @@ public class Cartera {
             m.put("aplicadaEn", instante(f.get("ocurrido_en")));
             return m;
         }).toList()).orElse(List.of()));
+        // F4.13b (aditivo): los pagos revertidos con rastro del cliente (B13b «Pagos revertidos»).
+        estado.put("aplicacionesRevertidas", jdbc.queryForList(ProcesoDeInsolvencia.COLUMNAS_DE_LA_REVERTIDA
+                        + " WHERE rv.tenant_id = ? AND r.cliente_documento = ? ORDER BY rv.revertida_en DESC", negocio, documento)
+                .stream().map(ProcesoDeInsolvencia::revertida).toList());
     }
 
     private static final String COLUMNAS_DEL_EGRESO = """

@@ -99,6 +99,7 @@ class SaldoAFavorTest {
     void sembrar() {
         dueno = new JdbcTemplate(new DriverManagerDataSource(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword()));
         for (String t : new String[] {T, OTRO}) {
+            dueno.update("DELETE FROM cartera_aplicaciones_revertidas WHERE tenant_id = ?", t);
             ProcesoDeInsolvenciaTest.limpiarInsolvencia(dueno, t);
             dueno.update("DELETE FROM cartera_aplicaciones WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM egresos_de_cartera_mercancia WHERE tenant_id = ?", t);
@@ -762,5 +763,135 @@ class SaldoAFavorTest {
         assertThat(dueno.queryForObject("SELECT saldo FROM v_cartera_por_documento WHERE tenant_id = ? AND cliente_documento = ? "
                 + "AND order_uuid IS DISTINCT FROM (SELECT uuid_id FROM orders WHERE tenant_id = ? AND idempotency_key = 'e-venta-error')",
                 BigDecimal.class, T, TIENDA, T)).as("la más vieja primero").isEqualByComparingTo("80000");
+    }
+
+    // ---------------------------------------------------------------- F4.13b: revertir con rastro
+
+    /** Saldo a favor de 20.000 aplicado SOLO a una venta a crédito de 50.000, antes de saberse la insolvencia. Devuelve la aplicación. */
+    private UUID saldoAplicadoALaVenta(String clave) throws Exception {
+        abonarConSaldoAFavor(clave + "-abono");
+        vender(ventaACredito(TIENDA, clave + "-venta", false)).andExpect(status().isCreated()).andExpect(jsonPath("$.saldoAFavorAplicado").value(20000));
+        return dueno.queryForObject("SELECT id FROM cartera_aplicaciones WHERE tenant_id = ? AND regla = 'SALDO_A_FAVOR_AUTOMATICO'", UUID.class, T);
+    }
+
+    private ResultActions revertir(String email, String rol, UUID aplicacion, String cuerpo) throws Exception {
+        return mockMvc.perform(post("/api/cartera/aplicaciones/" + aplicacion + "/revertir").header("Authorization", bearer(email, rol))
+                .contentType(MediaType.APPLICATION_JSON).content(cuerpo));
+    }
+
+    private void inicioDeLaTienda(LocalDate fecha) throws Exception {
+        mockMvc.perform(post("/api/cartera/clientes/" + TIENDA + "/insolvencia/etapas").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"etapa\":\"INICIO\",\"fecha\":\"" + fecha + "\",\"documento\":\"Auto\",\"informadoPor\":\"abogado\"}"))
+                .andExpect(status().isCreated());
+    }
+
+    @Test
+    @DisplayName("🔴 F4.13b: revertir reabre la venta y devuelve el saldo a favor, con rastro; el reintento es 200; la foto no cambia y total_debt tampoco")
+    void revertirConRastro() throws Exception {
+        UUID aplicacion = saldoAplicadoALaVenta("rev");
+        BigDecimal totalDebtAntes = totalDebt(TIENDA);
+        inicioDeLaTienda(hoy.minusDays(5));
+        JsonNode antes = estadoDeCuenta(TIENDA);
+        assertThat(antes.get("aplicacionesARevisarPorInsolvencia")).hasSize(1);
+        String huella = leer(mockMvc.perform(get("/api/cartera/clientes/" + TIENDA + "/insolvencia/foto").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk())).get("huella").asText();
+
+        revertir(CAJA, "cajero", aplicacion, "{\"motivo\":\"x\"}").andExpect(status().isForbidden());
+        JsonNode cierreAntes = preview();
+        JsonNode hecho = leer(revertir(ADMIN, "admin", aplicacion, "{\"motivo\":\"Concepto del abogado\",\"referencia\":\"Acta 12\"}")
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.monto").value(20000))
+                .andExpect(jsonPath("$.motivo").value("Concepto del abogado"))
+                .andExpect(jsonPath("$.referencia").value("Acta 12"))
+                .andExpect(jsonPath("$.revertidaPor").value("Admin"))
+                .andExpect(jsonPath("$.saldoDeLaFactura").value(50000))
+                .andExpect(jsonPath("$.saldoAFavor").value(20000)));
+        assertThat(saldoDeLaVenta("rev-venta")).isEqualByComparingTo("50000");
+        assertThat(totalDebt(TIENDA)).as("la aplicación automática nunca movió total_debt").isEqualByComparingTo(totalDebtAntes);
+        revertir(ADMIN, "admin", aplicacion, "{\"motivo\":\"Otra vez\"}").andExpect(status().isOk())
+                .andExpect(jsonPath("$.aplicacionId").value(hecho.get("aplicacionId").asText()))
+                .andExpect(jsonPath("$.motivo").value("Concepto del abogado"));
+        assertThat(contar("SELECT count(*) FROM cartera_aplicaciones_revertidas WHERE tenant_id = ?", T)).isEqualTo(1);
+
+        JsonNode despues = estadoDeCuenta(TIENDA);
+        assertThat(despues.get("aplicacionesARevisarPorInsolvencia")).isEmpty();
+        assertThat(despues.get("aplicacionesRevertidas")).hasSize(1);
+        assertThat(despues.get("aplicacionesRevertidas").get(0).get("referencia").asText()).isEqualTo("Acta 12");
+        assertThat(despues.get("saldoAFavor").decimalValue()).isEqualByComparingTo("20000");
+        assertThat(leer(mockMvc.perform(get("/api/cartera/clientes/" + TIENDA + "/insolvencia/foto").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk())).get("huella").asText()).as("la foto no cambia").isEqualTo(huella);
+        // Los recibos del estado de cuenta marcan la aplicación revertida, con su fecha y el número de la venta.
+        JsonNode marcada = null;
+        for (JsonNode ap : despues.get("recibos").findValues("aplicaciones")) {
+            for (JsonNode x : ap) {
+                if (x.get("aplicacionId").asText().equals(aplicacion.toString())) {
+                    marcada = x;
+                }
+            }
+        }
+        assertThat(marcada).as("la aplicación revertida en su recibo").isNotNull();
+        assertThat(marcada.get("revertida").asBoolean()).isTrue();
+        assertThat(marcada.get("revertidaEn").asText()).isEqualTo(despues.get("aplicacionesRevertidas").get(0).get("revertidaEn").asText());
+        assertThat(marcada.get("idOrder").asLong()).isEqualTo(
+                dueno.queryForObject("SELECT id_order FROM orders WHERE tenant_id = ? AND idempotency_key = 'rev-venta'", Long.class, T));
+
+        // El cierre de caja no cambia: revertir no mueve efectivo. Lo que imprime la caja es la respuesta del POST de cierre.
+        JsonNode cierreDespues = preview();
+        for (String campo : List.of("recaudoCarteraEfectivo", "recaudoComoSaldoAFavorEfectivo", "devolucionesSaldoAFavorEfectivo")) {
+            assertThat(cierreDespues.get(campo).decimalValue()).as(campo).isEqualByComparingTo(cierreAntes.get(campo).decimalValue());
+        }
+        JsonNode cierre = leer(mockMvc.perform(post("/api/closures").header("Authorization", bearer(CAJA, "cajero"))
+                        .header("X-User-Name", "Caja").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"cashDetail\":{\"bill100k\":1,\"bill50k\":0,\"bill20k\":0,\"bill10k\":0,\"bill5k\":0,"
+                                + "\"bill2k\":0,\"coin1000\":0,\"coin500\":0,\"coin200\":0,\"coin100\":0,\"coin50\":0},"
+                                + "\"countedCard\":0,\"countedQr\":0,\"notes\":\"turno\",\"pettyCashExpenses\":[],\"baseForNextDay\":0}"))
+                .andExpect(status().isOk()));
+        for (String campo : List.of("recaudoCarteraEfectivo", "recaudoComoSaldoAFavorEfectivo", "devolucionesSaldoAFavorEfectivo")) {
+            assertThat(cierre.get(campo).decimalValue()).as("POST de cierre: " + campo).isEqualByComparingTo(cierreAntes.get(campo).decimalValue());
+        }
+        // El saldo que volvió sigue congelado en el proceso: el cobro automático no lo cruza.
+        assertThat(contar("SELECT count(*) FROM cartera_aplicaciones WHERE tenant_id = ? AND regla = 'SALDO_A_FAVOR_AUTOMATICO'", T)).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("🔴 F4.13b: no se revierte un abono, sin proceso en curso, lo anterior al corte (y B13 no lo lista), ni con el recibo anulado; sin motivo, 400")
+    void noSeRevierte() throws Exception {
+        UUID aplicacion = saldoAplicadoALaVenta("nor");
+        UUID abono = dueno.queryForObject("SELECT id FROM cartera_aplicaciones WHERE tenant_id = ? AND regla = 'MAS_ANTIGUA_PRIMERO' LIMIT 1", UUID.class, T);
+
+        revertir(ADMIN, "admin", aplicacion, "{\"motivo\":\"x\"}").andExpect(ConflictoConMensaje.de("APLICACION_NO_REVERTIBLE"))
+                .andExpect(jsonPath("$.message").value("El cliente no tiene un proceso de insolvencia en curso: no hay pagos que revertir por esa causa. No se revirtió nada."));
+        // INICIO de HOY: el corte es el registro, después de la aplicación. Es anterior y B13 ya no la lista.
+        inicioDeLaTienda(hoy);
+        assertThat(estadoDeCuenta(TIENDA).get("aplicacionesARevisarPorInsolvencia")).as("B13 con la línea del corte").isEmpty();
+        revertir(ADMIN, "admin", aplicacion, "{\"motivo\":\"x\"}").andExpect(ConflictoConMensaje.de("APLICACION_NO_REVERTIBLE"))
+                .andExpect(jsonPath("$.message").value("Ese pago se aplicó antes del inicio del proceso ("
+                        + hoy.format(java.time.format.DateTimeFormatter.ofPattern("d 'de' MMMM 'de' yyyy", java.util.Locale.forLanguageTag("es-CO")))
+                        + "): ya está en la deuda al inicio, que se reclama dentro del proceso. No se revirtió nada."));
+        revertir(ADMIN, "admin", abono, "{\"motivo\":\"x\"}").andExpect(ConflictoConMensaje.de("APLICACION_NO_REVERTIBLE"))
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.startsWith("Aquí solo se revierten los pagos que el sistema aplicó solo")));
+        revertir(ADMIN, "admin", aplicacion, "{\"motivo\":\"  \"}").andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.campo").value("motivo"))
+                .andExpect(jsonPath("$.message").value("Falta el motivo: escribe por qué se revierte. No se revirtió nada."));
+        revertir(ADMIN, "admin", UUID.randomUUID(), "{\"motivo\":\"x\"}").andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("id"));
+        mockMvc.perform(post("/api/cartera/aplicaciones/" + aplicacion + "/revertir").header("Authorization", bearer(ADMIN_OTRO, "admin", OTRO))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"motivo\":\"x\"}"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("id"));
+        assertThat(contar("SELECT count(*) FROM cartera_aplicaciones_revertidas WHERE tenant_id IN (?, ?)", T, OTRO)).isZero();
+    }
+
+    @Test
+    @DisplayName("🔴 F4.13b: con el recibo del saldo a favor anulado, la aplicación ya no cuenta y no se revierte")
+    void reciboAnuladoNoSeRevierte() throws Exception {
+        UUID aplicacion = saldoAplicadoALaVenta("anu");
+        String recibo = dueno.queryForObject("SELECT recibo_id::text FROM cartera_aplicaciones WHERE id = ?", String.class, aplicacion);
+        long numero = dueno.queryForObject("SELECT numero FROM recibos_de_caja WHERE id = ?::uuid", Long.class, recibo);
+        inicioDeLaTienda(hoy.minusDays(5));
+        mockMvc.perform(post("/api/cartera/recibos/" + recibo + "/anular").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"motivo\":\"ERROR_DE_MONTO\"}"))
+                .andExpect(status().isCreated());
+        revertir(ADMIN, "admin", aplicacion, "{\"motivo\":\"x\"}").andExpect(ConflictoConMensaje.de("APLICACION_NO_REVERTIBLE"))
+                .andExpect(jsonPath("$.message").value("El recibo N.º " + numero + " de ese saldo a favor está anulado: ese pago ya no cuenta y no hay nada que revertir. No se revirtió nada."));
     }
 }

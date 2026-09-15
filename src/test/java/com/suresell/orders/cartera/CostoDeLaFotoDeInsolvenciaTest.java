@@ -313,6 +313,37 @@ class CostoDeLaFotoDeInsolvenciaTest {
         }
         assertThat(tiempos).as("el disparador de V78 corre sobre el abono normal").containsKey("disparador V78 en el INSERT (abono normal)");
         assertThat(tiempos).as("el disparador de V79 corre sobre el abono normal").containsKey("disparador V79 en el INSERT (abono normal)");
+        // F4.13b (V80), umbral de ECM: el estado de cuenta del cliente de 1.000 facturas y 5.000 aplicaciones con la vista real
+        // (que excluye lo revertido) no pasa de +25 % sobre la MISMA vista sin esa exclusión, medidas en la misma corrida.
+        String migracion = java.nio.file.Files.readString(java.nio.file.Path.of(
+                "src/main/resources/db/migration/V80__revertir_con_rastro_lo_aplicado_despues_del_inicio.sql"));
+        int ini = migracion.indexOf("CREATE VIEW public.v_cartera_por_documento");
+        String vistaDeControl = migracion.substring(ini, migracion.indexOf("';", migracion.indexOf("COMMENT ON VIEW public.v_cartera_por_documento", ini)));
+        vistaDeControl = vistaDeControl.substring(0, vistaDeControl.indexOf("COMMENT ON VIEW"))
+                .replace("CREATE VIEW public.v_cartera_por_documento WITH (security_invoker = true) AS", "CREATE TEMP VIEW v_documento_sin_reversiones AS")
+                .replace(" AND rv.aplicacion_id IS NULL", "")
+                .replace("LEFT JOIN public.cartera_aplicaciones_revertidas rv ON rv.aplicacion_id = a.id", "")
+                .trim();
+        if (vistaDeControl.endsWith(";")) {
+            vistaDeControl = vistaDeControl.substring(0, vistaDeControl.length() - 1);
+        }
+        assertThat(vistaDeControl).as("el control quita la exclusión").doesNotContain("revertidas").contains("GROUP BY");
+        double conExclusion = Double.MAX_VALUE;
+        double sinExclusion = Double.MAX_VALUE;
+        try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), "app_user", "app_pw");
+             Statement st = c.createStatement()) {
+            st.execute("SET jit = off");
+            st.execute("SELECT set_config('app.tenant_id', 'foto-a', false)");
+            st.execute(vistaDeControl);
+            String filtro = " WHERE tenant_id = 'foto-a' AND cliente_documento = 'D1' AND (saldo > 0 OR fecha BETWEEN current_date - 90 AND current_date)";
+            for (int vuelta = 0; vuelta < 5; vuelta++) {
+                sinExclusion = Math.min(sinExclusion, ejecucion(st, "EXPLAIN (ANALYZE) SELECT debito_tx_id, saldo FROM v_documento_sin_reversiones" + filtro));
+                conExclusion = Math.min(conExclusion, ejecucion(st, "EXPLAIN (ANALYZE) SELECT debito_tx_id, saldo FROM v_cartera_por_documento" + filtro));
+            }
+        }
+        tiempos.put("V80 estado de cuenta 1.000 facturas, sin excluir revertidas (control)", sinExclusion);
+        tiempos.put("V80 estado de cuenta 1.000 facturas, vista real", conExclusion);
+        assertThat(conExclusion).as("umbral de ECM: +25 %% sobre el control (%.3f ms)", sinExclusion).isLessThanOrEqualTo(sinExclusion * 1.25);
         System.out.println("── plan de la lectura del disparador V76 ──\n" + planDelDisparador);
         assertThat(planDelDisparador).contains("Index Scan using pk_recibos_de_caja", "Index Scan using ux_clientes_documento")
                 .contains("Index Cond: ((tenant_id = 'foto-vecino'::text) AND (documento = 'V4999'::text))")

@@ -92,6 +92,16 @@ public class CarteraController {
 
     public record Anulacion(String motivo) {}
 
+    @PostMapping("/aplicaciones/{id}/revertir")
+    @Operation(summary = "F4.13b — Revertir con rastro un pago que el sistema aplicó solo desde el saldo a favor después del inicio "
+            + "del proceso de insolvencia (solo admin): {motivo, referencia?}. 201 revertido; 200 si ya lo estaba. "
+            + "409 APLICACION_NO_REVERTIBLE con el texto de su causa")
+    public ResponseEntity<Map<String, Object>> revertir(@PathVariable UUID id, @RequestBody(required = false) ProcesoDeInsolvencia.Reversion cuerpo,
+                                                        HttpServletRequest http) {
+        ProcesoDeInsolvencia.Revertida r = insolvencias.revertirAplicacion(quien(http, Set.of("admin"), "revertir un pago aplicado"), id, cuerpo);
+        return ResponseEntity.status(r.repetida() ? HttpStatus.OK : HttpStatus.CREATED).body(r.cuerpo());
+    }
+
     @PostMapping("/recibos/{id}/anular")
     @Operation(summary = "F4.4 — Anular un recibo (solo admin): otro recibo con el motivo; la deuda vuelve")
     @ResponseStatus(HttpStatus.CREATED)

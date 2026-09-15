@@ -96,6 +96,9 @@ class CostoDeLaCarteraTest {
                   JOIN debt_transactions d ON d.tenant_id = v.tenant_id AND d.id = v.debito_tx_id
                  WHERE v.tenant_id = 'perf-a' AND v.account_id = 'perf-a-777' AND v.saldo > 0
                  ORDER BY v.fecha, d.created_at, v.debito_tx_id""");
+        CONSULTAS.put("saldo a favor de un cliente (F4.12)", """
+                SELECT recibo_id, credito_tx_id, saldo_a_favor FROM v_saldo_a_favor_por_recibo
+                 WHERE tenant_id = 'perf-a' AND cliente_documento = 'D777' ORDER BY ocurrido_en, numero""");
         CONSULTAS.put("comportamiento de pago de un cliente (F10.3)", """
                 WITH facturas AS (
                     SELECT d.id, d.order_uuid, d.transaction_date AS fecha, d.vence_el, d.amount AS monto
@@ -175,6 +178,7 @@ class CostoDeLaCarteraTest {
         Map<String, Double> tiempos = new LinkedHashMap<>();
         try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
              Statement st = c.createStatement()) {
+            st.execute("SET jit = off");       // staging no compila con JIT (memoria costo-medido-con-jit)
             // La lista se mide también con el work_mem de staging (3500kB, SHOW work_mem del 14/09) y con uno holgado.
             for (String wm : new String[] {"3500kB", "64MB"}) {
                 st.execute("SET work_mem = '" + wm + "'");
@@ -192,13 +196,18 @@ class CostoDeLaCarteraTest {
             st.execute("RESET work_mem");
             for (Map.Entry<String, String> q : CONSULTAS.entrySet()) {
                 informe.append("\n── ").append(q.getKey()).append(" ──\n");
-                double ms = -1;
-                try (ResultSet rs = st.executeQuery("EXPLAIN (ANALYZE, BUFFERS) " + q.getValue())) {
-                    while (rs.next()) {
-                        String l = rs.getString(1);
-                        informe.append(l).append('\n');
-                        if (l.startsWith("Execution Time:")) {
-                            ms = Double.parseDouble(l.replaceAll("[^0-9.]", ""));
+                // La mejor de tres vueltas: una sola lectura mide el caché tanto como la consulta.
+                double ms = Double.MAX_VALUE;
+                for (int vuelta = 0; vuelta < 3; vuelta++) {
+                    try (ResultSet rs = st.executeQuery("EXPLAIN (ANALYZE, BUFFERS) " + q.getValue())) {
+                        while (rs.next()) {
+                            String l = rs.getString(1);
+                            if (vuelta == 2) {
+                                informe.append(l).append('\n');
+                            }
+                            if (l.startsWith("Execution Time:")) {
+                                ms = Math.min(ms, Double.parseDouble(l.replaceAll("[^0-9.]", "")));
+                            }
                         }
                     }
                 }

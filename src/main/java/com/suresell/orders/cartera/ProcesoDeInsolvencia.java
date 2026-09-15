@@ -87,6 +87,9 @@ public class ProcesoDeInsolvencia {
     static final String SIN_DOCUMENTO_DESDE_LA_MARCA = "Sin documento (registrado desde la marca anterior)";
     static final String FECHA_CORREGIDA_DESDE_LA_MARCA = "Fecha de inicio corregida desde la marca anterior";
 
+    static final java.time.format.DateTimeFormatter FECHA_LARGA =
+            java.time.format.DateTimeFormatter.ofPattern("d 'de' MMMM 'de' yyyy", Locale.forLanguageTag("es-CO"));
+
     private final JdbcTemplate jdbc;
     private final Cartera cartera;
 
@@ -96,6 +99,11 @@ public class ProcesoDeInsolvencia {
     }
 
     public record CreditoPosterior(Boolean habilitado, Integer plazoMaximoDias, String motivo) {}
+
+    public record Reversion(String motivo, String referencia) {}
+
+    /** El resultado de revertir: el cuerpo y si ya estaba revertida (reintento, 200). */
+    public record Revertida(Map<String, Object> cuerpo, boolean repetida) {}
 
     public record NuevaEtapa(String etapa, LocalDate fecha, String documento, String autoridad, String informadoPor,
                              String regimen, String numeroProceso, UUID corrigeEtapaId) {}
@@ -202,6 +210,94 @@ public class ProcesoDeInsolvencia {
         cartera.fijarAutor(quien);
         jdbc.queryForObject("SELECT fn_insolvencia_credito_posterior(?, ?, ?, ?)", UUID.class, doc, c.habilitado(), plazo, motivo);
         return proceso(quien, doc);
+    }
+
+    /**
+     * POST /api/cartera/aplicaciones/{id}/revertir (admin, F4.13b): revierte con rastro una aplicación automática del saldo a
+     * favor ocurrida en o después del corte del proceso en curso (V80). Textos de TEXTOS §B13b. Idempotente: ya revertida → 200.
+     */
+    @Transactional
+    public Revertida revertirAplicacion(Quien quien, UUID aplicacionId, Reversion r) {
+        String negocio = quien.negocio();
+        List<Map<String, Object>> filas = aplicacionId == null ? List.of() : jdbc.queryForList("""
+                SELECT a.id, a.regla, a.ocurrido_en, r.numero AS recibo_numero, r.cliente_documento,
+                       EXISTS (SELECT 1 FROM recibos_de_caja x WHERE x.tenant_id = r.tenant_id AND x.anula_recibo_id = r.id) AS anulado,
+                       EXISTS (SELECT 1 FROM cartera_aplicaciones_revertidas rv WHERE rv.aplicacion_id = a.id) AS revertida
+                  FROM cartera_aplicaciones a
+                  JOIN recibos_de_caja r ON r.tenant_id = a.tenant_id AND r.id = a.recibo_id
+                 WHERE a.tenant_id = ? AND a.id = ?""", negocio, aplicacionId);
+        if (filas.isEmpty()) {
+            throw new DatoInvalidoException("id", "Ese pago no existe en el negocio.");
+        }
+        Map<String, Object> ap = filas.get(0);
+        String motivo = obligatorio(r == null ? null : r.motivo(), "motivo", "Falta el motivo: escribe por qué se revierte. No se revirtió nada.");
+        if (Boolean.TRUE.equals(ap.get("revertida"))) {
+            return new Revertida(revertidaPorId(negocio, aplicacionId), true);
+        }
+        if (!"SALDO_A_FAVOR_AUTOMATICO".equals(ap.get("regla"))) {
+            throw new ConflictoDeCarteraException(ConflictoDeCarteraException.APLICACION_NO_REVERTIBLE,
+                    "Aquí solo se revierten los pagos que el sistema aplicó solo desde el saldo a favor; un abono o una devolución "
+                            + "no se revierten aquí. No se revirtió nada.");
+        }
+        String documento = (String) ap.get("cliente_documento");
+        Map<String, Object> vigente = abierto(negocio, documento).filter(v -> Boolean.TRUE.equals(v.get("en_proceso")))
+                .orElseThrow(() -> new ConflictoDeCarteraException(ConflictoDeCarteraException.APLICACION_NO_REVERTIBLE,
+                        "El cliente no tiene un proceso de insolvencia en curso: no hay pagos que revertir por esa causa. No se revirtió nada."));
+        if (Boolean.TRUE.equals(ap.get("anulado"))) {
+            throw new ConflictoDeCarteraException(ConflictoDeCarteraException.APLICACION_NO_REVERTIBLE,
+                    "El recibo N.º " + ap.get("recibo_numero") + " de ese saldo a favor está anulado: ese pago ya no cuenta y no hay "
+                            + "nada que revertir. No se revirtió nada.");
+        }
+        Object corte = vigente.get("corte");
+        if (corte == null || instanteDe(ap.get("ocurrido_en")).isBefore(instanteDe(corte))) {
+            LocalDate inicio = vigente.get("inicio") == null ? null : ((java.sql.Date) vigente.get("inicio")).toLocalDate();
+            throw new ConflictoDeCarteraException(ConflictoDeCarteraException.APLICACION_NO_REVERTIBLE,
+                    "Ese pago se aplicó antes del inicio del proceso" + (inicio == null ? "" : " (" + inicio.format(FECHA_LARGA) + ")")
+                            + ": ya está en la deuda al inicio, que se reclama dentro del proceso. No se revirtió nada.");
+        }
+        cartera.fijarAutor(quien);
+        jdbc.queryForObject("SELECT fn_revertir_aplicacion(?, ?, ?)", Boolean.class, aplicacionId, motivo, recortarONulo(r.referencia()));
+        return new Revertida(revertidaPorId(negocio, aplicacionId), false);
+    }
+
+    static final String COLUMNAS_DE_LA_REVERTIDA = """
+            SELECT rv.aplicacion_id, r.numero AS recibo_numero, d.order_uuid, o.id_order, a.monto, a.ocurrido_en,
+                   rv.motivo, rv.referencia, rv.revertida_por, u.nombre, rv.revertida_en, a.debito_tx_id, r.cliente_documento
+              FROM cartera_aplicaciones_revertidas rv
+              JOIN cartera_aplicaciones a ON a.tenant_id = rv.tenant_id AND a.id = rv.aplicacion_id
+              JOIN recibos_de_caja r ON r.tenant_id = a.tenant_id AND r.id = a.recibo_id
+              JOIN debt_transactions d ON d.tenant_id = a.tenant_id AND d.id = a.debito_tx_id
+              LEFT JOIN orders o ON o.tenant_id = d.tenant_id AND o.uuid_id = d.order_uuid
+              LEFT JOIN users u ON u.tenant_id = rv.tenant_id AND u.id = rv.revertida_por
+            """;
+
+    private Map<String, Object> revertidaPorId(String negocio, UUID aplicacionId) {
+        Map<String, Object> f = jdbc.queryForMap(COLUMNAS_DE_LA_REVERTIDA + " WHERE rv.tenant_id = ? AND rv.aplicacion_id = ?", negocio, aplicacionId);
+        Map<String, Object> m = revertida(f);
+        m.put("saldoDeLaFactura", jdbc.queryForList("SELECT saldo FROM v_cartera_por_documento WHERE tenant_id = ? AND debito_tx_id = ?",
+                BigDecimal.class, negocio, f.get("debito_tx_id")).stream().findFirst().orElse(BigDecimal.ZERO));
+        m.put("saldoAFavor", cartera.saldoAFavor(negocio, (String) f.get("cliente_documento")));
+        return m;
+    }
+
+    static Map<String, Object> revertida(Map<String, Object> f) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("aplicacionId", f.get("aplicacion_id"));
+        m.put("reciboNumero", f.get("recibo_numero"));
+        m.put("orderUuid", f.get("order_uuid"));
+        m.put("idOrder", f.get("id_order"));
+        m.put("monto", f.get("monto"));
+        m.put("aplicadaEn", instante(f.get("ocurrido_en")));
+        m.put("motivo", f.get("motivo"));
+        m.put("referencia", f.get("referencia"));
+        m.put("revertidaPorId", f.get("revertida_por"));
+        m.put("revertidaPor", f.get("nombre"));
+        m.put("revertidaEn", instante(f.get("revertida_en")));
+        return m;
+    }
+
+    private static java.time.Instant instanteDe(Object o) {
+        return o instanceof OffsetDateTime odt ? odt.toInstant() : ((Timestamp) o).toInstant();
     }
 
     // ------------------------------------------------------------------ leer

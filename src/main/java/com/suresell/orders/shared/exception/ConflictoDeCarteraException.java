@@ -23,6 +23,8 @@ public class ConflictoDeCarteraException extends RuntimeException {
     public static final String SALDO_A_FAVOR_YA_DEVUELTO = "SALDO_A_FAVOR_YA_DEVUELTO";
     /** F4.13 (d): en liquidación el saldo a favor se entrega al liquidador. */
     public static final String BENEFICIARIO_DEBE_SER_EL_LIQUIDADOR = "BENEFICIARIO_DEBE_SER_EL_LIQUIDADOR";
+    /** F4.13b: esa aplicación no se revierte (un texto por causa, TEXTOS §B13b). */
+    public static final String APLICACION_NO_REVERTIBLE = "APLICACION_NO_REVERTIBLE";
 
     private final String codigo;
 
