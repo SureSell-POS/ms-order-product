@@ -139,8 +139,10 @@ public class Cartera {
         }
         Map<String, Object> cliente = resumenVisible(quien, documento);
         // Solo aquí y no en la lista: es dato personal, y el panel lo necesita para el enlace de WhatsApp.
+        // Sin WhatsApp la fila trae null, y findFirst() de un null es NullPointerException (500): se filtra.
         cliente.put("whatsapp", jdbc.queryForList("SELECT whatsapp FROM clientes WHERE tenant_id = ? AND documento = ?",
-                String.class, quien.negocio(), cliente.get("clienteDocumento")).stream().findFirst().orElse(null));
+                String.class, quien.negocio(), cliente.get("clienteDocumento")).stream().filter(java.util.Objects::nonNull)
+                .findFirst().orElse(null));
 
         List<Map<String, Object>> documentos = jdbc.queryForList("""
                 SELECT d.debito_tx_id, d.order_uuid, d.fecha, d.vence_el, d.monto, d.aplicado, d.saldo,

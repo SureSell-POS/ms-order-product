@@ -303,6 +303,17 @@ class CarteraTest {
     }
 
     @Test
+    @DisplayName("🔴 el estado de cuenta de un cliente SIN WhatsApp responde 200 con whatsapp null (daba 500 desde 239c5b7)")
+    void estadoDeCuentaSinWhatsapp() throws Exception {
+        assertThat(dueno.queryForObject("SELECT whatsapp FROM clientes WHERE tenant_id = ? AND documento = ?", String.class, T, TIENDA_B))
+                .as("precondición: la Tienda B no tiene WhatsApp").isNull();
+        mockMvc.perform(get("/api/cartera/clientes/" + TIENDA_B + "/estado-de-cuenta").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.cliente.clienteDocumento").value(TIENDA_B))
+                .andExpect(jsonPath("$.cliente.whatsapp").value(Matchers.nullValue()));
+    }
+
+    @Test
     @DisplayName("🔴 un vendedor ve y cobra solo a sus clientes, aunque pida los de otro")
     void vendedorSoloLosSuyos() throws Exception {
         mockMvc.perform(get("/api/cartera/clientes").header("Authorization", bearer(ANA, "vendedor")))
