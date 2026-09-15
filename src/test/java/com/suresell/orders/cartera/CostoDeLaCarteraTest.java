@@ -8,6 +8,8 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.flywaydb.core.Flyway;
@@ -221,7 +223,7 @@ class CostoDeLaCarteraTest {
     }
 
     @Test
-    @DisplayName("💰 F6.0b D-b4: la deuda compacta de los clientes de un vendedor (300, 500, 1.200 y 2.000), sin JIT, como app_user; guarda de 150 ms")
+    @DisplayName("💰 F6.0b D-b4: la deuda compacta de un vendedor (300, 500, 1.200 y 2.000) frente a la lista del negocio en la misma corrida, sin JIT, como app_user")
     void deudaCompactaPorVendedor() throws Exception {
         long[] v = new long[4];
         try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
@@ -239,25 +241,38 @@ class CostoDeLaCarteraTest {
             st.execute("ANALYZE clientes");
         }
         Map<String, String> informe = new LinkedHashMap<>();
-        Map<String, Double> guardadas = new LinkedHashMap<>();
-        medirDeuda("B clientes primero · 300", DeudaDeLaRuta.CLIENTES_PRIMERO, v[0], 300, informe, guardadas, true);
-        medirDeuda("B clientes primero · 500", DeudaDeLaRuta.CLIENTES_PRIMERO, v[1], 500, informe, guardadas, true);
-        medirDeuda("A vista del negocio · 1.200", DeudaDeLaRuta.VISTA_DEL_NEGOCIO, v[2], 1200, informe, guardadas, true);
+        Map<String, Double> ms = new LinkedHashMap<>();
+        Map<String, Integer> filas = new LinkedHashMap<>();
+        List<String> bucles = new ArrayList<>();
+        // La referencia: la lista de clientes del negocio, servida desde V68, sobre los mismos datos y en la misma corrida.
+        double lista = medirDeuda("lista de clientes del negocio (referencia)", CONSULTAS.get("lista de clientes del negocio"), null, informe, filas, bucles);
+        ms.put("B clientes primero · 300", medirDeuda("B clientes primero · 300", DeudaDeLaRuta.CLIENTES_PRIMERO, v[0], informe, filas, bucles));
+        ms.put("B clientes primero · 500", medirDeuda("B clientes primero · 500", DeudaDeLaRuta.CLIENTES_PRIMERO, v[1], informe, filas, bucles));
+        ms.put("A vista del negocio · 1.200", medirDeuda("A vista del negocio · 1.200", DeudaDeLaRuta.VISTA_DEL_NEGOCIO, v[2], informe, filas, bucles));
         try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
              Statement st = c.createStatement()) {
             st.execute("SELECT set_config('app.user_id', '" + v[0] + "', false)");
             st.execute("UPDATE clientes SET vendedor_id = " + v[3] + " WHERE tenant_id = 'perf-a'");
             st.execute("ANALYZE clientes");
         }
-        medirDeuda("A vista del negocio · 2.000", DeudaDeLaRuta.VISTA_DEL_NEGOCIO, v[3], 2000, informe, guardadas, true);
-        medirDeuda("B clientes primero · 2.000 (fuera de su tramo, sin guarda)", DeudaDeLaRuta.CLIENTES_PRIMERO, v[3], 2000, informe, guardadas, false);
+        ms.put("A vista del negocio · 2.000", medirDeuda("A vista del negocio · 2.000", DeudaDeLaRuta.VISTA_DEL_NEGOCIO, v[3], informe, filas, bucles));
+        medirDeuda("B clientes primero · 2.000 (fuera de su tramo, sin guarda)", DeudaDeLaRuta.CLIENTES_PRIMERO, v[3], informe, filas, bucles);
         System.out.println("── F6.0b D-b4: deuda compacta por vendedor ── " + informe);
+
+        // Guardas de ECM (2026-09-15): relativas a la lista del negocio medida en la misma corrida, no milisegundos absolutos.
         assertThat(DeudaDeLaRuta.UMBRAL_DE_CLIENTES).isEqualTo(500);
-        assertThat(guardadas).as("ECM: cada consulta en su tramo, menos de 150 ms").allSatisfy((k, ms) -> assertThat(ms).as(k).isLessThan(150.0));
+        ms.forEach((caso, t) -> {
+            double tope = caso.startsWith("A") ? 1.25 * lista : lista;
+            assertThat(t).as("%s: %.2f ms frente a la lista del negocio %.2f ms (tope %.2f)", caso, t, lista, tope).isLessThanOrEqualTo(tope);
+        });
+        assertThat(bucles).as("ningún nodo de las vistas de insolvencia con loops >= 500").isEmpty();
+        assertThat(filas).containsEntry("B clientes primero · 300", 300).containsEntry("B clientes primero · 500", 500)
+                .containsEntry("A vista del negocio · 1.200", 1200).containsEntry("A vista del negocio · 2.000", 2000);
     }
 
-    private void medirDeuda(String caso, String sql, long vendedor, int esperadas, Map<String, String> informe, Map<String, Double> guardadas,
-                            boolean conGuarda) throws Exception {
+    /** Mejor de tres, sin JIT y como app_user; guarda filas, milisegundos, peso en gzip y los bucles de insolvencia del plan. */
+    private double medirDeuda(String caso, String sql, Long vendedor, Map<String, String> informe, Map<String, Integer> filasPorCaso,
+                              List<String> bucles) throws Exception {
         try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), "app_user", "app_pw");
              Statement st = c.createStatement()) {
             st.execute("SELECT set_config('app.tenant_id', 'perf-a', false)");
@@ -265,17 +280,27 @@ class CostoDeLaCarteraTest {
             double ms = Double.MAX_VALUE;
             for (int vuelta = 0; vuelta < 3; vuelta++) {
                 try (var ps = c.prepareStatement("EXPLAIN (ANALYZE) " + sql)) {
-                    ps.setString(1, "perf-a");
-                    ps.setLong(2, vendedor);
+                    if (vendedor != null) {
+                        ps.setString(1, "perf-a");
+                        ps.setLong(2, vendedor);
+                    }
                     try (ResultSet rs = ps.executeQuery()) {
                         while (rs.next()) {
                             String l = rs.getString(1);
                             if (l.startsWith("Execution Time:")) {
                                 ms = Math.min(ms, Double.parseDouble(l.replaceAll("[^0-9.]", "")));
                             }
+                            java.util.regex.Matcher m = java.util.regex.Pattern.compile("loops=(\\d+)").matcher(l);
+                            if (l.contains("insolvencia") && m.find() && Integer.parseInt(m.group(1)) >= 500) {
+                                bucles.add(caso + ": " + l.trim());
+                            }
                         }
                     }
                 }
+            }
+            if (vendedor == null) {
+                informe.put(caso, String.format(java.util.Locale.ROOT, "%.2f ms", ms));
+                return ms;
             }
             StringBuilder json = new StringBuilder("[");
             int filas = 0;
@@ -297,10 +322,8 @@ class CostoDeLaCarteraTest {
                 out.write(crudo);
             }
             informe.put(caso, filas + " filas · " + String.format(java.util.Locale.ROOT, "%.2f", ms) + " ms · " + crudo.length + " B · " + gz.size() + " B gzip");
-            if (conGuarda) {
-                guardadas.put(caso, ms);
-            }
-            assertThat(filas).as(caso).isEqualTo(esperadas);
+            filasPorCaso.put(caso, filas);
+            return ms;
         }
     }
 }
