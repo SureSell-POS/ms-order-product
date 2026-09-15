@@ -66,6 +66,11 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * {@code inventario_intenciones[0].idempotency_key} {@code orden-N → venta-<uuid>} y
  * {@code clave_de_intencion_es_la_de_la_venta} {@code false → true}. Ninguna otra
  * columna de orden, líneas, pagos, cocina, débito ni cuenta cambió con 5.5a.
+ *
+ * <p><b>Regrabado con F5.5 (V71), a propósito:</b> 7 diferencias, una por venta, todas
+ * {@code orders[0].plazo_dias} que aparece con {@code null} (la columna nace en V71 y solo
+ * la llena la venta de un pedido). Quitando esa clave, el resultado es idéntico al fichero
+ * anterior; comprobado al regrabar.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @AutoConfigureMockMvc

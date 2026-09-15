@@ -142,6 +142,26 @@ public class OrderHandler implements OrderPort {
     @Override
     @Transactional
     public Order createOrUpdateOrder(OrderRequestRecord dto) {
+        return crear(dto, null);
+    }
+
+    /**
+     * F5.5 — La venta del despacho de un pedido. Entra por el MISMO núcleo que la de la
+     * caja (idempotencia, cartera, cocina, intención de inventario, outbox) y solo cambia
+     * lo que el servidor sabe y el cliente no puede decir: origen {@code pedido}, el pedido,
+     * la sede de despacho, el plazo pactado y los precios congelados. La prueba de oro
+     * ({@code LaVentaDeSiempreTest}) fija que la venta de la caja no cambia.
+     */
+    @Override
+    @Transactional
+    public Order crearVentaDePedido(OrderRequestRecord dto, com.suresell.orders.application.dto.VentaDelServidor venta) {
+        if (venta == null || venta.pedidoId() == null || venta.precios() == null) {
+            throw new IllegalStateException("La venta de un pedido necesita el pedido y sus precios congelados.");
+        }
+        return crear(dto, venta);
+    }
+
+    private Order crear(OrderRequestRecord dto, com.suresell.orders.application.dto.VentaDelServidor servidor) {
         // N2/D1 — DEDUPE por idempotencia. Va ANTES de cualquier validación: en un
         // reintento el pager ya quedó ocupado por la primera orden y
         // validatePagerAvailability rechazaría con 400 en vez de devolver la orden
@@ -263,9 +283,19 @@ public class OrderHandler implements OrderPort {
         String negocio = com.suresell.orders.multitenant.TenantContext.get();
         order.setVendedorId(atribucion.vendedor(negocio, dto.vendedorId(),
                 usuarioDeLaPeticion.id(), usuarioDeLaPeticion.rol()));
-        order.setOrigen("caja");
-        order.setCondicionPago(atribucion.condicionPago(dto.condicionPago(),
-                multipago ? null : normalizePaymentMethod(dto.paymentMethod())));
+        if (servidor == null) {
+            order.setOrigen("caja");
+            order.setCondicionPago(atribucion.condicionPago(dto.condicionPago(),
+                    multipago ? null : normalizePaymentMethod(dto.paymentMethod())));
+        } else {
+            // F5.5: la venta de un pedido. La condición la decide el plazo pactado
+            // (contraentrega = CONTADO ante la DIAN aunque el medio sea CREDITO).
+            order.setOrigen("pedido");
+            order.setPedidoId(servidor.pedidoId());
+            order.setSiteId(servidor.siteId());
+            order.setPlazoDias(servidor.plazoDias());
+            order.setCondicionPago(servidor.condicionPago());
+        }
 
         if (idempotencyKey != null && !idempotencyKey.isBlank()) {
             order.setIdempotencyKey(idempotencyKey);
@@ -286,9 +316,14 @@ public class OrderHandler implements OrderPort {
         // que el catálogo no conoce conserva lo declarado, con origen POS.
         String cliente = dto.clienteDocumento() == null || dto.clienteDocumento().isBlank()
                 ? null : dto.clienteDocumento().trim();
-        java.util.Map<String, com.suresell.orders.mayorista.ResolucionDePrecios.Precio> preciosResueltos =
-                resolucionDePrecios.resolver(cliente, dto.items(), cliente != null);
-        List<OrderItemRequestRecord> lineas = resolucionDePrecios.conPrecios(dto.items(), preciosResueltos);
+        // F5.5: la venta de un pedido NO resuelve el precio de hoy; cobra el congelado al
+        // confirmar (Q2), que ya viene en cada línea. Toda otra venta, como siempre.
+        java.util.Map<String, com.suresell.orders.mayorista.ResolucionDePrecios.Precio> preciosResueltos = servidor != null
+                ? servidor.precios()
+                : resolucionDePrecios.resolver(cliente, dto.items(), cliente != null);
+        List<OrderItemRequestRecord> lineas = servidor != null
+                ? dto.items()
+                : resolucionDePrecios.conPrecios(dto.items(), preciosResueltos);
         if (cliente != null) {
             order.setClienteDocumento(cliente);
             preciosResueltos.values().stream().map(pr -> pr.listaPrecioId()).filter(java.util.Objects::nonNull)

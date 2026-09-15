@@ -8,6 +8,12 @@ import org.springframework.data.domain.Page;
 import java.util.List;
 public interface OrderPort {
     Order createOrUpdateOrder(OrderRequestRecord dto);
+
+    /**
+     * F5.5 — La venta que nace de despachar un pedido: mismo núcleo que la de la caja,
+     * con origen, sede, plazo y precios que pone el servidor. No se expone por HTTP.
+     */
+    Order crearVentaDePedido(OrderRequestRecord dto, com.suresell.orders.application.dto.VentaDelServidor venta);
     List<OrderResponseRecord> getAllOrders();
     Page<OrderResponseRecord> getAllOrdersPaginated(String pagerColor, String pagerNumber, Long idOrder, String reciboEstado, int page, int size);
     List<OrderResponseRecord> getAllOrdersKeyset(Long afterId, int size);

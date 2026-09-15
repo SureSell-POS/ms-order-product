@@ -63,8 +63,11 @@ public class Pedidos {
     public static final Set<String> MOTIVOS_DE_CANCELACION = Set.of("CLIENTE_DESISTIO", "DUPLICADO", "SIN_EXISTENCIA", "FUERA_DE_VENTANA");
     public static final Set<String> MOTIVOS_DE_RETENCION = Set.of("CUPO_EXCEDIDO", "FACTURA_VENCIDA", "MORA");
     public static final Set<String> MOTIVOS_DE_LIBERACION = Set.of("PAGO_RECIBIDO", "ACUERDO_DE_PAGO", "AUTORIZADO_POR_ADMIN");
-    /** Lo despachado ya es venta (F5.5): cancelarlo sin la reversa dejaría el inventario descontado (D7). */
-    static final Set<String> YA_DESPACHADO = Set.of("DESPACHADO", "ENTREGADO", "ENTREGADO_CON_NOVEDAD");
+    /**
+     * Lo despachado ya es venta (F5.5): cancelarlo sin la reversa dejaría la venta, su deuda y el
+     * inventario descontado (D7). ENTREGA_FALLIDA también: la mercancía salió con su venta.
+     */
+    static final Set<String> YA_DESPACHADO = Set.of("DESPACHADO", "ENTREGADO", "ENTREGADO_CON_NOVEDAD", "ENTREGA_FALLIDA");
     static final Set<String> CONFIRMAN = Set.of("admin", "cajero");
     static final int MAX_LINEAS = 500;
     static final int LIMITE_DE_BANDEJA = 50;
@@ -72,10 +75,12 @@ public class Pedidos {
 
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
+    private final com.suresell.orders.domain.port.in.OrderPort ventas;
 
-    public Pedidos(JdbcTemplate jdbc, ObjectMapper json) {
+    public Pedidos(JdbcTemplate jdbc, ObjectMapper json, com.suresell.orders.domain.port.in.OrderPort ventas) {
         this.jdbc = jdbc;
         this.json = json;
+        this.ventas = ventas;
     }
 
     /** Quién pide: su negocio, su rol y su id de {@code users}. */
@@ -97,6 +102,10 @@ public class Pedidos {
                               String idempotencyKey, Boolean confirmar) {}
 
     public record LineaDeEvento(UUID lineaId, Integer cantidad, BigDecimal precio) {}
+
+    /** POST /api/pedidos/{id}/despachar. */
+    public record Despacho(List<LineaDeEvento> lineas, Long siteId, String nota, OffsetDateTime ocurridoEn,
+                           String idempotencyKey) {}
 
     /** El cuerpo de toda acción sobre un pedido; cada una usa lo suyo. */
     public record Accion(List<LineaDeEvento> lineas, String motivo, String nota, OffsetDateTime ocurridoEn,
@@ -246,6 +255,83 @@ public class Pedidos {
         return detalleVisible(quien, id);
     }
 
+    /**
+     * POST /api/pedidos/{id}/despachar (F5.5, §D6): el evento DESPACHADO y la venta, en UNA
+     * transacción. La venta lleva la cantidad DESPACHADA de cada línea al precio congelado,
+     * medio CREDITO (entra a cartera) con el plazo pactado en el pedido, sale de la sede de
+     * despacho, no entra a cocina y no se encadena. Si la venta no entra (insolvencia, una
+     * regla de la base), el despacho tampoco.
+     *
+     * <ul>
+     *   <li>Idempotente por clave: el reintento devuelve el mismo pedido con la misma venta.</li>
+     *   <li>Un segundo despacho (tras ENTREGA_FALLIDA) crearía otra venta del mismo pedido:
+     *       409 REVERSA_PENDIENTE hasta que exista la reversa (D7). V70 es el suelo.</li>
+     * </ul>
+     */
+    @Transactional
+    public Map<String, Object> despachar(Quien quien, UUID id, Despacho cuerpo) {
+        exigirRol(quien, CONFIRMAN, "despachar un pedido");
+        exigirUsuario(quien);
+        if (cuerpo == null) {
+            throw new DatoInvalidoException("idempotencyKey", "Falta el cuerpo del despacho.");
+        }
+        String clave = obligatorio(cuerpo.idempotencyKey(), "idempotencyKey", "Falta la clave de idempotencia.");
+        Map<String, Object> pedido = cabeceraVisible(quien, id);
+
+        // El reintento: la misma clave ya despachó ESTE pedido → lo mismo que la primera vez.
+        List<Map<String, Object>> previo = jdbc.queryForList(
+                "SELECT pedido_id, tipo FROM pedidos.pedidos_eventos WHERE tenant_id = ? AND idempotency_key = ?", quien.negocio(), clave);
+        if (!previo.isEmpty()) {
+            if (!id.equals(previo.get(0).get("pedido_id")) || !"DESPACHADO".equals(previo.get(0).get("tipo"))) {
+                throw new PedidoRechazadoException(HttpStatus.CONFLICT, PedidoRechazadoException.IDEMPOTENCIA_REUTILIZADA,
+                        "Esa clave ya se usó con otra acción. No se escribió nada.");
+            }
+            return detalleVisible(quien, id);
+        }
+        if (YA_DESPACHADO.contains((String) pedido.get("estado"))) {
+            throw new PedidoRechazadoException(HttpStatus.CONFLICT, PedidoRechazadoException.REVERSA_PENDIENTE,
+                    "El pedido ya se despachó y tiene su venta: despacharlo otra vez exige reversar la primera, y la reversa todavía no existe.");
+        }
+        List<LineaDeEvento> lineas = lineasDeEvento(cuerpo.lineas(), false);
+        Long sede = cuerpo.siteId() != null ? cuerpo.siteId() : toLong(pedido.get("site_id"));
+        if (sede != null && !existeSede(quien.negocio(), sede)) {
+            throw new DatoInvalidoException("siteId", "Esa sede no es de este negocio.");
+        }
+        // Un solo reloj: el del evento, nunca en el futuro para la base (ck_int_reloj, ck_orders_reloj).
+        OffsetDateTime ahora = OffsetDateTime.now(BOGOTA);
+        OffsetDateTime ocurrido = cuerpo.ocurridoEn() == null || cuerpo.ocurridoEn().isAfter(ahora) ? ahora : cuerpo.ocurridoEn();
+
+        UUID evento = transicionar(quien, id, "DESPACHADO", null, cuerpo.nota(), lineas, ocurrido, clave);
+
+        List<com.suresell.orders.application.dto.OrderItemRequestRecord> items = new ArrayList<>();
+        Map<String, com.suresell.orders.mayorista.ResolucionDePrecios.Precio> precios = new LinkedHashMap<>();
+        UUID lista = (UUID) pedido.get("lista_precio_id");
+        for (Map<String, Object> f : jdbc.queryForList("""
+                SELECT producto_id, despachada, COALESCE(precio_confirmado, precio_visto) AS precio, precio_origen, lista_precio_item_id
+                  FROM pedidos.v_pedidos_lineas WHERE tenant_id = ? AND pedido_id = ? ORDER BY n""", quien.negocio(), id)) {
+            int despachada = f.get("despachada") == null ? 0 : ((Number) f.get("despachada")).intValue();
+            if (despachada <= 0) {
+                continue;
+            }
+            BigDecimal precio = (BigDecimal) f.get("precio");
+            String producto = (String) f.get("producto_id");
+            items.add(new com.suresell.orders.application.dto.OrderItemRequestRecord(producto, despachada, precio, null, null));
+            precios.putIfAbsent(producto, new com.suresell.orders.mayorista.ResolucionDePrecios.Precio(precio,
+                    f.get("precio_origen") == null ? "PEDIDO" : (String) f.get("precio_origen"), (UUID) f.get("lista_precio_item_id"), lista));
+        }
+        if (items.isEmpty()) {
+            throw new DatoInvalidoException("lineas", "Un despacho lleva al menos una línea con cantidad mayor que 0.");
+        }
+        Short plazo = pedido.get("plazo_dias") == null ? null : ((Number) pedido.get("plazo_dias")).shortValue();
+        String condicion = plazo != null && plazo == 0 ? "CONTADO" : "CREDITO";
+        var dto = new com.suresell.orders.application.dto.OrderRequestRecord(
+                null, null, items, null, "CREDITO", null, "pedido-" + id + "-despacho-" + evento, true, null, true,
+                ocurrido, null, null, null, null, null, (String) pedido.get("cliente_documento"), null, null, null,
+                toLong(pedido.get("vendedor_id")), condicion);
+        ventas.crearVentaDePedido(dto, new com.suresell.orders.application.dto.VentaDelServidor(id, sede, plazo, condicion, precios));
+        return detalleVisible(quien, id);
+    }
+
     @Transactional
     public Map<String, Object> rechazar(Quien quien, UUID id, Accion cuerpo) {
         return conMotivo(quien, id, cuerpo, "RECHAZADO", MOTIVOS_DE_RECHAZO, "rechazar un pedido");
@@ -285,7 +371,7 @@ public class Pedidos {
         return detalleVisible(quien, id);
     }
 
-    private void transicionar(Quien quien, UUID id, String tipo, String motivo, String nota, List<LineaDeEvento> lineas,
+    private UUID transicionar(Quien quien, UUID id, String tipo, String motivo, String nota, List<LineaDeEvento> lineas,
                               OffsetDateTime ocurrido, String clave) {
         fijarAutor(quien);
         String paraLaFuncion = null;
@@ -303,7 +389,7 @@ public class Pedidos {
             paraLaFuncion = aJson(l);
         }
         final String lineasJson = paraLaFuncion;
-        traducir(() -> jdbc.queryForObject("SELECT pedidos.fn_pedido_transicionar(?, ?, ?, ?, ?::jsonb, ?, ?)", UUID.class,
+        return traducir(() -> jdbc.queryForObject("SELECT pedidos.fn_pedido_transicionar(?, ?, ?, ?, ?::jsonb, ?, ?)", UUID.class,
                 id, tipo, motivo, nota, lineasJson, Timestamp.from(ocurrido.toInstant()), clave));
     }
 
@@ -485,6 +571,21 @@ public class Pedidos {
         r.put("precioCongeladoEn", momento(p.get("precio_congelado_en")));
         r.put("ocurridoEn", momento(p.get("ocurrido_en")));
         r.put("registradoEn", momento(p.get("registrado_en")));
+        // La venta del despacho: la única fuente es orders.pedido_id (F5.5).
+        List<Map<String, Object>> venta = jdbc.queryForList("""
+                SELECT uuid_id, id_order, total, condicion_pago, site_id FROM orders
+                 WHERE tenant_id = ? AND pedido_id = ? AND deleted_at IS NULL""", quien.negocio(), p.get("id"));
+        if (venta.isEmpty()) {
+            r.put("venta", null);
+        } else {
+            Map<String, Object> v = new LinkedHashMap<>();
+            v.put("uuid", venta.get(0).get("uuid_id"));
+            v.put("numero", venta.get(0).get("id_order"));
+            v.put("total", venta.get(0).get("total"));
+            v.put("condicionPago", venta.get(0).get("condicion_pago"));
+            v.put("siteId", venta.get(0).get("site_id"));
+            r.put("venta", v);
+        }
 
         List<Map<String, Object>> lineas = new ArrayList<>();
         BigDecimal total = BigDecimal.ZERO;

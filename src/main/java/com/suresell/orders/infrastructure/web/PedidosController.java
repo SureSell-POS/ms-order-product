@@ -89,6 +89,13 @@ public class PedidosController {
         return pedidos.ajustar(quien(http), id, cuerpo);
     }
 
+    @PostMapping("/{id}/despachar")
+    @Operation(summary = "F5.5 — Despachar (admin, cajero): el evento DESPACHADO y la venta a crédito con lo despachado, "
+            + "al precio congelado y con el plazo del pedido, en una transacción")
+    public Map<String, Object> despachar(@PathVariable UUID id, @RequestBody Pedidos.Despacho cuerpo, HttpServletRequest http) {
+        return pedidos.despachar(quien(http), id, cuerpo);
+    }
+
     @PostMapping("/{id}/rechazar")
     @Operation(summary = "F5.3 — Rechazar con motivo (admin)")
     public Map<String, Object> rechazar(@PathVariable UUID id, @RequestBody Accion cuerpo, HttpServletRequest http) {
