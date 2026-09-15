@@ -713,6 +713,95 @@ public class Cartera {
         return r;
     }
 
+    // ------------------------------------------------------------ política de crédito (F5.4)
+
+    static final Set<String> POLITICAS_DE_CREDITO = Set.of("AVISAR", "RETENER_PEDIDO");
+
+    /** Lo que la política decide sobre un pedido nuevo: retenerlo, con cuántos días lleva vencida la factura más vieja. */
+    public record Retencion(int diasVencido, int diasMoraParaRetener) {}
+
+    /**
+     * GET /api/cartera/politica-de-credito. Sin fila, la del plan: AVISAR con 0 días
+     * ({@code actualizadoPor} null). Con {@code historia}: los cambios, el más reciente primero.
+     */
+    public Map<String, Object> politicaDeCredito(Quien quien) {
+        List<Map<String, Object>> filas = jdbc.queryForList("""
+                SELECT p.politica, p.dias_mora_para_retener, p.actualizado_por, u.nombre, p.actualizado_en
+                  FROM politica_de_credito p LEFT JOIN users u ON u.tenant_id = p.tenant_id AND u.id = p.actualizado_por
+                 WHERE p.tenant_id = ?""", quien.negocio());
+        Map<String, Object> f = filas.isEmpty() ? null : filas.get(0);
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("politica", f == null ? "AVISAR" : f.get("politica"));
+        r.put("diasMoraParaRetener", f == null ? 0 : f.get("dias_mora_para_retener"));
+        r.put("actualizadoPorId", f == null ? null : f.get("actualizado_por"));
+        r.put("actualizadoPor", f == null ? null : f.get("nombre"));
+        r.put("actualizadoEn", f == null ? null : instante(f.get("actualizado_en")));
+        r.put("historia", jdbc.queryForList("""
+                SELECT e.politica_anterior, e.politica_nueva, e.dias_anterior, e.dias_nuevo, e.usuario_id, u.nombre, e.ocurrido_en
+                  FROM politica_de_credito_eventos e LEFT JOIN users u ON u.tenant_id = e.tenant_id AND u.id = e.usuario_id
+                 WHERE e.tenant_id = ? ORDER BY e.ocurrido_en DESC, e.id LIMIT 50""", quien.negocio()).stream().map(e -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("politicaAnterior", e.get("politica_anterior"));
+            m.put("politica", e.get("politica_nueva"));
+            m.put("diasAnterior", e.get("dias_anterior"));
+            m.put("diasMoraParaRetener", e.get("dias_nuevo"));
+            m.put("usuarioId", e.get("usuario_id"));
+            m.put("usuario", e.get("nombre"));
+            m.put("ocurridoEn", instante(e.get("ocurrido_en")));
+            return m;
+        }).toList());
+        return r;
+    }
+
+    /**
+     * PUT /api/cartera/politica-de-credito (admin). Reemplaza la política del negocio; el rastro
+     * lo escribe la base (V73) con el autor, que es obligatorio.
+     */
+    @Transactional
+    public Map<String, Object> cambiarPoliticaDeCredito(Quien quien, String politica, Integer dias) {
+        String laPolitica = politica == null ? null : politica.trim().toUpperCase(Locale.ROOT);
+        if (laPolitica == null || !POLITICAS_DE_CREDITO.contains(laPolitica)) {
+            throw new DatoInvalidoException("politica", "La política es AVISAR o RETENER_PEDIDO.");
+        }
+        int losDias = dias == null ? 0 : dias;
+        if (losDias < 0 || losDias > 365) {
+            throw new DatoInvalidoException("diasMoraParaRetener", "Los días de mora van de 0 a 365.");
+        }
+        if (quien.usuarioId() == null) {
+            throw new DatoInvalidoException("usuario", "La sesión no tiene un usuario: el cambio necesita autor.");
+        }
+        jdbc.update("""
+                INSERT INTO politica_de_credito (tenant_id, politica, dias_mora_para_retener, actualizado_por, actualizado_en)
+                VALUES (?, ?, ?, ?, now())
+                ON CONFLICT (tenant_id) DO UPDATE
+                   SET politica = EXCLUDED.politica, dias_mora_para_retener = EXCLUDED.dias_mora_para_retener,
+                       actualizado_por = EXCLUDED.actualizado_por, actualizado_en = EXCLUDED.actualizado_en""",
+                quien.negocio(), laPolitica, losDias, quien.usuarioId());
+        return politicaDeCredito(quien);
+    }
+
+    /**
+     * F5.4: si la política del negocio retiene el pedido de este cliente. Solo con
+     * RETENER_PEDIDO y una factura con saldo vencida hace MÁS de {@code dias_mora_para_retener}
+     * días (con 0, cualquier factura vencida). Con AVISAR, o sin fila, nunca. Se lee el libro
+     * de ese cliente (V68: cuesta lo de ese cliente).
+     */
+    public Optional<Retencion> retencionPorPolitica(String negocio, String documento) {
+        List<Integer> dias = jdbc.queryForList(
+                "SELECT dias_mora_para_retener FROM politica_de_credito WHERE tenant_id = ? AND politica = 'RETENER_PEDIDO'",
+                Integer.class, negocio);
+        if (dias.isEmpty()) {
+            return Optional.empty();
+        }
+        Integer vencido = jdbc.queryForObject("""
+                SELECT max(v.dias_vencido) FROM v_cartera_por_documento v
+                 WHERE v.tenant_id = ? AND v.cliente_documento = ? AND v.saldo > 0""",
+                Integer.class, negocio, documento);
+        return vencido != null && vencido > dias.get(0)
+                ? Optional.of(new Retencion(vencido, dias.get(0)))
+                : Optional.empty();
+    }
+
     // ------------------------------------------------------------ ventas a insolventes (F4.11)
 
     public static final String POR_REVISAR = "VENTA_A_INSOLVENTE_POR_REVISAR";

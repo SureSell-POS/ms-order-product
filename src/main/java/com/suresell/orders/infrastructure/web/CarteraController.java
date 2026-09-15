@@ -121,6 +121,22 @@ public class CarteraController {
         return cartera.resumenDelNegocio(quien(http, Set.of("admin"), "ver el resumen de cartera"));
     }
 
+    @GetMapping("/politica-de-credito")
+    @Operation(summary = "F5.4 — La política de crédito del negocio (AVISAR o RETENER_PEDIDO con días de mora) y sus cambios")
+    public Map<String, Object> politicaDeCredito(HttpServletRequest http) {
+        return cartera.politicaDeCredito(quien(http, ROLES_QUE_COBRAN, "ver la política de crédito"));
+    }
+
+    public record PoliticaDeCredito(String politica, Integer diasMoraParaRetener) {}
+
+    @PutMapping("/politica-de-credito")
+    @Operation(summary = "F5.4 — Cambiar la política de crédito (solo admin): con RETENER_PEDIDO, el pedido de un cliente "
+            + "con una factura vencida hace más de N días nace RETENIDO (FACTURA_VENCIDA). Queda en su historia")
+    public Map<String, Object> cambiarPoliticaDeCredito(@RequestBody PoliticaDeCredito cuerpo, HttpServletRequest http) {
+        return cartera.cambiarPoliticaDeCredito(quien(http, Set.of("admin"), "cambiar la política de crédito"),
+                cuerpo == null ? null : cuerpo.politica(), cuerpo == null ? null : cuerpo.diasMoraParaRetener());
+    }
+
     @GetMapping("/ventas-a-insolvente")
     @Operation(summary = "F4.11 — Ventas a crédito que una caja le hizo a un cliente ya en insolvencia (solo admin). "
             + "Entraron con su deuda; pendientes=true (defecto) solo las que esperan decisión")

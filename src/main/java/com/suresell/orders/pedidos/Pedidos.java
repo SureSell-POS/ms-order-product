@@ -135,7 +135,8 @@ public class Pedidos {
     // ------------------------------------------------------------------ crear
 
     /**
-     * POST /api/pedidos. Nace ENVIADO; si quien lo toma puede confirmar (admin o cajero),
+     * POST /api/pedidos. Nace ENVIADO; si la política de crédito lo retiene (F5.4), pasa a RETENIDO;
+     * si no, y quien lo toma puede confirmar (admin o cajero),
      * se confirma en la misma transacción, salvo que pida {@code confirmar=false} (la
      * televenta que revisa existencias antes). A un vendedor ese campo no le cambia nada. Idempotente por clave: el reintento con los
      * mismos datos devuelve el mismo pedido; con otros, 409.
@@ -208,7 +209,16 @@ public class Pedidos {
                 documento, origen, modalidad, vendedorFinal, cuerpo.siteId(),
                 cuerpo.entregaEl() == null ? null : java.sql.Date.valueOf(cuerpo.entregaEl()),
                 aJson(paraLaFuncion), Timestamp.from(ocurrido.toInstant()), clave));
-        if (CONFIRMAN.contains(quien.rol()) && !Boolean.FALSE.equals(cuerpo.confirmar())) {
+        // F5.4: con la política RETENER_PEDIDO, el pedido de un cliente con una factura vencida hace más de
+        // N días nace RETENIDO (FACTURA_VENCIDA) y no se confirma. Se evalúa aquí, al tomarlo; nunca después.
+        java.util.Optional<com.suresell.orders.cartera.Cartera.Retencion> retencion =
+                cartera.retencionPorPolitica(quien.negocio(), documento);
+        if (retencion.isPresent()) {
+            transicionar(quien, id, "RETENIDO", "FACTURA_VENCIDA",
+                    "Política de crédito: factura vencida hace " + retencion.get().diasVencido() + " días (retiene con más de "
+                            + retencion.get().diasMoraParaRetener() + ").",
+                    null, ocurrido, clave + ":retenido");
+        } else if (CONFIRMAN.contains(quien.rol()) && !Boolean.FALSE.equals(cuerpo.confirmar())) {
             transicionar(quien, id, "CONFIRMADO", null, null, null, ocurrido, clave + ":confirmado");
         }
         return new Resultado(detalleVisible(quien, id), false);
