@@ -41,6 +41,19 @@ public class ListasDePrecio {
 
     private final JdbcTemplate jdbc;
 
+    /**
+     * F1.8b: cuánto se solapa el incremental del catálogo de lista. {@code vigente_desde} y el {@code vigente_hasta} de la
+     * línea cerrada llevan el {@code now()} de la transacción que ESCRIBE, que empieza antes de confirmar: si el lector
+     * sirve entre el inicio y la confirmación, esa línea queda con fecha anterior al {@code servidoEn} y ningún
+     * incremental posterior la vuelve a traer (medido por DevFront y reproducido en ListaIncrementalCarreraTest). Por eso
+     * {@code servidoEn} es {@code now()} menos este margen: repetir líneas no hace daño, el POS reemplaza por id.
+     *
+     * <p>Es verdad solo si ninguna escritura de precios dura más: {@link #fijarPrecio} (el único escritor de
+     * {@code listas_precio_items}, medido en -mt, core e inventario) tiene tope de {@value #TOPE_DE_ESCRITURA_SEGUNDOS} s.
+     */
+    public static final int MARGEN_DEL_INCREMENTAL_SEGUNDOS = 60;
+    public static final int TOPE_DE_ESCRITURA_SEGUNDOS = 5;
+
     public ListasDePrecio(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
@@ -84,7 +97,7 @@ public class ListasDePrecio {
      * una línea vigente para (lista, producto, escala) se cierra y se abre la
      * nueva: la anterior se queda, con las ventas que la usaron.
      */
-    @Transactional
+    @Transactional(timeout = TOPE_DE_ESCRITURA_SEGUNDOS)
     public UUID fijarPrecio(String negocio, UUID listaId, String productoId, int cantidadMinima, BigDecimal precio,
                             String fuente, int confianza, Autor autor, String nota) {
         exigirNegocio(negocio);
@@ -507,8 +520,9 @@ public class ListasDePrecio {
      * regir y las que se cerraron (con {@code vigenteHasta}), para que la caché
      * quite las cerradas sin descargar la lista entera otra vez.
      *
-     * <p>{@code servidoEn} es el reloj del servidor al responder: el POS lo manda
-     * como {@code desde} la próxima vez, y así no depende de su propio reloj.
+     * <p>{@code servidoEn} es el reloj del servidor al responder MENOS
+     * {@link #MARGEN_DEL_INCREMENTAL_SEGUNDOS} (F1.8b): el POS lo manda como {@code desde} la próxima vez, sin depender de
+     * su propio reloj, y la ventana solapada recoge lo que una escritura en curso confirmó después de servir.
      */
     public Map<String, Object> catalogoDeLista(String negocio, UUID listaId, java.time.OffsetDateTime desde) {
         exigirNegocio(negocio);
@@ -518,7 +532,8 @@ public class ListasDePrecio {
             throw new com.suresell.orders.shared.exception.DatoInvalidoException("listaId",
                     "Esa lista no existe en el negocio.");
         }
-        java.time.OffsetDateTime servidoEn = jdbc.queryForObject("SELECT now()", java.time.OffsetDateTime.class);
+        java.time.OffsetDateTime servidoEn = jdbc.queryForObject("SELECT now() - make_interval(secs => ?)",
+                java.time.OffsetDateTime.class, MARGEN_DEL_INCREMENTAL_SEGUNDOS);
         List<Map<String, Object>> lineas = desde == null
                 ? jdbc.queryForList("""
                     SELECT i.id, i.producto_id AS "productoId", i.cantidad_minima AS "cantidadMinima", i.precio,

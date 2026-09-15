@@ -234,12 +234,14 @@ class MayoristaEndpointTest {
                         .contentType(MediaType.APPLICATION_JSON).content("{\"productoId\":\"arroz-qa-a\",\"precio\":101000}"))
                 .andExpect(status().isCreated());
 
+        // F1.8b: la ventana se solapa (servidoEn = now − margen), así que también puede volver una línea que no cambió;
+        // lo que se exige es que estén las dos que sí: la cerrada y la nueva.
         mockMvc.perform(get("/api/mayorista/catalogo-de-lista/" + lista).param("desde", servidoEn)
                         .header("Authorization", conModulo(A, ADMIN_A)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.lineas.length()").value(2))
                 .andExpect(jsonPath("$.lineas[?(@.vigenteHasta != null)].precio").value(org.hamcrest.Matchers.contains(100000.0)))
-                .andExpect(jsonPath("$.lineas[?(@.vigenteHasta == null)].precio").value(org.hamcrest.Matchers.contains(101000.0)));
+                .andExpect(jsonPath("$.lineas[?(@.vigenteHasta == null)].precio").value(org.hamcrest.Matchers.hasItem(101000.0)))
+                .andExpect(jsonPath("$.lineas[?(@.vigenteHasta == null)].precio").value(org.hamcrest.Matchers.not(org.hamcrest.Matchers.hasItem(100000.0))));
 
         // Una lista de otro negocio no existe para este.
         UUID ajena = dueno.queryForObject("INSERT INTO listas_precio (tenant_id, codigo, nombre, creado_por) "
