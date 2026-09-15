@@ -118,6 +118,56 @@ class CostoDeLaCarteraTest {
                  ORDER BY f.fecha DESC, f.id""");
     }
 
+    /** F4.12: lo que la venta a crédito pregunta antes de aplicar saldo a favor. El recibo más antiguo con saldo sin aplicar. */
+    static final String RECIBO_CON_SALDO_A_FAVOR = """
+            SELECT r.id, r.monto - COALESCE(sum(a.monto), 0) AS queda
+              FROM recibos_de_caja r
+              LEFT JOIN cartera_aplicaciones a ON a.tenant_id = r.tenant_id AND a.recibo_id = r.id
+             WHERE r.tenant_id = '%s' AND r.cliente_documento = '%s'
+               AND r.anula_recibo_id IS NULL
+               AND NOT EXISTS (SELECT 1 FROM recibos_de_caja x WHERE x.tenant_id = r.tenant_id AND x.anula_recibo_id = r.id)
+             GROUP BY r.id, r.monto, r.ocurrido_en, r.numero
+            HAVING r.monto > COALESCE(sum(a.monto), 0)
+             ORDER BY r.ocurrido_en, r.numero
+             LIMIT 1""";
+
+    @Test
+    @DisplayName("💰 F4.12: ¿tiene saldo a favor? en cada venta a crédito, sin JIT: cliente normal (5 recibos) y extremo (5.000)")
+    void costoDelSaldoAFavor() throws SQLException {
+        Map<String, Double> tiempos = new LinkedHashMap<>();
+        StringBuilder informe = new StringBuilder();
+        try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
+             Statement st = c.createStatement()) {
+            st.execute("INSERT INTO tenants (id, name, plan) VALUES ('perf-c', 'perf-c', 'pro') ON CONFLICT DO NOTHING");
+            st.execute("INSERT INTO recibos_de_caja (tenant_id, numero, cliente_documento, monto, medio, ocurrido_en, idempotency_key) "
+                    + "SELECT 'perf-c', 0, 'GRANDE', 20000, 'EFECTIVO', now() - (r || ' minutes')::interval, 'perf-c-r-' || r "
+                    + "FROM generate_series(1, 5000) r ON CONFLICT DO NOTHING");
+            st.execute("ANALYZE recibos_de_caja");
+            st.execute("SET jit = off");
+            for (String[] caso : new String[][] {{"perf-a", "D777", "cliente con 5 recibos aplicados (sin saldo)"},
+                    {"perf-c", "GRANDE", "cliente con 5.000 recibos sin aplicar"},
+                    {"perf-a", "NADIE", "documento sin recibos"}}) {
+                for (int vuelta = 0; vuelta < 3; vuelta++) {
+                    try (ResultSet rs = st.executeQuery("EXPLAIN (ANALYZE, BUFFERS) " + RECIBO_CON_SALDO_A_FAVOR.formatted(caso[0], caso[1]))) {
+                        while (rs.next()) {
+                            String l = rs.getString(1);
+                            if (vuelta == 2) {
+                                informe.append(l).append('\n');
+                            }
+                            if (l.startsWith("Execution Time:")) {
+                                tiempos.put(caso[2] + " #" + vuelta, Double.parseDouble(l.replaceAll("[^0-9.]", "")));
+                            }
+                        }
+                    }
+                }
+                informe.append("── fin de ").append(caso[2]).append(" ──\n");
+            }
+        }
+        System.out.println(informe);
+        System.out.println("── saldo a favor, tiempos (ms, sin JIT) ── " + tiempos);
+        assertThat(tiempos.values()).allSatisfy(ms -> assertThat(ms).isPositive());
+    }
+
     @Test
     @DisplayName("💰 cartera de 2.000 clientes y 40.000 facturas: EXPLAIN ANALYZE de las consultas de Cartera")
     void costo() throws SQLException {
