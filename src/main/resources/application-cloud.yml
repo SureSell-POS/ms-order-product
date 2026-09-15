@@ -8,6 +8,16 @@
 server:
   # Railway inyecta PORT.
   port: ${PORT:8081}
+  # F6.0a: comprimir las respuestas cuando el cliente lo pide (Accept-Encoding: gzip). El paquete de la ruta y el
+  # catálogo de la caja viajaban en crudo (4,2 MB con 20.000 productos; 623 KB en gzip, DISENO-F6-RUTA §4). El mínimo de
+  # 2 KB solo lo respeta Tomcat cuando la respuesta trae Content-Length (medido en CompresionDeRespuestasTest): la de
+  # longitud desconocida, que es la de casi todo JSON de Spring, se comprime aunque sea pequeña. Un cliente que no manda Accept-Encoding recibe lo de
+  # siempre. Va en este perfil (el que corre en Railway) y no en application.yml: src/test/resources/application.yml tapa
+  # al de main en las pruebas y la guarda no lo vería. C verifica en staging los clientes (POS, panel, KAM, apps Flutter) y la CPU.
+  compression:
+    enabled: true
+    min-response-size: 2KB
+    mime-types: application/json,application/problem+json,text/csv,text/plain,text/html,text/css,application/javascript
 
 spring:
 
