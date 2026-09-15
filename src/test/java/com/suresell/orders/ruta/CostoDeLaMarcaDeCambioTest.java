@@ -21,8 +21,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * 💰 F6.0b (V83), A/B en la MISMA corrida, sin JIT y como app_user: lo que los disparadores de la marca le cuestan a la venta a
  * crédito de caja (el WHEN del cupo en accounts_receivable) y al guardado de producto como lo hace core (JPA merge: UPDATE de
  * todas las columnas con un cambio de precio, e INSERT). Con los disparadores y sin ellos (desactivados por el dueño entre
- * vueltas), alternando para que el caché y el ruido caigan igual en los dos lados. Guardas de ECM: +10 % la venta, +25 % el
- * guardado de producto. Compara la mediana de las vueltas de cada lado.
+ * vueltas), alternando para que el caché y el ruido caigan igual en los dos lados. Compara la mediana de las vueltas de cada lado.
+ * Guardas de ECM: la venta +10 %; el guardado de producto, ≤ 150 µs añadidos por guardado (en porcentaje dependía de lo rápida
+ * que es la base: medido 22 µs en local y 45 µs en el runner de CI, que eran +3 % y +22,5 %).
  */
 @Testcontainers
 class CostoDeLaMarcaDeCambioTest {
@@ -123,7 +124,7 @@ class CostoDeLaMarcaDeCambioTest {
     }
 
     @Test
-    @DisplayName("💰 F6.0b: la venta a crédito de caja con la marca cuesta como sin ella (+10 %) y el guardado de producto de core (+25 %)")
+    @DisplayName("💰 F6.0b: la venta a crédito de caja con la marca cuesta como sin ella (+10 %); el guardado de producto de core, ≤ 150 µs más")
     void aB() throws Exception {
         String[] deLaVenta = {"accounts_receivable:trg_ar_marca_cliente_cupo", "accounts_receivable:trg_ar_marca_cliente_insert"};
         String[] delProducto = {"menu_products:trg_menu_products_marca_insert", "menu_products:trg_menu_products_marca_update"};
@@ -150,8 +151,9 @@ class CostoDeLaMarcaDeCambioTest {
         }
         double vc = mediana(ventaCon), vs = mediana(ventaSin), pc = mediana(productoCon), ps = mediana(productoSin);
         System.out.printf(java.util.Locale.ROOT,
-                "── F6.0b A/B (%d vueltas; %d ventas y %d guardados por vuelta; mediana, ms) ── venta a crédito con marca %.1f · sin %.1f (%+.1f %%) · producto con marca %.1f · sin %.1f (%+.1f %%)%n",
-                VUELTAS, POR_VUELTA, POR_VUELTA_PRODUCTO, vc, vs, 100 * (vc / vs - 1), pc, ps, 100 * (pc / ps - 1));
+                "── F6.0b A/B (%d vueltas; %d ventas y %d guardados por vuelta; mediana, ms) ── venta a crédito con marca %.1f · sin %.1f (%+.1f %%) · producto con marca %.1f · sin %.1f (%+.1f %%, %.1f µs por guardado)%n",
+                VUELTAS, POR_VUELTA, POR_VUELTA_PRODUCTO, vc, vs, 100 * (vc / vs - 1), pc, ps, 100 * (pc / ps - 1),
+                (pc - ps) * 1000 / POR_VUELTA_PRODUCTO);
         // Control: los cuatro disparadores quedan encendidos al final.
         try (Connection d = dueno(); Statement s = d.createStatement(); var rs = s.executeQuery(
                 "SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_ar_marca_cliente_cupo', 'trg_ar_marca_cliente_insert', "
@@ -160,6 +162,8 @@ class CostoDeLaMarcaDeCambioTest {
             assertThat(rs.getInt(1)).isEqualTo(4);
         }
         assertThat(vc).as("venta a crédito: con la marca %.1f ms frente a sin ella %.1f ms", vc, vs).isLessThanOrEqualTo(vs * 1.10);
-        assertThat(pc).as("guardado de producto: con la marca %.1f ms frente a sin ella %.1f ms", pc, ps).isLessThanOrEqualTo(ps * 1.25);
+        double microsPorGuardado = (pc - ps) * 1000 / POR_VUELTA_PRODUCTO;
+        assertThat(microsPorGuardado).as("guardado de producto: la marca añade %.1f µs por guardado (con %.1f ms, sin %.1f ms)", microsPorGuardado, pc, ps)
+                .isLessThanOrEqualTo(150.0);
     }
 }
