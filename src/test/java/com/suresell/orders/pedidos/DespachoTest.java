@@ -90,7 +90,7 @@ class DespachoTest {
 
     private static String bearer(String email, String rol) {
         return "Bearer " + Jwts.builder().subject(email).claim("tenant_id", T).claim("role", rol)
-                .claim("modules", List.of("ventas", "mayorista", "cartera", "cocina"))
+                .claim("modules", List.of("ventas", "mayorista", "cartera", "cocina", "meseros"))
                 .signWith(Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8))).compact();
     }
 
@@ -313,6 +313,30 @@ class DespachoTest {
 
         accion(CAJA, "cajero", tomarYConfirmar(TIENDA, "d-sede-x", 1), "despachar", "{\"siteId\":999999,\"idempotencyKey\":\"d-sede-x-desp\"}")
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("siteId"));
+    }
+
+    @Test
+    @DisplayName("🔴 F5.6: una venta de pedido en medio no rompe la cadena de una terminal: la siguiente apunta a la anterior")
+    void noRompeLaCadena() throws Exception {
+        String terminal = "8c1e4f2a-3b55-4c29-9d16-7a2f5e1c4b88";
+        for (int i = 1; i <= 2; i++) {
+            if (i == 2) {
+                UUID id = tomarYConfirmar(TIENDA, "d-cadena", 1);
+                accion(CAJA, "cajero", id, "despachar", "{\"idempotencyKey\":\"d-cadena-desp\"}").andExpect(status().isOk());
+            }
+            mockMvc.perform(post("/api/waiter/mobile/orders").header("Authorization", bearer(CAJA, "cajero")).contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"pagerColor\":\"MESA\",\"pagerNumber\":\"" + i + "\",\"paymentMethod\":\"CASH\",\"items\":[{\"productId\":\""
+                                    + producto(2) + "\",\"quantity\":1,\"unitPrice\":1}],\"idempotencyKey\":\"cadena-" + i + "\",\"terminalId\":\"" + terminal
+                                    + "\",\"ocurridoEn\":\"" + OffsetDateTime.now(BOGOTA).minusMinutes(10 - i).withNano(0) + "\"}"))
+                    .andExpect(status().isCreated());
+        }
+        List<Map<String, Object>> cadena = dueno.queryForList("SELECT seq, hash_anterior, hash_propio FROM orders WHERE tenant_id = ? "
+                + "AND terminal_id = ?::uuid ORDER BY seq", T, terminal);
+        assertThat(cadena).hasSize(2);
+        assertThat(((Number) cadena.get(1).get("seq")).longValue()).isEqualTo(((Number) cadena.get(0).get("seq")).longValue() + 1);
+        assertThat(cadena.get(1).get("hash_anterior")).as("la siguiente apunta a la anterior, no a la venta del pedido").isEqualTo(cadena.get(0).get("hash_propio"));
+        assertThat(dueno.queryForObject("SELECT count(*) FROM orders WHERE tenant_id = ? AND origen = 'pedido' AND (terminal_id IS NOT NULL OR hash_propio IS NOT NULL)",
+                Integer.class, T)).isZero();
     }
 
     @Test
