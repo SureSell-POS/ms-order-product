@@ -822,6 +822,107 @@ public class Pedidos {
         return r;
     }
 
+    /**
+     * GET /api/pedidos/{id}/whatsapp (F5.9, D10): el texto para mandarle al cliente según el estado del
+     * pedido y el enlace {@code wa.me} que lo abre. Sin integración de WhatsApp: lo manda quien lo abre.
+     *
+     * <p>Con el WhatsApp del cliente en su ficha (celular colombiano de 10 dígitos, o con 57), el enlace
+     * va a su número; sin él, a {@code wa.me/?text=} para elegir el contacto. «Le llega» solo dice el día:
+     * la franja («en la mañana») necesita la ventana de entrega del cliente, que todavía no existe.
+     */
+    public Map<String, Object> whatsapp(Quien quien, UUID id) {
+        exigirRol(quien, Set.of("admin", "cajero", "vendedor"), "ver los pedidos");
+        Map<String, Object> d = detalleVisible(quien, id);
+        String negocio = jdbc.queryForList("SELECT name FROM tenants WHERE id = ?", String.class, quien.negocio())
+                .stream().findFirst().orElse("nosotros");
+        String telefono = jdbc.queryForList("SELECT whatsapp FROM clientes WHERE tenant_id = ? AND documento = ?", String.class,
+                quien.negocio(), d.get("clienteDocumento")).stream().filter(Objects::nonNull).findFirst().orElse(null);
+        String nombre = d.get("cliente") == null ? "" : " " + d.get("cliente");
+        String pedido = "su pedido #" + d.get("numero");
+        Object plazo = d.get("plazoDias");
+        String paga = plazo == null ? "" : " Paga: " + (((Number) plazo).intValue() == 0 ? "al recibir"
+                : "a " + plazo + (((Number) plazo).intValue() == 1 ? " día" : " días")) + ".";
+        @SuppressWarnings("unchecked")
+        Map<String, Object> venta = (Map<String, Object>) d.get("venta");
+        BigDecimal totalVenta = venta == null ? (BigDecimal) d.get("total") : (BigDecimal) venta.get("total");
+        String texto = switch ((String) d.get("estado")) {
+            case "CONFIRMADO" -> "Hola" + nombre + ", " + negocio + " confirmó " + pedido + "." + cuandoLlega((String) d.get("entregaEl"))
+                    + " Total " + com.suresell.orders.cartera.Cartera.pesos((BigDecimal) d.get("total")) + "." + paga;
+            case "AJUSTADO" -> "Hola" + nombre + ", ajustamos " + pedido + " en " + negocio + ". Total "
+                    + com.suresell.orders.cartera.Cartera.pesos((BigDecimal) d.get("total")) + ". Se lo confirmamos pronto.";
+            case "RETENIDO" -> "Hola" + nombre + ", " + pedido + " en " + negocio + " está en espera. Escríbanos para liberarlo.";
+            case "DESPACHADO" -> "Hola" + nombre + ", " + pedido + " de " + negocio + " va en camino. Total "
+                    + com.suresell.orders.cartera.Cartera.pesos(totalVenta) + "." + paga;
+            case "ENTREGADO", "RECIBIDO" -> "Hola" + nombre + ", entregamos " + pedido + " de " + negocio + ". Total "
+                    + com.suresell.orders.cartera.Cartera.pesos(totalVenta) + "." + paga + " ¡Gracias!";
+            case "ENTREGADO_CON_NOVEDAD", "RECIBIDO_CON_NOVEDAD" -> "Hola" + nombre + ", entregamos " + pedido + " de " + negocio
+                    + " con novedades. Total de lo entregado " + com.suresell.orders.cartera.Cartera.pesos(totalEntregado(d)) + ". ¡Gracias!";
+            case "ENTREGA_FALLIDA" -> "Hola" + nombre + ", no pudimos entregar " + pedido + " de " + negocio
+                    + ". Le escribimos para acordar la entrega.";
+            case "RECHAZADO" -> "Hola" + nombre + ", no pudimos atender " + pedido + " en " + negocio + ".";
+            case "CANCELADO" -> "Hola" + nombre + ", " + pedido + " en " + negocio + " quedó cancelado.";
+            default -> "Hola" + nombre + ", recibimos " + pedido + " en " + negocio + ". Total "
+                    + com.suresell.orders.cartera.Cartera.pesos((BigDecimal) d.get("total")) + ". Se lo confirmamos pronto.";
+        };
+        String numero = numeroDeWhatsapp(telefono);
+        String enlace = "https://wa.me/" + (numero == null ? "" : numero) + "?text="
+                + java.net.URLEncoder.encode(texto, java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20");
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("texto", texto);
+        r.put("telefono", numero);
+        r.put("enlace", enlace);
+        return r;
+    }
+
+    /** « Le llega hoy.», « Le llega mañana.», « Le llega el jueves.», « Le llega el 24/09.», o nada sin fecha. */
+    static String cuandoLlega(String entregaEl) {
+        if (entregaEl == null) {
+            return "";
+        }
+        LocalDate dia = LocalDate.parse(entregaEl);
+        LocalDate hoy = LocalDate.now(BOGOTA);
+        long dias = java.time.temporal.ChronoUnit.DAYS.between(hoy, dia);
+        String cuando;
+        if (dias == 0) {
+            cuando = "hoy";
+        } else if (dias == 1) {
+            cuando = "mañana";
+        } else if (dias > 1 && dias < 7) {
+            cuando = "el " + dia.getDayOfWeek().getDisplayName(java.time.format.TextStyle.FULL, Locale.forLanguageTag("es-CO"));
+        } else {
+            cuando = "el " + dia.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM"));
+        }
+        return " Le llega " + cuando + ".";
+    }
+
+    /** Celular colombiano: 10 dígitos que empiezan por 3 → 57 delante; 12 que empiezan por 573 → tal cual; otro → sin número. */
+    static String numeroDeWhatsapp(String telefono) {
+        if (telefono == null) {
+            return null;
+        }
+        String digitos = telefono.replaceAll("\\D", "");
+        if (digitos.length() == 10 && digitos.startsWith("3")) {
+            return "57" + digitos;
+        }
+        if (digitos.length() == 12 && digitos.startsWith("573")) {
+            return digitos;
+        }
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static BigDecimal totalEntregado(Map<String, Object> d) {
+        BigDecimal total = BigDecimal.ZERO;
+        for (Map<String, Object> l : (List<Map<String, Object>>) d.get("lineas")) {
+            Object entregada = l.get("entregada");
+            Object precio = l.get("precioConfirmado") != null ? l.get("precioConfirmado") : l.get("precioVisto");
+            if (entregada != null && precio != null) {
+                total = total.add(((BigDecimal) precio).multiply(BigDecimal.valueOf(((Number) entregada).longValue())));
+            }
+        }
+        return total;
+    }
+
     /** La cabecera, si es de este negocio y, para un vendedor, suya. Si no, 404: no se dice que existe. */
     private Map<String, Object> cabeceraVisible(Quien quien, UUID id) {
         if (id == null) {

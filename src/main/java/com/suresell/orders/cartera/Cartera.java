@@ -812,7 +812,7 @@ public class Cartera {
     }
 
     /** $1.234.567 — pesos colombianos, sin decimales si no los hay. */
-    static String pesos(BigDecimal valor) {
+    public static String pesos(BigDecimal valor) {
         DecimalFormatSymbols simbolos = new DecimalFormatSymbols(Locale.ROOT);
         simbolos.setGroupingSeparator('.');
         simbolos.setDecimalSeparator(',');

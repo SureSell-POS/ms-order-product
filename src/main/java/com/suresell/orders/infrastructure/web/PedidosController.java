@@ -79,6 +79,12 @@ public class PedidosController {
         return pedidos.detalle(quien(http), id);
     }
 
+    @GetMapping("/{id}/whatsapp")
+    @Operation(summary = "F5.9 — Texto para el cliente según el estado del pedido y enlace wa.me que lo abre (D10)")
+    public Map<String, Object> whatsapp(@PathVariable UUID id, HttpServletRequest http) {
+        return pedidos.whatsapp(quien(http), id);
+    }
+
     @PostMapping("/{id}/confirmar")
     @Operation(summary = "F5.3 — Confirmar (admin, cajero). Con cantidades distintas, AJUSTADO y luego CONFIRMADO. Congela el precio de la captura")
     public Map<String, Object> confirmar(@PathVariable UUID id, @RequestBody(required = false) Accion cuerpo, HttpServletRequest http) {
