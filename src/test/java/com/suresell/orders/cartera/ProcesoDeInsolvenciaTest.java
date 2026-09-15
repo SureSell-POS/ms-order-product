@@ -154,8 +154,10 @@ class ProcesoDeInsolvenciaTest {
     }
 
     private static String cuerpo(String etapa, LocalDate fecha, String extra) {
+        // F4.13f: INICIO lleva número del proceso (400 sin él), salvo que la prueba lo ponga o lo quite.
+        String numero = "INICIO".equals(etapa) && (extra == null || !extra.contains("numeroProceso")) ? ",\"numeroProceso\":\"11001-31-03-2026-00012\"" : "";
         return "{\"etapa\":\"" + etapa + "\",\"fecha\":\"" + fecha + "\",\"documento\":\"Auto 400-12\",\"informadoPor\":\"el abogado del cliente\""
-                + (extra == null ? "" : "," + extra) + "}";
+                + numero + (extra == null ? "" : "," + extra) + "}";
     }
 
     private ResultActions marcaAnterior(String desde) throws Exception {
@@ -220,7 +222,7 @@ class ProcesoDeInsolvenciaTest {
         assertThat(solicitud.get("cifras").isNull()).isTrue();
         assertThat(columna()).isNull();
 
-        JsonNode inicio = leer(etapa(cuerpo("INICIO", hoy.minusDays(5), "\"autoridad\":\"Superintendencia de Sociedades\""))
+        JsonNode inicio = leer(etapa(cuerpo("INICIO", hoy.minusDays(5), "\"autoridad\":\"Superintendencia de Sociedades\",\"numeroProceso\":\"2026-00077\""))
                 .andExpect(status().isCreated()));
         assertThat(inicio.get("enProceso").asBoolean()).isTrue();
         assertThat(inicio.get("etapa").asText()).isEqualTo("INICIO");
@@ -440,6 +442,7 @@ class ProcesoDeInsolvenciaTest {
         JsonNode p = proceso();
         assertThat(p.get("etapa").asText()).isEqualTo("INICIO");
         assertThat(p.get("regimenPendiente").asBoolean()).isTrue();
+        assertThat(p.get("numeroProcesoPendiente").asBoolean()).as("F4.13f: el endpoint viejo no trae número").isTrue();
         assertThat(p.get("etapas").get(0).get("documento").asText()).isEqualTo("Sin documento (registrado desde la marca anterior)");
         assertThat(p.get("etapas").get(0).get("informadoPor").asText()).as("en pantalla, el nombre y no un id").isEqualTo("Admin");
         assertThat(p.get("foto").isNull()).isFalse();
@@ -571,5 +574,91 @@ class ProcesoDeInsolvenciaTest {
         assertThat(enProceso.get("motivoSinFrase").asText()).isEqualTo("La deuda anterior al inicio se reclama dentro del proceso.");
         etapa(cuerpo("CORRECCION_DE_ERROR", hoy, null)).andExpect(status().isCreated());
         assertThat(estadoDeCuenta().get("frase").asText()).contains("Tienda");
+    }
+
+    // ---------------------------------------------------------------- F4.13f: concepto IV del abogado
+
+    @Test
+    @DisplayName("🔴 F4.13f: procedimiento, autoridad del catálogo con su soporte, quién lleva el trámite; número obligatorio en INICIO; ayuda del giro solo con Ley 1116")
+    void concepto4() throws Exception {
+        etapa("{\"etapa\":\"INICIO\",\"fecha\":\"" + hoy + "\",\"documento\":\"Auto\",\"informadoPor\":\"abogado\"}")
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("numeroProceso"))
+                .andExpect(jsonPath("$.message").value("Falta el número del proceso o expediente."));
+        etapa(cuerpo("SOLICITUD", hoy.minusDays(3), "\"regimen\":\"LEY_1116\",\"procedimiento\":\"REORGANIZACION_ABREVIADA\""))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.aplicaAyudaGiroOrdinario").value(true))
+                .andExpect(jsonPath("$.procedimiento").value("REORGANIZACION_ABREVIADA"));
+        JsonNode inicio = leer(etapa(cuerpo("INICIO", hoy, "\"autoridadTipo\":\"JUEZ_CIVIL_DEL_CIRCUITO\",\"autoridad\":\"Juzgado 3 Civil del Circuito\","
+                        + "\"quienLlevaElTramite\":{\"nombre\":\"Ana Promotora\",\"papel\":\"promotor\"}"))
+                .andExpect(status().isCreated()));
+        assertThat(inicio.get("procedimiento").asText()).as("lo vigente es lo último informado").isEqualTo("REORGANIZACION_ABREVIADA");
+        assertThat(inicio.get("autoridadTipo").asText()).isEqualTo("JUEZ_CIVIL_DEL_CIRCUITO");
+        assertThat(inicio.get("tipoDeSoporte").asText()).isEqualTo("AUTO");
+        assertThat(inicio.get("quienLlevaElTramite").get("papel").asText()).isEqualTo("PROMOTOR");
+        assertThat(inicio.get("numeroProcesoPendiente").asBoolean()).isFalse();
+        assertThat(inicio.get("etapas").get(1).get("autoridad").asText()).as("el texto de siempre se queda").isEqualTo("Juzgado 3 Civil del Circuito");
+
+        etapa(cuerpo("ACUERDO_CONFIRMADO", hoy, "\"autoridadTipo\":\"CENTRO_DE_CONCILIACION\",\"quienLlevaElTramite\":{\"nombre\":\"Luis\",\"papel\":\"CONCILIADOR\"}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.tipoDeSoporte").value("ACTA"))
+                .andExpect(jsonPath("$.quienLlevaElTramite.nombre").value("Luis"))
+                .andExpect(jsonPath("$.numeroProceso").value("11001-31-03-2026-00012"));
+
+        // Catálogos, cada uno con su campo y su texto de B16.
+        etapa(ADMIN, "admin", VECINA, cuerpo("SOLICITUD", hoy, "\"procedimiento\":\"CONCURSO\"")).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.campo").value("procedimiento")).andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.startsWith("El procedimiento es reorganización")));
+        etapa(ADMIN, "admin", VECINA, cuerpo("SOLICITUD", hoy, "\"procedimiento\":\"OTRO_PROCEDIMIENTO\"")).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.campo").value("procedimientoOtro")).andExpect(jsonPath("$.message").value("Falta cuál es el otro procedimiento."));
+        etapa(ADMIN, "admin", VECINA, cuerpo("SOLICITUD", hoy, "\"autoridadTipo\":\"JUZGADO\"")).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.campo").value("autoridadTipo"))
+                .andExpect(jsonPath("$.message").value("La autoridad o entidad es la Superintendencia de Sociedades, un juez civil del "
+                        + "circuito, un juez civil municipal, un centro de conciliación, una notaría u otra."));
+        etapa(ADMIN, "admin", VECINA, cuerpo("SOLICITUD", hoy, "\"autoridadTipo\":\"OTRA\"")).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.campo").value("autoridadOtra")).andExpect(jsonPath("$.message").value("Falta cuál es la otra autoridad o entidad."));
+        etapa(ADMIN, "admin", VECINA, cuerpo("SOLICITUD", hoy, "\"quienLlevaElTramite\":{\"nombre\":\"X\",\"papel\":\"SINDICO\"}")).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.campo").value("quienLlevaElTramite.papel"));
+        etapa(ADMIN, "admin", VECINA, cuerpo("SOLICITUD", hoy, "\"quienLlevaElTramite\":{\"papel\":\"LIQUIDADOR\"}")).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.campo").value("quienLlevaElTramite.nombre")).andExpect(jsonPath("$.message").value("Falta el nombre de quien lleva el trámite."));
+        JsonNode otro = leer(etapa(ADMIN, "admin", VECINA, cuerpo("SOLICITUD", hoy, "\"regimen\":\"CGP\",\"procedimiento\":\"OTRO_PROCEDIMIENTO\",\"procedimientoOtro\":\"Insolvencia transfronteriza\","
+                        + "\"autoridadTipo\":\"OTRA\",\"autoridadOtra\":\"Tribunal extranjero\"")).andExpect(status().isCreated()));
+        assertThat(otro.get("procedimientoOtro").asText()).isEqualTo("Insolvencia transfronteriza");
+        assertThat(otro.get("tipoDeSoporte").isNull()).as("con otra autoridad no se sabe el soporte").isTrue();
+        assertThat(otro.get("aplicaAyudaGiroOrdinario").asBoolean()).as("CGP: la ayuda no se muestra").isFalse();
+    }
+
+    // ---------------------------------------------------------------- F4.13f+: concepto V del abogado (B18)
+
+    @Test
+    @DisplayName("🔴 F4.13f+: notaría y juez civil municipal; con centro o notaría el conciliador es obligatorio desde INICIO; ayuda del giro en el CGP")
+    void concepto5() throws Exception {
+        etapa(cuerpo("SOLICITUD", hoy.minusDays(2), "\"regimen\":\"CGP\",\"procedimiento\":\"NEGOCIACION_DE_DEUDAS\",\"autoridadTipo\":\"CENTRO_DE_CONCILIACION\""))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.tipoDeSoporte").value("ACTA"))
+                .andExpect(jsonPath("$.aplicaAyudaGiroOrdinario").value(true))
+                .andExpect(jsonPath("$.quienLlevaElTramite").doesNotExist());
+        etapa(cuerpo("INICIO", hoy, "\"autoridadTipo\":\"CENTRO_DE_CONCILIACION\"")).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.campo").value("quienLlevaElTramite.nombre"))
+                .andExpect(jsonPath("$.message").value("Falta el nombre del conciliador que lleva el trámite."));
+        etapa(cuerpo("INICIO", hoy, "\"autoridadTipo\":\"NOTARIA\",\"quienLlevaElTramite\":{\"papel\":\"CONCILIADOR\"}")).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.campo").value("quienLlevaElTramite.nombre"))
+                .andExpect(jsonPath("$.message").value("Falta el nombre del conciliador que lleva el trámite."));
+        etapa(cuerpo("INICIO", hoy, "\"autoridadTipo\":\"NOTARIA\",\"quienLlevaElTramite\":{\"nombre\":\"Pedro\",\"papel\":\"PROMOTOR\"}")).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.campo").value("quienLlevaElTramite.papel"));
+        JsonNode inicio = leer(etapa(cuerpo("INICIO", hoy, "\"autoridadTipo\":\"NOTARIA\",\"quienLlevaElTramite\":{\"nombre\":\"Rosa Conciliadora\",\"papel\":\"conciliador\"}"))
+                .andExpect(status().isCreated()));
+        assertThat(inicio.get("autoridadTipo").asText()).isEqualTo("NOTARIA");
+        assertThat(inicio.get("tipoDeSoporte").asText()).as("notaría: acta").isEqualTo("ACTA");
+        assertThat(inicio.get("quienLlevaElTramite").get("papel").asText()).isEqualTo("CONCILIADOR");
+        assertThat(inicio.get("aplicaAyudaGiroOrdinario").asBoolean()).as("CGP con negociación de deudas").isTrue();
+        etapa(cuerpo("ACUERDO_CONFIRMADO", hoy, "\"autoridadTipo\":\"JUEZ_CIVIL_MUNICIPAL\"")).andExpect(status().isCreated())
+                .andExpect(jsonPath("$.tipoDeSoporte").value("AUTO"))
+                .andExpect(jsonPath("$.quienLlevaElTramite.nombre").value("Rosa Conciliadora"));
+
+        // CGP sin texto de ayuda para ese procedimiento, y régimen pendiente: no sale.
+        etapa(ADMIN, "admin", VECINA, cuerpo("SOLICITUD", hoy, "\"regimen\":\"CGP\",\"procedimiento\":\"LIQUIDACION_PATRIMONIAL\""))
+                .andExpect(status().isCreated()).andExpect(jsonPath("$.aplicaAyudaGiroOrdinario").value(false));
+        etapa(ADMIN, "admin", VECINA, cuerpo("INICIO", hoy, "\"procedimiento\":\"CONVALIDACION_DE_ACUERDO_PRIVADO\",\"autoridadTipo\":\"CENTRO_DE_CONCILIACION\","
+                        + "\"quienLlevaElTramite\":{\"nombre\":\"Mario\"}"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("quienLlevaElTramite.papel"));
     }
 }

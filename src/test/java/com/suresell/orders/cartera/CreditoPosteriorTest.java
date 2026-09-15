@@ -134,7 +134,8 @@ class CreditoPosteriorTest {
     private void etapa(String etapa) throws Exception {
         mockMvc.perform(post("/api/cartera/clientes/" + TIENDA + "/insolvencia/etapas").header("Authorization", bearer(ADMIN, "admin"))
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"etapa\":\"" + etapa + "\",\"fecha\":\"" + hoy + "\",\"documento\":\"Auto\",\"informadoPor\":\"abogado\"}"))
+                        .content("{\"etapa\":\"" + etapa + "\",\"fecha\":\"" + hoy + "\",\"documento\":\"Auto\",\"informadoPor\":\"abogado\""
+                                + ("INICIO".equals(etapa) ? ",\"numeroProceso\":\"2026-0931\"" : "") + "}"))
                 .andExpect(status().isCreated());
     }
 

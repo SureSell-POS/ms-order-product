@@ -105,8 +105,37 @@ public class ProcesoDeInsolvencia {
     /** El resultado de revertir: el cuerpo y si ya estaba revertida (reintento, 200). */
     public record Revertida(Map<String, Object> cuerpo, boolean repetida) {}
 
+    /** F4.13f (aditivo): procedimiento, autoridad del catálogo y quién lleva el trámite. `autoridad` (texto) se queda (R10). */
     public record NuevaEtapa(String etapa, LocalDate fecha, String documento, String autoridad, String informadoPor,
-                             String regimen, String numeroProceso, UUID corrigeEtapaId) {}
+                             String regimen, String numeroProceso, UUID corrigeEtapaId, String procedimiento,
+                             String procedimientoOtro, String autoridadTipo, String autoridadOtra, Tramitador quienLlevaElTramite) {
+        public NuevaEtapa(String etapa, LocalDate fecha, String documento, String autoridad, String informadoPor,
+                          String regimen, String numeroProceso, UUID corrigeEtapaId) {
+            this(etapa, fecha, documento, autoridad, informadoPor, regimen, numeroProceso, corrigeEtapaId, null, null, null, null, null);
+        }
+    }
+
+    public record Tramitador(String nombre, String papel) {}
+
+    /** TEXTOS §B18. */
+    static final String FALTA_EL_CONCILIADOR = "Falta el nombre del conciliador que lleva el trámite.";
+    /** TEXTOS §B18 (aprobado por ECM el 2026-09-15). */
+    static final String CON_CENTRO_O_NOTARIA_ES_EL_CONCILIADOR =
+            "Con un centro de conciliación o una notaría, quien lleva el trámite es el conciliador.";
+
+    /** TEXTOS §B16 (F4.13f). */
+    static final List<String> PROCEDIMIENTOS = List.of("REORGANIZACION", "REORGANIZACION_ABREVIADA", "LIQUIDACION_JUDICIAL",
+            "LIQUIDACION_SIMPLIFICADA", "NEGOCIACION_DE_DEUDAS", "CONVALIDACION_DE_ACUERDO_PRIVADO", "LIQUIDACION_PATRIMONIAL",
+            "OTRO_PROCEDIMIENTO");
+    /** B18 (concepto V): entran juez civil municipal y notaría. */
+    static final List<String> AUTORIDADES = List.of("SUPERINTENDENCIA_DE_SOCIEDADES", "JUEZ_CIVIL_DEL_CIRCUITO",
+            "JUEZ_CIVIL_MUNICIPAL", "CENTRO_DE_CONCILIACION", "NOTARIA", "OTRA");
+    /** B18: con estas lo lleva el conciliador inscrito, obligatorio desde «Proceso iniciado». */
+    static final Set<String> CON_CONCILIADOR = Set.of("CENTRO_DE_CONCILIACION", "NOTARIA");
+    static final Set<String> DESDE_EL_INICIO = Set.of("INICIO", "ACUERDO_CONFIRMADO", "CUMPLIDO_TERMINADO", "LIQUIDACION");
+    /** B18: en el CGP la ayuda del giro ordinario tiene texto para estos dos procedimientos. */
+    static final Set<String> CGP_CON_AYUDA = Set.of("NEGOCIACION_DE_DEUDAS", "CONVALIDACION_DE_ACUERDO_PRIVADO");
+    static final Set<String> PAPELES = Set.of("PROMOTOR", "CONCILIADOR", "LIQUIDADOR");
 
     // ------------------------------------------------------------------ escribir
 
@@ -132,6 +161,46 @@ public class ProcesoDeInsolvencia {
         if (e.corrigeEtapaId() != null && !correccion) {
             throw new DatoInvalidoException("corrigeEtapaId", "Solo una corrección de registro corrige otra etapa.");
         }
+        // F4.13f (B16): el número del proceso es obligatorio en el cuerpo de INICIO; después vale el guardado.
+        if ("INICIO".equals(etapa) && (e.numeroProceso() == null || e.numeroProceso().isBlank())) {
+            throw new DatoInvalidoException("numeroProceso", "Falta el número del proceso o expediente.");
+        }
+        String procedimiento = mayusculasONulo(e.procedimiento());
+        if (procedimiento != null && !PROCEDIMIENTOS.contains(procedimiento)) {
+            throw new DatoInvalidoException("procedimiento", "El procedimiento es reorganización, reorganización abreviada, "
+                    + "liquidación judicial o liquidación simplificada (Ley 1116); negociación de deudas, convalidación de acuerdo "
+                    + "privado o liquidación patrimonial (Código General del Proceso); u otro procedimiento.");
+        }
+        String procedimientoOtro = "OTRO_PROCEDIMIENTO".equals(procedimiento)
+                ? obligatorio(e.procedimientoOtro(), "procedimientoOtro", "Falta cuál es el otro procedimiento.") : null;
+        String autoridadTipo = mayusculasONulo(e.autoridadTipo());
+        if (autoridadTipo != null && !AUTORIDADES.contains(autoridadTipo)) {
+            throw new DatoInvalidoException("autoridadTipo",
+                    "La autoridad o entidad es la Superintendencia de Sociedades, un juez civil del circuito, un juez civil municipal, "
+                            + "un centro de conciliación, una notaría u otra.");
+        }
+        String autoridadOtra = "OTRA".equals(autoridadTipo)
+                ? obligatorio(e.autoridadOtra(), "autoridadOtra", "Falta cuál es la otra autoridad o entidad.") : null;
+        String tramitadorNombre = null;
+        String tramitadorPapel = null;
+        if (e.quienLlevaElTramite() != null
+                && (e.quienLlevaElTramite().papel() != null || e.quienLlevaElTramite().nombre() != null)) {
+            tramitadorPapel = mayusculasONulo(e.quienLlevaElTramite().papel());
+            if (tramitadorPapel == null || !PAPELES.contains(tramitadorPapel)) {
+                throw new DatoInvalidoException("quienLlevaElTramite.papel", "Quien lleva el trámite es promotor, conciliador o liquidador.");
+            }
+            tramitadorNombre = obligatorio(e.quienLlevaElTramite().nombre(), "quienLlevaElTramite.nombre",
+                    conConciliador(autoridadTipo) ? FALTA_EL_CONCILIADOR : "Falta el nombre de quien lleva el trámite.");
+        }
+        // B18: con centro de conciliación o notaría lo lleva el conciliador; desde el inicio hay que nombrarlo (la base lo repite).
+        if (conConciliador(autoridadTipo)) {
+            if (tramitadorPapel != null && !"CONCILIADOR".equals(tramitadorPapel)) {
+                throw new DatoInvalidoException("quienLlevaElTramite.papel", CON_CENTRO_O_NOTARIA_ES_EL_CONCILIADOR);
+            }
+            if (tramitadorNombre == null && DESDE_EL_INICIO.contains(etapa)) {
+                throw new DatoInvalidoException("quienLlevaElTramite.nombre", FALTA_EL_CONCILIADOR);
+            }
+        }
         Optional<Map<String, Object>> vigente = abierto(quien.negocio(), doc);
         if (e.corrigeEtapaId() != null) {
             String corregida = vigente.flatMap(v -> jdbc.queryForList("""
@@ -146,8 +215,11 @@ public class ProcesoDeInsolvencia {
             fechaNoFutura(e.fecha(), "INICIO".equals(etapa));
             permitida(vigente.map(v -> (String) v.get("etapa")).orElse(null), etapa);
         }
-        informar(quien, doc, etapa, e.fecha(), documentoDeLaEtapa, e.autoridad(), informadoPor, regimen, e.numeroProceso(),
-                e.corrigeEtapaId());
+        cartera.fijarAutor(quien);
+        jdbc.queryForObject("SELECT fn_insolvencia_informar_etapa(?, ?, ?::date, ?, ?, ?, ?, ?, ?::uuid, ?, ?, ?, ?, ?, ?)", UUID.class,
+                doc, etapa, java.sql.Date.valueOf(e.fecha()), documentoDeLaEtapa, recortarONulo(e.autoridad()), informadoPor, regimen,
+                recortarONulo(e.numeroProceso()), e.corrigeEtapaId() == null ? null : e.corrigeEtapaId().toString(),
+                procedimiento, procedimientoOtro, autoridadTipo, autoridadOtra, tramitadorNombre, tramitadorPapel);
         return proceso(quien, doc);
     }
 
@@ -321,6 +393,14 @@ public class ProcesoDeInsolvencia {
             r.put("regimen", null);
             r.put("regimenPendiente", false);
             r.put("numeroProceso", null);
+            r.put("numeroProcesoPendiente", false);
+            r.put("aplicaAyudaGiroOrdinario", false);
+            r.put("procedimiento", null);
+            r.put("procedimientoOtro", null);
+            r.put("autoridadTipo", null);
+            r.put("autoridadOtra", null);
+            r.put("tipoDeSoporte", null);
+            r.put("quienLlevaElTramite", null);
             r.put("foto", null);
             r.put("cifras", null);
             r.put("etapas", List.of());
@@ -338,6 +418,8 @@ public class ProcesoDeInsolvencia {
         r.put("regimen", v.get("regimen"));
         r.put("regimenPendiente", abierto && v.get("regimen") == null);
         r.put("numeroProceso", v.get("numero_proceso"));
+        // F4.13f: el número falta en lo migrado, lo del endpoint viejo y lo informado sin él.
+        r.put("numeroProcesoPendiente", enProceso && v.get("numero_proceso") == null);
         if (v.get("foto_id") == null) {
             r.put("foto", null);
         } else {
@@ -371,7 +453,8 @@ public class ProcesoDeInsolvencia {
         r.put("creditoPosterior", enProceso ? creditoPosterior(quien.negocio(), v.get("proceso_id")) : null);
         r.put("etapas", jdbc.queryForList("""
                 SELECT e.id, e.secuencia, e.etapa, e.fecha, e.documento, e.autoridad, e.informado_por, e.regimen,
-                       e.numero_proceso, e.corrige_etapa_id, e.registrado_por, u.nombre, e.registrado_en
+                       e.numero_proceso, e.corrige_etapa_id, e.registrado_por, u.nombre, e.registrado_en,
+                       e.procedimiento, e.procedimiento_otro, e.autoridad_tipo, e.autoridad_otra, e.tramitador_nombre, e.tramitador_papel
                   FROM insolvencia_etapas e LEFT JOIN users u ON u.tenant_id = e.tenant_id AND u.id = e.registrado_por
                  WHERE e.tenant_id = ? AND e.proceso_id = ?
                  ORDER BY e.secuencia""", quien.negocio(), v.get("proceso_id")).stream().map(f -> {
@@ -389,9 +472,59 @@ public class ProcesoDeInsolvencia {
                     m.put("registradoPorId", f.get("registrado_por"));
                     m.put("registradoPor", f.get("nombre"));
                     m.put("registradoEn", instante(f.get("registrado_en")));
+                    m.put("procedimiento", f.get("procedimiento"));
+                    m.put("procedimientoOtro", f.get("procedimiento_otro"));
+                    m.put("autoridadTipo", f.get("autoridad_tipo"));
+                    m.put("autoridadOtra", f.get("autoridad_otra"));
+                    m.put("tipoDeSoporte", tipoDeSoporte((String) f.get("autoridad_tipo")));
+                    m.put("quienLlevaElTramite", f.get("tramitador_papel") == null ? null
+                            : Map.of("nombre", f.get("tramitador_nombre"), "papel", f.get("tramitador_papel")));
                     return m;
                 }).toList());
+        // F4.13f: lo vigente del proceso es lo último informado en sus etapas, como el régimen.
+        List<Map<String, Object>> etapas = (List<Map<String, Object>>) r.get("etapas");
+        Map<String, Object> conProcedimiento = ultimaCon(etapas, "procedimiento");
+        r.put("procedimiento", conProcedimiento == null ? null : conProcedimiento.get("procedimiento"));
+        r.put("procedimientoOtro", conProcedimiento == null ? null : conProcedimiento.get("procedimientoOtro"));
+        // B16 y B18: la ayuda del giro ordinario con Ley 1116; en el CGP, con negociación de deudas o convalidación (cada una
+        // con su texto en el panel). Con el régimen pendiente no sale.
+        r.put("aplicaAyudaGiroOrdinario", "LEY_1116".equals(v.get("regimen"))
+                || ("CGP".equals(v.get("regimen")) && r.get("procedimiento") != null && CGP_CON_AYUDA.contains((String) r.get("procedimiento"))));
+        Map<String, Object> conAutoridad = ultimaCon(etapas, "autoridadTipo");
+        r.put("autoridadTipo", conAutoridad == null ? null : conAutoridad.get("autoridadTipo"));
+        r.put("autoridadOtra", conAutoridad == null ? null : conAutoridad.get("autoridadOtra"));
+        r.put("tipoDeSoporte", conAutoridad == null ? null : conAutoridad.get("tipoDeSoporte"));
+        Map<String, Object> conTramitador = ultimaCon(etapas, "quienLlevaElTramite");
+        r.put("quienLlevaElTramite", conTramitador == null ? null : conTramitador.get("quienLlevaElTramite"));
         return r;
+    }
+
+    private static Map<String, Object> ultimaCon(List<Map<String, Object>> etapas, String campo) {
+        for (int i = etapas.size() - 1; i >= 0; i--) {
+            if (etapas.get(i).get(campo) != null) {
+                return etapas.get(i);
+            }
+        }
+        return null;
+    }
+
+    /** B16 y B18: «Auto N.º» con Superintendencia o cualquier juez; «Acta N.º» con centro de conciliación o notaría; con otra, no se sabe. */
+    static String tipoDeSoporte(String autoridadTipo) {
+        if (autoridadTipo == null) {
+            return null;
+        }
+        if (Set.of("SUPERINTENDENCIA_DE_SOCIEDADES", "JUEZ_CIVIL_DEL_CIRCUITO", "JUEZ_CIVIL_MUNICIPAL").contains(autoridadTipo)) {
+            return "AUTO";
+        }
+        return conConciliador(autoridadTipo) ? "ACTA" : null;
+    }
+
+    private static boolean conConciliador(String autoridadTipo) {
+        return autoridadTipo != null && CON_CONCILIADOR.contains(autoridadTipo);
+    }
+
+    private static String mayusculasONulo(String s) {
+        return s == null || s.isBlank() ? null : s.trim().toUpperCase(Locale.ROOT);
     }
 
     /** GET /api/cartera/clientes/{documento}/insolvencia/foto (admin): la foto vigente factura por factura, con su huella. */

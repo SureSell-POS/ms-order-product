@@ -833,12 +833,15 @@ public class Cartera {
     public record Devolucion(BigDecimal monto, String medio, String referenciaMedio, String motivo, String referencia,
                              OffsetDateTime ocurridoEn, String idempotencyKey, Long siteId, String beneficiario,
                              String beneficiarioNombre, String beneficiarioDocumento, String forma,
-                             List<RenglonDeMercancia> mercancia) {
+                             List<RenglonDeMercancia> mercancia, AutoDeDesignacion autoDesignacionLiquidador) {
         public Devolucion(BigDecimal monto, String medio, String referenciaMedio, String motivo, String referencia,
                           OffsetDateTime ocurridoEn, String idempotencyKey, Long siteId) {
-            this(monto, medio, referenciaMedio, motivo, referencia, ocurridoEn, idempotencyKey, siteId, null, null, null, null, null);
+            this(monto, medio, referenciaMedio, motivo, referencia, ocurridoEn, idempotencyKey, siteId, null, null, null, null, null, null);
         }
     }
+
+    /** F4.13f (B16): el auto que designa al liquidador, obligatorio al devolver en liquidación. */
+    public record AutoDeDesignacion(String numero, LocalDate fecha) {}
 
     public record RenglonDeMercancia(String productoId, BigDecimal cantidad, BigDecimal valorUnitario) {}
 
@@ -912,6 +915,7 @@ public class Cartera {
     private static final String COLUMNAS_DEL_EGRESO = """
             SELECT e.id, e.numero, e.monto, e.medio, e.motivo, e.referencia, e.pagado_por, u.nombre, e.ocurrido_en,
                    e.cliente_documento, e.beneficiario, e.beneficiario_nombre, e.beneficiario_documento, e.forma,
+                   e.auto_designacion_numero, e.auto_designacion_fecha, e.etapa_al_devolver, e.regimen_al_devolver,
                    c.nombre AS cliente_nombre
               FROM egresos_de_cartera e
               LEFT JOIN users u ON u.tenant_id = e.tenant_id AND u.id = e.pagado_por
@@ -944,6 +948,11 @@ public class Cartera {
             m.put("beneficiarioNombre", f.get("beneficiario_nombre"));
             m.put("beneficiarioDocumento", f.get("beneficiario_documento"));
             m.put("forma", f.get("forma"));
+            // F4.13f (aditivo): la etapa y el régimen vigentes el día de la devolución (null antes de V82) y el auto de designación.
+            m.put("etapaAlDevolver", f.get("etapa_al_devolver"));
+            m.put("regimenAlDevolver", f.get("regimen_al_devolver"));
+            m.put("autoDesignacionLiquidador", f.get("auto_designacion_numero") == null ? null
+                    : Map.of("numero", f.get("auto_designacion_numero"), "fecha", f.get("auto_designacion_fecha").toString()));
             m.put("mercancia", suyos);
             m.put("documentoDeSatisfaccion", MEDIO_MERCANCIA.equals(f.get("forma")) ? documentoDeSatisfaccion(f, suyos) : null);
             return m;
@@ -961,7 +970,12 @@ public class Cartera {
         String detalle = String.join("; ", renglones.stream().map(r -> ((BigDecimal) r.get("cantidad")).toPlainString() + " × "
                 + r.get("productoNombre") + " a " + pesos((BigDecimal) r.get("valorUnitario")) + " = " + pesos((BigDecimal) r.get("valor"))).toList());
         return fecha.format(FECHA_LARGA) + " · Entrega de mercancía como pago del saldo a favor, comprobante de egreso N.º "
-                + e.get("numero") + ", al " + (liquidador ? "liquidador " : "cliente ") + nombre + " (" + documento + "): " + detalle
+                + e.get("numero") + ", al " + (liquidador ? "liquidador " : "cliente ") + nombre + " (" + documento + ")"
+                // B16: con el auto que designa al liquidador.
+                + (liquidador && e.get("auto_designacion_numero") != null
+                        ? ", designado por auto N.º " + e.get("auto_designacion_numero") + " del "
+                                + ((java.sql.Date) e.get("auto_designacion_fecha")).toLocalDate().format(FECHA_LARGA) : "")
+                + ": " + detalle
                 + ". Total " + pesos(decimal(e.get("monto"))) + ". No es una venta ni se descuenta de una venta. "
                 + "El descuento de inventario se registra aparte.";
     }
@@ -1058,6 +1072,22 @@ public class Cartera {
         if (!"LIQUIDACION".equals(etapa) && "LIQUIDADOR".equals(beneficiario)) {
             throw new DatoInvalidoException("beneficiario", "El liquidador solo recibe el saldo a favor cuando el proceso está en liquidación.");
         }
+        // F4.13f (B16): en liquidación, el auto que designa al liquidador (la base lo repite, V82).
+        String autoNumero = null;
+        LocalDate autoFecha = null;
+        if ("LIQUIDACION".equals(etapa)) {
+            AutoDeDesignacion auto = d.autoDesignacionLiquidador();
+            autoNumero = obligatorio(auto == null ? null : auto.numero(), "autoDesignacionLiquidador.numero",
+                    "Falta el número del auto que designa al liquidador.");
+            autoFecha = auto.fecha();
+            if (autoFecha == null) {
+                throw new DatoInvalidoException("autoDesignacionLiquidador.fecha", "Falta la fecha del auto que designa al liquidador.");
+            }
+            if (autoFecha.isAfter(LocalDate.now(BOGOTA))) {
+                throw new DatoInvalidoException("autoDesignacionLiquidador.fecha",
+                        "La fecha del auto que designa al liquidador no puede ser posterior a hoy. No se registró nada.");
+            }
+        }
         List<Object[]> renglones = renglonesDeMercancia(negocio, forma, d.mercancia(), monto);
         String cuenta = cuentaBloqueada(negocio, doc)
                 .orElseThrow(() -> new DatoInvalidoException("clienteDocumento", "Ese cliente no tiene cuenta por cobrar."));
@@ -1081,12 +1111,14 @@ public class Cartera {
         UUID egresoId = jdbc.queryForObject("""
                 INSERT INTO egresos_de_cartera (tenant_id, numero, cliente_documento, monto, medio, referencia_medio, motivo,
                                                 referencia, debito_tx_id, pagado_por, site_id, ocurrido_en, idempotency_key,
-                                                beneficiario, beneficiario_nombre, beneficiario_documento, forma)
-                VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                                beneficiario, beneficiario_nombre, beneficiario_documento, forma,
+                                                auto_designacion_numero, auto_designacion_fecha)
+                VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 RETURNING id""", UUID.class, negocio, doc, monto, medio,
                 MEDIO_MERCANCIA.equals(forma) ? null : recortarONulo(d.referenciaMedio()), motivo, referencia,
                 debito, quien.usuarioId(), d.siteId(), Timestamp.from(ocurrido.toInstant()), clave,
-                beneficiario, beneficiarioNombre, beneficiarioDocumento, forma);
+                beneficiario, beneficiarioNombre, beneficiarioDocumento, forma,
+                autoNumero, autoFecha == null ? null : java.sql.Date.valueOf(autoFecha));
         for (Object[] r : renglones) {
             jdbc.update("""
                     INSERT INTO egresos_de_cartera_mercancia (tenant_id, egreso_id, renglon, producto_id, producto_nombre, cantidad, valor_unitario, valor)

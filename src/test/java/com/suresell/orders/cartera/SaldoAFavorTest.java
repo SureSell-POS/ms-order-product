@@ -594,7 +594,8 @@ class SaldoAFavorTest {
     private void etapaDeLaTienda(String etapa) throws Exception {
         mockMvc.perform(post("/api/cartera/clientes/" + TIENDA + "/insolvencia/etapas").header("Authorization", bearer(ADMIN, "admin"))
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"etapa\":\"" + etapa + "\",\"fecha\":\"" + hoy + "\",\"documento\":\"Auto\",\"informadoPor\":\"abogado\"}"))
+                        .content("{\"etapa\":\"" + etapa + "\",\"fecha\":\"" + hoy + "\",\"documento\":\"Auto\",\"informadoPor\":\"abogado\""
+                                + ("INICIO".equals(etapa) ? ",\"numeroProceso\":\"2026-0913\"" : "") + "}"))
                 .andExpect(status().isCreated());
     }
 
@@ -672,13 +673,40 @@ class SaldoAFavorTest {
         devolver(ADMIN, "admin", TIENDA, devolucion(5000, "DEVUELTO_AL_PROCESO", "Oficio 9", "liq-sin-doc")
                         .replace("}", ",\"beneficiario\":\"LIQUIDADOR\",\"beneficiarioNombre\":\"Liquidadora\"}"))
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("beneficiarioDocumento"));
-        devolver(ADMIN, "admin", TIENDA, devolucion(5000, "DEVUELTO_AL_PROCESO", "Oficio 9", "liq-ok").replace("}", liquidador))
+        // F4.13f (B16): sin el auto que designa al liquidador, 400; con fecha futura, 400.
+        devolver(ADMIN, "admin", TIENDA, devolucion(5000, "DEVUELTO_AL_PROCESO", "Oficio 9", "liq-sin-auto").replace("}", liquidador))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("autoDesignacionLiquidador.numero"))
+                .andExpect(jsonPath("$.message").value("Falta el número del auto que designa al liquidador."));
+        String conAuto = liquidador.replace("}", ",\"autoDesignacionLiquidador\":{\"numero\":\"400-77\"}}");
+        devolver(ADMIN, "admin", TIENDA, devolucion(5000, "DEVUELTO_AL_PROCESO", "Oficio 9", "liq-sin-fecha").replace("}", conAuto))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("autoDesignacionLiquidador.fecha"))
+                .andExpect(jsonPath("$.message").value("Falta la fecha del auto que designa al liquidador."));
+        String futuro = liquidador.replace("}", ",\"autoDesignacionLiquidador\":{\"numero\":\"400-77\",\"fecha\":\"" + hoy.plusDays(1) + "\"}}");
+        devolver(ADMIN, "admin", TIENDA, devolucion(5000, "DEVUELTO_AL_PROCESO", "Oficio 9", "liq-futuro").replace("}", futuro))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("autoDesignacionLiquidador.fecha"))
+                .andExpect(jsonPath("$.message").value("La fecha del auto que designa al liquidador no puede ser posterior a hoy. No se registró nada."));
+        String bueno = liquidador.replace("}", ",\"autoDesignacionLiquidador\":{\"numero\":\"400-77\",\"fecha\":\"" + hoy.minusDays(1) + "\"}}");
+        devolver(ADMIN, "admin", TIENDA, devolucion(5000, "DEVUELTO_AL_PROCESO", "Oficio 9", "liq-ok").replace("}", bueno))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.beneficiario").value("LIQUIDADOR"))
                 .andExpect(jsonPath("$.beneficiarioNombre").value("Liquidadora S.A.S."))
                 .andExpect(jsonPath("$.beneficiarioDocumento").value("900123456"))
+                .andExpect(jsonPath("$.etapaAlDevolver").value("LIQUIDACION"))
+                .andExpect(jsonPath("$.autoDesignacionLiquidador.numero").value("400-77"))
+                .andExpect(jsonPath("$.autoDesignacionLiquidador.fecha").value(hoy.minusDays(1).toString()))
                 .andExpect(jsonPath("$.documentoDeSatisfaccion").isEmpty());
         assertThat(contar("SELECT count(*) FROM egresos_de_cartera WHERE tenant_id = ?", T)).isEqualTo(1);
+        // En mercancía, el documento de satisfacción nombra el auto de designación.
+        String fechaLargaAuto = hoy.minusDays(1).format(java.time.format.DateTimeFormatter.ofPattern("d 'de' MMMM 'de' yyyy", java.util.Locale.forLanguageTag("es-CO")));
+        JsonNode enMercancia = leer(devolver(ADMIN, "admin", TIENDA, mercancia(5000, "liq-mercancia",
+                        "{\"productoId\":\"" + PRODUCTO + "\",\"cantidad\":1,\"valorUnitario\":5000}").replace("\"motivo\":\"CLIENTE_LO_PIDIO\"", "\"motivo\":\"DEVUELTO_AL_PROCESO\",\"referencia\":\"Oficio 9\"")
+                        .replace("}]}", "}]" + bueno))
+                .andExpect(status().isCreated()));
+        assertThat(enMercancia.get("documentoDeSatisfaccion").asText())
+                .contains("al liquidador Liquidadora S.A.S. (900123456), designado por auto N.º 400-77 del " + fechaLargaAuto + ": 1 × ");
+        JsonNode egresos = estadoDeCuenta(TIENDA).get("egresos");
+        assertThat(egresos.findValuesAsText("etapaAlDevolver")).containsOnly("LIQUIDACION");
+        assertThat(egresos.findValues("regimenAlDevolver")).allSatisfy(x -> assertThat(x.isNull()).as("la Tienda no informó régimen").isTrue());
     }
 
     @Test
@@ -727,7 +755,7 @@ class SaldoAFavorTest {
     private void procesoCerradoCon(String cierre) throws Exception {
         mockMvc.perform(post("/api/cartera/clientes/" + TIENDA + "/insolvencia/etapas").header("Authorization", bearer(ADMIN, "admin"))
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"etapa\":\"INICIO\",\"fecha\":\"" + hoy.minusDays(10) + "\",\"documento\":\"Auto\",\"informadoPor\":\"abogado\"}"))
+                        .content("{\"etapa\":\"INICIO\",\"fecha\":\"" + hoy.minusDays(10) + "\",\"documento\":\"Auto\",\"informadoPor\":\"abogado\",\"numeroProceso\":\"2026-0913\"}"))
                 .andExpect(status().isCreated());
         // En proceso y sin deuda posterior, con excedente: todo a favor, sin tocar la vieja (F4.13 b).
         abonar(abono(TIENDA, 20000, cierre + "-anticipo", "SALDO_A_FAVOR")).andExpect(status().isCreated());
@@ -782,7 +810,7 @@ class SaldoAFavorTest {
     private void inicioDeLaTienda(LocalDate fecha) throws Exception {
         mockMvc.perform(post("/api/cartera/clientes/" + TIENDA + "/insolvencia/etapas").header("Authorization", bearer(ADMIN, "admin"))
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"etapa\":\"INICIO\",\"fecha\":\"" + fecha + "\",\"documento\":\"Auto\",\"informadoPor\":\"abogado\"}"))
+                        .content("{\"etapa\":\"INICIO\",\"fecha\":\"" + fecha + "\",\"documento\":\"Auto\",\"informadoPor\":\"abogado\",\"numeroProceso\":\"2026-0913\"}"))
                 .andExpect(status().isCreated());
     }
 
