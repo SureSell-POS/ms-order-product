@@ -31,7 +31,8 @@ public class SuperAdminRepository {
     public Optional<SuperAdminRow> findByEmail(String email) {
         try {
             SuperAdminRow row = jdbc.queryForObject(
-                    "SELECT id, email, password_hash FROM super_admins WHERE lower(email) = lower(?)",
+                    // V81 (S1): app_user no tiene privilegios sobre la tabla; se lee por correo con la función.
+                    "SELECT id, email, password_hash FROM public.fn_super_admin_por_correo(?)",
                     (rs, i) -> new SuperAdminRow(rs.getLong("id"), rs.getString("email"),
                             rs.getString("password_hash")),
                     email);
@@ -64,9 +65,12 @@ public class SuperAdminRepository {
                         rs.getString("plan"), rs.getString("status"), rs.getInt("users")));
     }
 
-    /** V48 (ola 3): una cuenta de KAM más. El hash llega ya calculado. */
+    /**
+     * V48 (ola 3): una cuenta de KAM más. El hash llega ya calculado. V81 (S1): por la función, que valida
+     * correo y formato BCrypt; app_user ya no inserta en la tabla.
+     */
     public void insert(String email, String passwordHash) {
-        jdbc.update("INSERT INTO super_admins (email, password_hash) VALUES (?, ?)", email, passwordHash);
+        jdbc.queryForObject("SELECT public.fn_super_admin_crear(?, ?)", Long.class, email, passwordHash);
     }
 
     /** Cambia el plan de un negocio. Devuelve cuántas filas cambió (0 = no existe). */
