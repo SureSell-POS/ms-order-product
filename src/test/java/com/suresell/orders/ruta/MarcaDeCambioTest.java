@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.flywaydb.core.Flyway;
@@ -126,6 +127,30 @@ class MarcaDeCambioTest {
             assertThat(uno(a, "SELECT actualizado_en::date FROM menu_products WHERE id_product = 'f60b-c1'")).isEqualTo("2020-01-01");
             s.execute("UPDATE menu_products SET price = 150 WHERE id_product = 'f60b-c1'");
             assertThat(uno(a, "SELECT actualizado_en > now() - interval '1 minute' FROM menu_products WHERE id_product = 'f60b-c1'")).isEqualTo("t");
+        }
+    }
+
+    @Test
+    @DisplayName("🔴 F6.0b: una venta a crédito de caja NO reescribe la fila del cliente (mismo ctid y xmin); cambiar el cupo sí (control)")
+    void laVentaNoEscribeLaFicha() throws Exception {
+        try (Connection d = dueno(); Statement s = d.createStatement()) {
+            s.execute("INSERT INTO tenants (id, name, plan) VALUES ('f60b-v', 'V', 'pro') ON CONFLICT DO NOTHING");
+            s.execute("INSERT INTO clientes (tenant_id, documento, nombre, plazo_dias, creado_por) VALUES ('f60b-v', 'V1', 'Cliente', 30, 's')");
+            s.execute("INSERT INTO accounts_receivable (id, tenant_id, created_at, credit_limit, customer_document, customer_name, status, total_debt, updated_at) "
+                    + "VALUES ('f60b-v-1', 'f60b-v', now(), 1000000, 'V1', 'Cliente', 'ACTIVE', 0, now())");
+        }
+        String fila = "SELECT ctid::text || '/' || xmin::text FROM clientes WHERE tenant_id = 'f60b-v' AND documento = 'V1'";
+        try (Connection a = comoApp("f60b-v"); Statement s = a.createStatement()) {
+            String antes = uno(a, fila);
+            for (int i = 0; i < 3; i++) {
+                s.executeUpdate("INSERT INTO orders (uuid_id, tenant_id, status, payment_method, subtotal, total, synced, is_printed, created_at, cliente_documento) "
+                        + "VALUES ('" + UUID.randomUUID() + "', 'f60b-v', 'pagado', 'CREDITO', 1000, 1000, true, false, now(), 'V1')");
+            }
+            assertThat(uno(a, "SELECT total_debt::int FROM accounts_receivable WHERE id = 'f60b-v-1'"))
+                    .as("control: las ventas sí movieron la cuenta").isEqualTo("3000");
+            assertThat(uno(a, fila)).as("la venta a crédito no reescribe la fila de clientes").isEqualTo(antes);
+            s.executeUpdate("UPDATE accounts_receivable SET credit_limit = 2000000 WHERE id = 'f60b-v-1'");
+            assertThat(uno(a, fila)).as("control: cambiar el cupo sí reescribe la ficha").isNotEqualTo(antes);
         }
     }
 }
