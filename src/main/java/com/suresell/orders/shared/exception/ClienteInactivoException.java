@@ -12,4 +12,9 @@ public class ClienteInactivoException extends RuntimeException {
     public ClienteInactivoException(String documento) {
         super("El cliente " + documento + " está desactivado: reactívalo antes de asignarle una lista.");
     }
+
+    /** {@code queCosa}: lo que no se puede hacer, en infinitivo («tomarle un pedido»). */
+    public ClienteInactivoException(String documento, String queCosa) {
+        super("El cliente " + documento + " está desactivado: reactívalo antes de " + queCosa + ".");
+    }
 }
