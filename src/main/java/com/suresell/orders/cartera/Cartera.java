@@ -139,8 +139,10 @@ public class Cartera {
         }
         Map<String, Object> cliente = resumenVisible(quien, documento);
         // Solo aquí y no en la lista: es dato personal, y el panel lo necesita para el enlace de WhatsApp.
+        // Sin WhatsApp la fila trae null, y findFirst() de un null es NullPointerException (500): se filtra.
         cliente.put("whatsapp", jdbc.queryForList("SELECT whatsapp FROM clientes WHERE tenant_id = ? AND documento = ?",
-                String.class, quien.negocio(), cliente.get("clienteDocumento")).stream().findFirst().orElse(null));
+                String.class, quien.negocio(), cliente.get("clienteDocumento")).stream().filter(java.util.Objects::nonNull)
+                .findFirst().orElse(null));
 
         List<Map<String, Object>> documentos = jdbc.queryForList("""
                 SELECT d.debito_tx_id, d.order_uuid, d.fecha, d.vence_el, d.monto, d.aplicado, d.saldo,
@@ -236,6 +238,13 @@ public class Cartera {
         r.put("clientesConSaldo", totales.get("clientes_con_saldo"));
         r.put("porEdad", porEdad);
         r.put("topDeudores", top);
+        // F4.11: el aviso del tablero. Ventas de caja a clientes en insolvencia sin decisión.
+        r.put("ventasAInsolventePorRevisar", jdbc.queryForObject("""
+                SELECT count(*) FROM ventas_a_insolvente m
+                 WHERE m.tenant_id = ?
+                   AND NOT EXISTS (SELECT 1 FROM ventas_a_insolvente_resoluciones r
+                                    WHERE r.tenant_id = m.tenant_id AND r.venta_a_insolvente_id = m.id)""",
+                Long.class, quien.negocio()));
         return r;
     }
 
@@ -706,6 +715,199 @@ public class Cartera {
         return r;
     }
 
+    // ------------------------------------------------------------ política de crédito (F5.4)
+
+    static final Set<String> POLITICAS_DE_CREDITO = Set.of("AVISAR", "RETENER_PEDIDO");
+
+    /** Lo que la política decide sobre un pedido nuevo: retenerlo, con cuántos días lleva vencida la factura más vieja. */
+    public record Retencion(int diasVencido, int diasMoraParaRetener) {}
+
+    /**
+     * GET /api/cartera/politica-de-credito. Sin fila, la del plan: AVISAR con 0 días
+     * ({@code actualizadoPor} null). Con {@code historia}: los cambios, el más reciente primero.
+     */
+    public Map<String, Object> politicaDeCredito(Quien quien) {
+        List<Map<String, Object>> filas = jdbc.queryForList("""
+                SELECT p.politica, p.dias_mora_para_retener, p.actualizado_por, u.nombre, p.actualizado_en
+                  FROM politica_de_credito p LEFT JOIN users u ON u.tenant_id = p.tenant_id AND u.id = p.actualizado_por
+                 WHERE p.tenant_id = ?""", quien.negocio());
+        Map<String, Object> f = filas.isEmpty() ? null : filas.get(0);
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("politica", f == null ? "AVISAR" : f.get("politica"));
+        r.put("diasMoraParaRetener", f == null ? 0 : f.get("dias_mora_para_retener"));
+        r.put("actualizadoPorId", f == null ? null : f.get("actualizado_por"));
+        r.put("actualizadoPor", f == null ? null : f.get("nombre"));
+        r.put("actualizadoEn", f == null ? null : instante(f.get("actualizado_en")));
+        r.put("historia", jdbc.queryForList("""
+                SELECT e.politica_anterior, e.politica_nueva, e.dias_anterior, e.dias_nuevo, e.usuario_id, u.nombre, e.ocurrido_en
+                  FROM politica_de_credito_eventos e LEFT JOIN users u ON u.tenant_id = e.tenant_id AND u.id = e.usuario_id
+                 WHERE e.tenant_id = ? ORDER BY e.ocurrido_en DESC, e.id LIMIT 50""", quien.negocio()).stream().map(e -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("politicaAnterior", e.get("politica_anterior"));
+            m.put("politica", e.get("politica_nueva"));
+            m.put("diasAnterior", e.get("dias_anterior"));
+            m.put("diasMoraParaRetener", e.get("dias_nuevo"));
+            m.put("usuarioId", e.get("usuario_id"));
+            m.put("usuario", e.get("nombre"));
+            m.put("ocurridoEn", instante(e.get("ocurrido_en")));
+            return m;
+        }).toList());
+        return r;
+    }
+
+    /**
+     * PUT /api/cartera/politica-de-credito (admin). Reemplaza la política del negocio; el rastro
+     * lo escribe la base (V73) con el autor, que es obligatorio.
+     */
+    @Transactional
+    public Map<String, Object> cambiarPoliticaDeCredito(Quien quien, String politica, Integer dias) {
+        String laPolitica = politica == null ? null : politica.trim().toUpperCase(Locale.ROOT);
+        if (laPolitica == null || !POLITICAS_DE_CREDITO.contains(laPolitica)) {
+            throw new DatoInvalidoException("politica", "La política es AVISAR o RETENER_PEDIDO.");
+        }
+        int losDias = dias == null ? 0 : dias;
+        if (losDias < 0 || losDias > 365) {
+            throw new DatoInvalidoException("diasMoraParaRetener", "Los días de mora van de 0 a 365.");
+        }
+        if (quien.usuarioId() == null) {
+            throw new DatoInvalidoException("usuario", "La sesión no tiene un usuario: el cambio necesita autor.");
+        }
+        jdbc.update("""
+                INSERT INTO politica_de_credito (tenant_id, politica, dias_mora_para_retener, actualizado_por, actualizado_en)
+                VALUES (?, ?, ?, ?, now())
+                ON CONFLICT (tenant_id) DO UPDATE
+                   SET politica = EXCLUDED.politica, dias_mora_para_retener = EXCLUDED.dias_mora_para_retener,
+                       actualizado_por = EXCLUDED.actualizado_por, actualizado_en = EXCLUDED.actualizado_en""",
+                quien.negocio(), laPolitica, losDias, quien.usuarioId());
+        return politicaDeCredito(quien);
+    }
+
+    /**
+     * F5.4: si la política del negocio retiene el pedido de este cliente. Solo con
+     * RETENER_PEDIDO y una factura con saldo vencida hace MÁS de {@code dias_mora_para_retener}
+     * días (con 0, cualquier factura vencida). Con AVISAR, o sin fila, nunca. Se lee el libro
+     * de ese cliente (V68: cuesta lo de ese cliente).
+     */
+    public Optional<Retencion> retencionPorPolitica(String negocio, String documento) {
+        List<Integer> dias = jdbc.queryForList(
+                "SELECT dias_mora_para_retener FROM politica_de_credito WHERE tenant_id = ? AND politica = 'RETENER_PEDIDO'",
+                Integer.class, negocio);
+        if (dias.isEmpty()) {
+            return Optional.empty();
+        }
+        Integer vencido = jdbc.queryForObject("""
+                SELECT max(v.dias_vencido) FROM v_cartera_por_documento v
+                 WHERE v.tenant_id = ? AND v.cliente_documento = ? AND v.saldo > 0""",
+                Integer.class, negocio, documento);
+        return vencido != null && vencido > dias.get(0)
+                ? Optional.of(new Retencion(vencido, dias.get(0)))
+                : Optional.empty();
+    }
+
+    // ------------------------------------------------------------ ventas a insolventes (F4.11)
+
+    public static final String POR_REVISAR = "VENTA_A_INSOLVENTE_POR_REVISAR";
+    static final Set<String> DECISIONES_SOBRE_VENTA_A_INSOLVENTE = Set.of("DEJAR_COMO_DEUDA", "COBRAR_DE_CONTADO");
+    private static final String NO_EXISTE_LA_MARCA = "Esa venta por revisar no existe en el negocio.";
+
+    private static final String VENTAS_A_INSOLVENTE = """
+            SELECT m.id, m.order_uuid, o.id_order, m.cliente_documento, c.nombre AS cliente_nombre,
+                   m.en_insolvencia_desde, m.total, m.terminal_id, t.codigo AS terminal_codigo,
+                   m.operado_por, op.nombre AS operado_por_nombre, m.vendedor_id, u.nombre AS vendedor,
+                   m.ocurrido_en, m.registrado_en,
+                   r.decision, r.nota, r.usuario_id AS resuelto_por, ru.nombre AS resuelto_por_nombre, r.resuelto_en
+              FROM ventas_a_insolvente m
+              LEFT JOIN ventas_a_insolvente_resoluciones r ON r.tenant_id = m.tenant_id AND r.venta_a_insolvente_id = m.id
+              LEFT JOIN orders o     ON o.uuid_id = m.order_uuid AND o.tenant_id = m.tenant_id
+              LEFT JOIN clientes c   ON c.tenant_id = m.tenant_id AND c.documento = m.cliente_documento
+              LEFT JOIN terminals t  ON t.tenant_id = m.tenant_id AND t.id = m.terminal_id
+              LEFT JOIN users op     ON op.tenant_id = m.tenant_id AND op.id = m.operado_por
+              LEFT JOIN users u      ON u.tenant_id = m.tenant_id AND u.id = m.vendedor_id
+              LEFT JOIN users ru     ON ru.tenant_id = r.tenant_id AND ru.id = r.usuario_id
+             WHERE m.tenant_id = ?""";
+
+    /**
+     * GET /api/cartera/ventas-a-insolvente (admin, F4.11): las ventas a crédito que una caja
+     * le hizo a un cliente ya en insolvencia. Entraron con su deuda (V72); cada una espera la
+     * decisión del admin. {@code pendientes} true (por defecto) = solo las que no tienen
+     * resolución; false = todas. La más reciente primero, máximo 200.
+     */
+    public List<Map<String, Object>> ventasAInsolvente(Quien quien, Boolean pendientes) {
+        String filtro = Boolean.FALSE.equals(pendientes) ? "" : " AND r.id IS NULL";
+        return jdbc.queryForList(VENTAS_A_INSOLVENTE + filtro + " ORDER BY m.registrado_en DESC, m.id LIMIT 200",
+                quien.negocio()).stream().map(Cartera::ventaAInsolvente).toList();
+    }
+
+    /**
+     * POST /api/cartera/ventas-a-insolvente/{id}/resolucion (admin, F4.11). Anexa la
+     * decisión sobre la marca, que no cambia: DEJAR_COMO_DEUDA o COBRAR_DE_CONTADO. No
+     * mueve la deuda (el cobro de contado es un recibo como cualquier otro; anular la venta
+     * espera a D7). Una sola resolución por marca: la segunda es 409 VENTA_YA_RESUELTA.
+     */
+    @Transactional
+    public Map<String, Object> resolverVentaAInsolvente(Quien quien, UUID marca, String decision, String nota) {
+        String laDecision = decision == null ? null : decision.trim().toUpperCase(Locale.ROOT);
+        if (laDecision == null || !DECISIONES_SOBRE_VENTA_A_INSOLVENTE.contains(laDecision)) {
+            throw new DatoInvalidoException("decision", "La decisión es una de: DEJAR_COMO_DEUDA, COBRAR_DE_CONTADO.");
+        }
+        String laNota = recortarONulo(nota);
+        if (laNota != null && laNota.length() > 500) {
+            throw new DatoInvalidoException("nota", "La nota tiene máximo 500 caracteres.");
+        }
+        if (quien.usuarioId() == null) {
+            throw new DatoInvalidoException("usuario", "La sesión no tiene un usuario: la decisión necesita autor.");
+        }
+        if (marca == null) {
+            throw new DatoInvalidoException("id", NO_EXISTE_LA_MARCA);
+        }
+        String negocio = quien.negocio();
+        jdbc.query("SELECT pg_advisory_xact_lock(hashtext(?))", rs -> null, "venta-a-insolvente:" + negocio + ":" + marca);
+        List<Map<String, Object>> filas = jdbc.queryForList(VENTAS_A_INSOLVENTE + " AND m.id = ?", negocio, marca);
+        if (filas.isEmpty()) {
+            throw new DatoInvalidoException("id", NO_EXISTE_LA_MARCA);
+        }
+        if (filas.get(0).get("decision") != null) {
+            throw new ConflictoDeCarteraException(ConflictoDeCarteraException.VENTA_YA_RESUELTA,
+                    "Esa venta ya se resolvió como " + filas.get(0).get("decision") + ".");
+        }
+        jdbc.update("""
+                INSERT INTO ventas_a_insolvente_resoluciones (tenant_id, venta_a_insolvente_id, decision, nota, usuario_id)
+                VALUES (?, ?, ?, ?, ?)""", negocio, marca, laDecision, laNota, quien.usuarioId());
+        return ventaAInsolvente(jdbc.queryForList(VENTAS_A_INSOLVENTE + " AND m.id = ?", negocio, marca).get(0));
+    }
+
+    private static Map<String, Object> ventaAInsolvente(Map<String, Object> f) {
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("id", f.get("id"));
+        r.put("tipo", POR_REVISAR);
+        r.put("orderUuid", f.get("order_uuid"));
+        r.put("idOrder", f.get("id_order"));
+        r.put("clienteDocumento", f.get("cliente_documento"));
+        r.put("clienteNombre", f.get("cliente_nombre"));
+        r.put("enInsolvenciaDesde", fecha(f.get("en_insolvencia_desde")));
+        r.put("total", f.get("total"));
+        r.put("terminalId", f.get("terminal_id"));
+        r.put("terminalCodigo", f.get("terminal_codigo"));
+        r.put("operadoPorId", f.get("operado_por"));
+        r.put("operadoPor", f.get("operado_por_nombre"));
+        r.put("vendedorId", f.get("vendedor_id"));
+        r.put("vendedor", f.get("vendedor"));
+        r.put("ocurridoEn", instante(f.get("ocurrido_en")));
+        r.put("registradoEn", instante(f.get("registrado_en")));
+        if (f.get("decision") == null) {
+            r.put("resolucion", null);
+        } else {
+            Map<String, Object> res = new LinkedHashMap<>();
+            res.put("decision", f.get("decision"));
+            res.put("nota", f.get("nota"));
+            res.put("usuarioId", f.get("resuelto_por"));
+            res.put("usuario", f.get("resuelto_por_nombre"));
+            res.put("resueltoEn", instante(f.get("resuelto_en")));
+            r.put("resolucion", res);
+        }
+        return r;
+    }
+
     // ------------------------------------------------------------------ piezas
 
     private Map<String, Object> resumenVisible(Quien quien, String documento) {
@@ -812,7 +1014,7 @@ public class Cartera {
     }
 
     /** $1.234.567 — pesos colombianos, sin decimales si no los hay. */
-    static String pesos(BigDecimal valor) {
+    public static String pesos(BigDecimal valor) {
         DecimalFormatSymbols simbolos = new DecimalFormatSymbols(Locale.ROOT);
         simbolos.setGroupingSeparator('.');
         simbolos.setDecimalSeparator(',');

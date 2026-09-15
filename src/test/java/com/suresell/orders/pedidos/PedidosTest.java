@@ -466,6 +466,38 @@ class PedidosTest {
                 .andExpect(status().isCreated()).andExpect(jsonPath("$.estado").value("ENVIADO"));
     }
 
+    @Test
+    @DisplayName("🔴 F5.9: el texto de confirmación dice cuándo llega, el total y cómo paga; el enlace wa.me va al celular del cliente o a elegir contacto")
+    void whatsappDelPedido() throws Exception {
+        dueno.update("UPDATE clientes SET whatsapp = '300 123 4567' WHERE tenant_id = ? AND documento = ?", T, TIENDA);
+        String manana = java.time.LocalDate.now(ZoneId.of("America/Bogota")).plusDays(1).toString();
+        JsonNode p = leer(crearCon("{\"clienteDocumento\":\"" + TIENDA + "\",\"origen\":\"televenta\",\"entregaEl\":\"" + manana
+                + "\",\"lineas\":[{\"productoId\":\"" + producto(1) + "\",\"cantidad\":10},{\"productoId\":\"" + producto(2)
+                + "\",\"cantidad\":2}],\"idempotencyKey\":\"wa-1\"}").andExpect(status().isCreated()));
+        UUID id = UUID.fromString(p.get("id").asText());
+        JsonNode wa = leer(mockMvc.perform(get("/api/pedidos/" + id + "/whatsapp").header("Authorization", bearer(CAJA, "cajero")))
+                .andExpect(status().isOk()));
+        String texto = wa.get("texto").asText();
+        // 10 × 800 + 2 × 1.002 = 10.004
+        assertThat(texto).isEqualTo("Hola Tienda La Esquina, qa-pedidos confirmó su pedido #" + p.get("numero").asInt()
+                + ". Le llega mañana. Total $10.004. Paga: a 8 días.");
+        assertThat(wa.get("telefono").asText()).isEqualTo("573001234567");
+        assertThat(java.net.URLDecoder.decode(wa.get("enlace").asText().replace("https://wa.me/573001234567?text=", ""),
+                StandardCharsets.UTF_8)).isEqualTo(texto);
+
+        dueno.update("UPDATE clientes SET whatsapp = NULL WHERE tenant_id = ? AND documento = ?", T, TIENDA);
+        JsonNode enviado = leer(tomar(ANA, "vendedor", "wa-2", lineas(1, 1), OffsetDateTime.now()).andExpect(status().isCreated()));
+        mockMvc.perform(get("/api/pedidos/" + enviado.get("id").asText() + "/whatsapp").header("Authorization", bearer(ANA, "vendedor")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.telefono").doesNotExist())
+                .andExpect(jsonPath("$.enlace").value(org.hamcrest.Matchers.startsWith("https://wa.me/?text=")))
+                .andExpect(jsonPath("$.texto").value(org.hamcrest.Matchers.endsWith("Se lo confirmamos pronto.")));
+        mockMvc.perform(get("/api/pedidos/" + id + "/whatsapp").header("Authorization", bearer(PEDRO, "vendedor")))
+                .andExpect(status().isNotFound());
+        assertThat(Pedidos.numeroDeWhatsapp("+57 300-123-4567")).isEqualTo("573001234567");
+        assertThat(Pedidos.numeroDeWhatsapp("6011234567")).isNull();
+    }
+
     private ResultActions crearCon(String cuerpo) throws Exception {
         return mockMvc.perform(post("/api/pedidos").header("Authorization", bearer(ADMIN, "admin"))
                 .contentType(MediaType.APPLICATION_JSON).content(cuerpo));

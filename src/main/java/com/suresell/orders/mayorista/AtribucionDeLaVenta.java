@@ -109,10 +109,17 @@ public class AtribucionDeLaVenta {
      * impide que dos ventas simultáneas abran dos cuentas, porque
      * {@code accounts_receivable} todavía no tiene la unicidad (F4.2).
      *
+     * <p>{@code ventaDeCaja} (F4.11, opción A): la venta la hizo una caja
+     * (trae terminal y no nace de un pedido) y ya ocurrió. A un cliente en insolvencia
+     * no se le rechaza aquí: la base (V72) la registra con su DEBIT y la marca para
+     * revisar. Sin caja, 409 {@code CLIENTE_EN_INSOLVENCIA} como siempre.
+     *
      * @return true si abrió la cuenta
      */
-    public boolean asegurarCuentaDeCredito(String negocio, String documento) {
-        exigirQueNoEsteEnInsolvencia(negocio, documento);
+    public boolean asegurarCuentaDeCredito(String negocio, String documento, boolean ventaDeCaja) {
+        if (!ventaDeCaja) {
+            exigirQueNoEsteEnInsolvencia(negocio, documento);
+        }
         if (negocio == null || documento == null || documento.isBlank()) {
             return false;
         }
@@ -129,6 +136,19 @@ public class AtribucionDeLaVenta {
                                     WHERE a.tenant_id = c.tenant_id AND a.customer_document = c.documento)""",
                 negocio, documento);
         return abiertas > 0;
+    }
+
+    /**
+     * V72 (F4.11): si la venta quedó marcada VENTA_A_INSOLVENTE_POR_REVISAR. La marca la
+     * escribe el disparador al insertar la venta; aquí solo se lee.
+     */
+    public boolean quedoPorRevisarPorInsolvencia(String negocio, java.util.UUID venta) {
+        if (negocio == null || venta == null) {
+            return false;
+        }
+        return Boolean.TRUE.equals(jdbc.queryForObject(
+                "SELECT EXISTS (SELECT 1 FROM ventas_a_insolvente WHERE tenant_id = ? AND order_uuid = ?)",
+                Boolean.class, negocio, venta));
     }
 
     /**

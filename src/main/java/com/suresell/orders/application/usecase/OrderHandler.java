@@ -174,6 +174,11 @@ public class OrderHandler implements OrderPort {
                 Order previa = existing.get();
                 log.info("Orden duplicada descartada por idempotencia (key={}, idOrder={})",
                         idempotencyKey, previa.getIdOrder());
+                // F4.11: el reintento de la caja recibe la misma respuesta que la primera vez.
+                if ("CREDITO".equals(previa.getPaymentMethod())) {
+                    previa.setRevisionPorInsolvencia(atribucion.quedoPorRevisarPorInsolvencia(
+                            com.suresell.orders.multitenant.TenantContext.get(), previa.getUuidId()));
+                }
                 return previa;
             }
         }
@@ -333,8 +338,11 @@ public class OrderHandler implements OrderPort {
         }
         // F1.3 — La primera venta a crédito de un cliente registrado abre su
         // cuenta (cupo 0: entra y avisa). Antes el disparador de V45 la negaba.
+        // F4.11 (opción A): la venta que hizo una caja ya ocurrió; si el cliente entró en
+        // insolvencia, la base la registra y la marca en vez de rechazarla (V72). La del
+        // pedido y la que no trae terminal se siguen rechazando aquí con 409.
         if (cliente != null && !multipago && "CREDITO".equals(normalizePaymentMethod(dto.paymentMethod()))) {
-            atribucion.asegurarCuentaDeCredito(negocio, cliente);
+            atribucion.asegurarCuentaDeCredito(negocio, cliente, terminal != null && servidor == null);
         }
         BigDecimal subtotal = lineas.stream()
                 .map(item -> item.unitPrice().multiply(BigDecimal.valueOf(item.quantity())))
@@ -363,6 +371,7 @@ public class OrderHandler implements OrderPort {
         // para devolverlo al POS con la respuesta. Solo en crédito, que es cuando existe.
         if ("CREDITO".equals(savedOrder.getPaymentMethod())) {
             savedOrder.setExcedeCupo(orderRepositoryPort.findExcedeCupoByUuid(savedOrder.getUuidId()).orElse(null));
+            savedOrder.setRevisionPorInsolvencia(atribucion.quedoPorRevisarPorInsolvencia(negocio, savedOrder.getUuidId()));
         }
 
         // 3. Crear y Guardar Items individualmente con el ID numérico poblado

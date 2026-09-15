@@ -56,8 +56,10 @@ public class PedidosController {
                                        @RequestParam(required = false) String clienteDocumento,
                                        @RequestParam(required = false) Integer limite,
                                        @RequestParam(required = false) String despuesDe,
+                                       @RequestParam(required = false) Boolean pendienteDeReversa,
                                        HttpServletRequest http) {
-        return pedidos.bandeja(quien(http), estado, origen, vendedorId, fecha, entregaEl, clienteDocumento, limite, despuesDe);
+        return pedidos.bandeja(quien(http), estado, origen, vendedorId, fecha, entregaEl, clienteDocumento, limite, despuesDe,
+                pendienteDeReversa);
     }
 
     @GetMapping("/conteos")
@@ -71,10 +73,25 @@ public class PedidosController {
         return pedidos.conteos(quien(http), origen, vendedorId, fecha, entregaEl, clienteDocumento);
     }
 
+    @GetMapping("/cumplimiento")
+    @Operation(summary = "F5.11 — Cumplimiento: pedidas, confirmadas, despachadas y entregadas por cliente, vendedor o producto (hasta 92 días)")
+    public Map<String, Object> cumplimiento(@RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate desde,
+                                            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate hasta,
+                                            @RequestParam(required = false) String agrupar,
+                                            HttpServletRequest http) {
+        return pedidos.cumplimiento(quien(http), desde, hasta, agrupar);
+    }
+
     @GetMapping("/{id}")
     @Operation(summary = "F5.3 — Detalle: líneas con cantidades por etapa y precios, y la línea de tiempo de eventos")
     public Map<String, Object> detalle(@PathVariable UUID id, HttpServletRequest http) {
         return pedidos.detalle(quien(http), id);
+    }
+
+    @GetMapping("/{id}/whatsapp")
+    @Operation(summary = "F5.9 — Texto para el cliente según el estado del pedido y enlace wa.me que lo abre (D10)")
+    public Map<String, Object> whatsapp(@PathVariable UUID id, HttpServletRequest http) {
+        return pedidos.whatsapp(quien(http), id);
     }
 
     @PostMapping("/{id}/confirmar")
@@ -94,6 +111,13 @@ public class PedidosController {
             + "al precio congelado y con el plazo del pedido, en una transacción")
     public Map<String, Object> despachar(@PathVariable UUID id, @RequestBody Pedidos.Despacho cuerpo, HttpServletRequest http) {
         return pedidos.despachar(quien(http), id, cuerpo);
+    }
+
+    @PostMapping("/{id}/entregar")
+    @Operation(summary = "F5.7 — Entregar (vendedor sus pedidos, admin, cajero): la prueba de entrega y, en contraentrega, "
+            + "el recibo aplicado a la venta, en una transacción. Lo que no llega queda pendiente de reversa")
+    public Map<String, Object> entregar(@PathVariable UUID id, @RequestBody Pedidos.Entrega cuerpo, HttpServletRequest http) {
+        return pedidos.entregar(quien(http), id, cuerpo);
     }
 
     @PostMapping("/{id}/rechazar")

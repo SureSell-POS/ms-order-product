@@ -79,6 +79,13 @@ class CostoDelPedidoTest {
             }
             // Uno de cada diez sigue por despachar, con entrega en la semana: lo que mira la bandeja.
             s.execute("UPDATE pedidos.pedidos SET estado = 'ENVIADO', fecha_entrega_prometida = current_date + (numero % 7)::int WHERE numero % 10 = 0");
+            // Siete de cada diez ya se entregaron (la vista de pendiente de reversa los recorre).
+            s.execute("UPDATE pedidos.pedidos SET estado = 'ENTREGADO' WHERE numero % 10 BETWEEN 3 AND 9");
+            // Y uno de cada cien, con novedad: su prueba de entrega con diferencias (lo único que la vista recorre).
+            s.execute("UPDATE pedidos.pedidos SET estado = 'ENTREGADO_CON_NOVEDAD' WHERE numero % 100 = 3");
+            s.execute("INSERT INTO pedidos.entregas (tenant_id, pedido_id, evento_id, resultado, recibe_nombre, recibe_documento, registrado_por, ocurrido_en) "
+                    + "SELECT e.tenant_id, e.pedido_id, e.id, 'ENTREGADO_CON_NOVEDAD', 'x', '1', p.capturado_por, now() "
+                    + "FROM pedidos.pedidos_eventos e JOIN pedidos.pedidos p ON p.id = e.pedido_id WHERE p.estado = 'ENTREGADO_CON_NOVEDAD' AND e.tipo = 'DESPACHADO'");
             s.execute("ANALYZE");
             try (ResultSet rs = s.executeQuery("SELECT id FROM pedidos.pedidos WHERE tenant_id = 'perf-a' AND numero = 7777")) {
                 rs.next();
@@ -118,6 +125,69 @@ class CostoDelPedidoTest {
                     SELECT p.id, p.numero FROM pedidos.pedidos p
                      WHERE p.tenant_id = 'perf-a'
                      ORDER BY COALESCE(p.fecha_entrega_prometida, 'infinity'::date), p.numero LIMIT 51""");
+            plan(s, "conteo de pendientes de reversa (F5.7)", """
+                    SELECT count(*) FROM pedidos.pedidos p
+                      JOIN pedidos.v_pedidos_pendiente_de_reversa pr ON pr.tenant_id = p.tenant_id AND pr.pedido_id = p.id
+                     WHERE p.tenant_id = 'perf-a'""");
+            plan(s, "bandeja: primera página con la marca de pendiente de reversa (F5.7)", """
+                    SELECT p.id, p.numero, pr.valor
+                      FROM pedidos.pedidos p
+                      LEFT JOIN pedidos.v_pedidos_pendiente_de_reversa pr ON pr.tenant_id = p.tenant_id AND pr.pedido_id = p.id
+                     WHERE p.tenant_id = 'perf-a'
+                     ORDER BY COALESCE(p.fecha_entrega_prometida, 'infinity'::date), p.numero LIMIT 51""");
+            for (String grupo : new String[] {"p.cliente_documento", "p.vendedor_id", "v.producto_id"}) {
+                plan(s, "cumplimiento del mes por " + grupo + " (F5.11, sobre v_pedidos_lineas)", """
+                        SELECT %s AS clave, count(DISTINCT p.id) AS pedidos, sum(v.pedida) AS pedidas, sum(v.confirmada) AS confirmadas,
+                               sum(v.despachada) AS despachadas, sum(v.entregada) AS entregadas,
+                               sum(v.pedida * COALESCE(v.precio_confirmado, v.precio_visto)) AS valor_pedido,
+                               sum(COALESCE(v.entregada, 0) * COALESCE(v.precio_confirmado, v.precio_visto)) AS valor_entregado
+                          FROM pedidos.pedidos p
+                          JOIN pedidos.v_pedidos_lineas v ON v.tenant_id = p.tenant_id AND v.pedido_id = p.id
+                         WHERE p.tenant_id = 'perf-a' AND p.ocurrido_en >= now() - interval '30 days'
+                         GROUP BY 1""".formatted(grupo));
+            }
+
+            String unaPasada = """
+                    WITH ped AS (
+                        SELECT p.id, p.cliente_documento, p.vendedor_id FROM pedidos.pedidos p
+                         WHERE p.tenant_id = 'perf-a' AND p.ocurrido_en >= now() - interval '30 days'
+                    ), ult AS (
+                        SELECT el.linea_id,
+                               (array_agg(el.cantidad ORDER BY e.secuencia DESC) FILTER (WHERE e.tipo IN ('CONFIRMADO', 'AJUSTADO')))[1] AS confirmada,
+                               (array_agg(el.cantidad ORDER BY e.secuencia DESC) FILTER (WHERE e.tipo = 'DESPACHADO'))[1] AS despachada,
+                               max(e.secuencia) FILTER (WHERE e.tipo = 'DESPACHADO') AS sec_despacho,
+                               (array_agg(el.cantidad ORDER BY e.secuencia DESC) FILTER (WHERE e.tipo IN ('ENTREGADO', 'ENTREGADO_CON_NOVEDAD')))[1] AS entregada,
+                               max(e.secuencia) FILTER (WHERE e.tipo IN ('ENTREGADO', 'ENTREGADO_CON_NOVEDAD')) AS sec_entrega
+                          FROM ped
+                          JOIN pedidos.pedidos_eventos e ON e.tenant_id = 'perf-a' AND e.pedido_id = ped.id
+                          JOIN pedidos.pedidos_eventos_lineas el ON el.tenant_id = e.tenant_id AND el.pedido_id = e.pedido_id AND el.evento_id = e.id
+                         GROUP BY el.linea_id
+                    )
+                    SELECT %s AS clave, count(DISTINCT ped.id) AS pedidos, sum(l.cantidad_pedida) AS pedidas, sum(u.confirmada) AS confirmadas,
+                           sum(u.despachada) AS despachadas, sum(CASE WHEN u.sec_entrega > u.sec_despacho THEN u.entregada END) AS entregadas,
+                           sum(l.cantidad_pedida * COALESCE(l.precio_confirmado, l.precio_visto)) AS valor_pedido,
+                           sum(COALESCE(CASE WHEN u.sec_entrega > u.sec_despacho THEN u.entregada END, 0) * COALESCE(l.precio_confirmado, l.precio_visto)) AS valor_entregado
+                      FROM ped
+                      JOIN pedidos.pedidos_lineas l ON l.tenant_id = 'perf-a' AND l.pedido_id = ped.id
+                      LEFT JOIN ult u ON u.linea_id = l.id
+                     GROUP BY 1""";
+            plan(s, "cumplimiento del mes por cliente (F5.11, una pasada)", unaPasada.formatted("ped.cliente_documento"));
+            String sobreLaVista = """
+                    SELECT p.cliente_documento AS clave, count(DISTINCT p.id) AS pedidos, sum(v.pedida) AS pedidas, sum(v.confirmada) AS confirmadas,
+                           sum(v.despachada) AS despachadas, sum(v.entregada) AS entregadas,
+                           sum(v.pedida * COALESCE(v.precio_confirmado, v.precio_visto)) AS valor_pedido,
+                           sum(COALESCE(v.entregada, 0) * COALESCE(v.precio_confirmado, v.precio_visto)) AS valor_entregado
+                      FROM pedidos.pedidos p
+                      JOIN pedidos.v_pedidos_lineas v ON v.tenant_id = p.tenant_id AND v.pedido_id = p.id
+                     WHERE p.tenant_id = 'perf-a' AND p.ocurrido_en >= now() - interval '30 days'
+                     GROUP BY 1""";
+            String a = "(" + unaPasada.formatted("ped.cliente_documento") + ")";
+            String b = "(" + sobreLaVista + ")";
+            try (ResultSet rs = s.executeQuery("SELECT (SELECT count(*) FROM (" + a + " EXCEPT ALL " + b + ") x) + (SELECT count(*) FROM ("
+                    + b + " EXCEPT ALL " + a + ") y), (SELECT count(*) FROM " + b + " z)")) {
+                rs.next();
+                System.out.println("── F5 costo: paridad una pasada frente a la vista: " + rs.getInt(1) + " filas distintas de " + rs.getInt(2) + " ──");
+            }
             plan(s, "detalle: cantidades de un pedido", """
                     SELECT * FROM pedidos.v_pedidos_lineas WHERE tenant_id = 'perf-a' AND pedido_id = '%s'""".formatted(unPedido));
         }
@@ -131,6 +201,8 @@ class CostoDelPedidoTest {
     }
 
     private static void plan(Statement s, String nombre, String sql) throws SQLException {
+        // Sin JIT: su compilación (cientos de ms) taparía el costo del plan, que es lo que se mide.
+        s.execute("SET jit = off");
         StringBuilder salida = new StringBuilder("── F5 costo: " + nombre + " ──\n");
         try (ResultSet rs = s.executeQuery("EXPLAIN (ANALYZE, BUFFERS) " + sql)) {
             while (rs.next()) {

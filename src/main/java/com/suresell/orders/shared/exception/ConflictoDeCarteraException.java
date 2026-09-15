@@ -9,6 +9,7 @@ package com.suresell.orders.shared.exception;
  *       cliente, monto o medio. No se escribe nada; el cliente tiene un defecto.</li>
  *   <li>{@code RECIBO_YA_ANULADO}: ese recibo ya tiene su anulación.</li>
  *   <li>{@code RECIBO_ES_ANULACION}: una anulación no se anula; se registra otro recibo.</li>
+ *   <li>{@code VENTA_YA_RESUELTA}: esa venta a un insolvente ya tiene su decisión (F4.11).</li>
  * </ul>
  */
 public class ConflictoDeCarteraException extends RuntimeException {
@@ -16,6 +17,7 @@ public class ConflictoDeCarteraException extends RuntimeException {
     public static final String IDEMPOTENCIA_REUTILIZADA = "IDEMPOTENCIA_REUTILIZADA";
     public static final String RECIBO_YA_ANULADO = "RECIBO_YA_ANULADO";
     public static final String RECIBO_ES_ANULACION = "RECIBO_ES_ANULACION";
+    public static final String VENTA_YA_RESUELTA = "VENTA_YA_RESUELTA";
 
     private final String codigo;
 

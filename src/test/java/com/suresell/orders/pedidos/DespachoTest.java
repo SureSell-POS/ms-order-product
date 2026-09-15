@@ -97,7 +97,7 @@ class DespachoTest {
     @BeforeEach
     void sembrar() {
         dueno = new JdbcTemplate(new DriverManagerDataSource(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword()));
-        for (String tabla : new String[] {"pedidos.pedidos_eventos_lineas", "pedidos.pedidos_eventos", "pedidos.pedidos_lineas",
+        for (String tabla : new String[] {"pedidos.entregas", "pedidos.pedidos_eventos_lineas", "pedidos.pedidos_eventos", "pedidos.pedidos_lineas",
                 "pedidos.pedidos", "pedidos.contadores_de_pedidos", "public.inventario_intenciones", "cartera_aplicaciones",
                 "debt_transactions", "order_delivery_tracking", "order_item", "orders", "tenant_order_counters", "clientes_eventos",
                 "accounts_receivable", "clientes", "listas_precio_items", "listas_precio", "menu_products", "sites", "users"}) {
@@ -281,7 +281,7 @@ class DespachoTest {
                 ps.setString(2, String.valueOf(admin));
                 ps.executeQuery().close();
             }
-            try (PreparedStatement ps = c.prepareStatement("SELECT pedidos.fn_pedido_transicionar(?, 'ENTREGA_FALLIDA', 'CERRADO', NULL, NULL, now(), 'd-rev-falla')")) {
+            try (PreparedStatement ps = c.prepareStatement("SELECT pedidos.fn_pedido_entregar(?, 'ENTREGA_FALLIDA', 'CERRADO', NULL, NULL, NULL, NULL, NULL, NULL, now(), 'd-rev-falla')")) {
                 ps.setObject(1, id);
                 ps.executeQuery().close();
             }

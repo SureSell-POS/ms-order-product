@@ -168,6 +168,30 @@ class EstadoGuardadoEsDerivadoTest {
         System.out.println("── F5.2: v_pedidos_lineas frente a la forma anterior: " + lineas + " líneas, " + distintas + " filas distintas ──");
         assertThat(lineas).as("la comparación mira líneas de verdad").isEqualTo(SECUENCIAS * 2);
         assertThat(distintas).as("semilla " + semilla + ": la vista nueva da las mismas filas").isZero();
+        // F5.11: las cantidades en una pasada (Pedidos.ULTIMAS_CANTIDADES) son las de la vista, línea por línea.
+        int lineasInforme;
+        int distintasInforme;
+        try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
+             PreparedStatement ps = c.prepareStatement("WITH ped AS (SELECT id FROM pedidos.pedidos WHERE tenant_id = ?), " + Pedidos.ULTIMAS_CANTIDADES
+                     + ", unaPasada AS (SELECT l.id, u.confirmada, u.despachada, u.entregada FROM pedidos.pedidos_lineas l LEFT JOIN ult u ON u.linea_id = l.id"
+                     + " WHERE l.tenant_id = ?), vista AS (SELECT linea_id, confirmada, despachada, entregada FROM pedidos.v_pedidos_lineas WHERE tenant_id = ?)"
+                     + " SELECT (SELECT count(*) FROM unaPasada), (SELECT count(*) FROM (SELECT * FROM unaPasada EXCEPT ALL SELECT * FROM vista) a)"
+                     + " + (SELECT count(*) FROM (SELECT * FROM vista EXCEPT ALL SELECT * FROM unaPasada) b),"
+                     + " (SELECT count(*) FROM vista WHERE entregada IS NOT NULL)")) {
+            ps.setString(1, NEGOCIO);
+            ps.setString(2, NEGOCIO);
+            ps.setString(3, NEGOCIO);
+            ps.setString(4, NEGOCIO);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                lineasInforme = rs.getInt(1);
+                distintasInforme = rs.getInt(2);
+                System.out.println("── F5.2: cantidades en una pasada (F5.11) frente a la vista: " + lineasInforme + " líneas, " + distintasInforme
+                        + " distintas; " + rs.getInt(3) + " con entrega ──");
+            }
+        }
+        assertThat(lineasInforme).isEqualTo(SECUENCIAS * 2);
+        assertThat(distintasInforme).as("semilla " + semilla + ": el informe cuenta lo mismo que la vista").isZero();
         System.out.println("── F5.2: " + SECUENCIAS + " pedidos, " + eventos + " eventos, " + diferencias + " diferencias ──");
         assertThat(primeras).as("semilla " + semilla).isEmpty();
         assertThat(diferencias).as("semilla " + semilla).isZero();
@@ -201,8 +225,29 @@ class EstadoGuardadoEsDerivadoTest {
             if (tipo.equals("AJUSTADO")) {
                 motivo = precio ? "ERROR_DE_PRECIO" : "SIN_EXISTENCIA";
             }
-            lineas = "[{\"linea_id\":\"" + linea + "\",\"cantidad\":" + azar.nextInt(11)
+            // Una entrega no pasa de lo despachado en su línea (V4): se sortea dentro de ese tope.
+            // Y ENTREGADO es todo lo despachado: una diferencia es ENTREGADO_CON_NOVEDAD.
+            int tope = ENTREGAS.contains(tipo) ? despachada(c, linea) : 10;
+            int cantidad = tipo.equals("ENTREGADO") ? tope : azar.nextInt(tope + 1);
+            lineas = "[{\"linea_id\":\"" + linea + "\",\"cantidad\":" + cantidad
                     + (precio ? ",\"precio\":" + (500 + azar.nextInt(3000)) : "") + "}]";
+        }
+        if (ENTREGAS.contains(tipo)) {
+            // Desde V4 de pedidos una entrega va con su prueba, por fn_pedido_entregar.
+            boolean fallida = tipo.equals("ENTREGA_FALLIDA");
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT pedidos.fn_pedido_entregar(?, ?, ?, NULL, ?::jsonb, ?, ?, NULL, NULL, ?, ?)")) {
+                ps.setObject(1, pedido);
+                ps.setString(2, tipo);
+                ps.setString(3, motivo);
+                ps.setString(4, lineas);
+                ps.setString(5, fallida ? null : "Quien recibe");
+                ps.setString(6, fallida ? null : "1000" + i);
+                ps.setTimestamp(7, desordenado(azar));
+                ps.setString(8, "prop-" + i + "-" + paso);
+                ps.executeQuery().close();
+            }
+            return;
         }
         try (PreparedStatement ps = c.prepareStatement(
                 "SELECT pedidos.fn_pedido_transicionar(?, ?, ?, NULL, ?::jsonb, ?, ?)")) {
@@ -213,6 +258,19 @@ class EstadoGuardadoEsDerivadoTest {
             ps.setTimestamp(5, desordenado(azar));
             ps.setString(6, "prop-" + i + "-" + paso);
             ps.executeQuery().close();
+        }
+    }
+
+    static final java.util.Set<String> ENTREGAS = java.util.Set.of("ENTREGADO", "ENTREGADO_CON_NOVEDAD", "ENTREGA_FALLIDA");
+
+    private static int despachada(Connection c, UUID linea) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("SELECT COALESCE(despachada, 0) FROM pedidos.v_pedidos_lineas WHERE tenant_id = ? AND linea_id = ?")) {
+            ps.setString(1, NEGOCIO);
+            ps.setObject(2, linea);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getInt(1);
+            }
         }
     }
 

@@ -111,6 +111,9 @@ public class OrderController {
         // 0 = coinciden; positivo = el POS pedía de más (p. ej. precio base y el cliente
         // tiene lista); null = el POS no declaró total y no hubo con qué comparar.
         body.put("totalDiscrepancia", created != null ? created.getTotalDiscrepancia() : null);
+        // F4.11 (aditivo): true = la caja le vendió a crédito a un cliente ya en insolvencia;
+        // la venta entró con su deuda y quedó por revisar en Cuentas por cobrar.
+        body.put("revisionPorInsolvencia", created != null && Boolean.TRUE.equals(created.getRevisionPorInsolvencia()));
         return ResponseEntity.status(HttpStatus.CREATED).body(body);
     }
     @PutMapping("/{orderId}")
