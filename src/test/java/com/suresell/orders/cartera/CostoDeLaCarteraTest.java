@@ -2,6 +2,7 @@ package com.suresell.orders.cartera;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.suresell.orders.ruta.DeudaDeLaRuta;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -217,5 +218,89 @@ class CostoDeLaCarteraTest {
         System.out.println(informe);
         System.out.println("── tiempos (ms) ── " + tiempos);
         assertThat(tiempos.values()).allSatisfy(ms -> assertThat(ms).isPositive());
+    }
+
+    @Test
+    @DisplayName("💰 F6.0b D-b4: la deuda compacta de los clientes de un vendedor (300, 500, 1.200 y 2.000), sin JIT, como app_user; guarda de 150 ms")
+    void deudaCompactaPorVendedor() throws Exception {
+        long[] v = new long[4];
+        try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
+             Statement st = c.createStatement()) {
+            try (ResultSet rs = st.executeQuery("INSERT INTO users (email, password_hash, tenant_id, role, nombre) "
+                    + "SELECT 'ruta' || g || '@perf-a.invalid', '!', 'perf-a', 'vendedor', 'Ruta ' || g FROM generate_series(1, 4) g RETURNING id")) {
+                for (int k = 0; k < 4; k++) {
+                    rs.next();
+                    v[k] = rs.getLong(1);
+                }
+            }
+            st.execute("SELECT set_config('app.user_id', '" + v[0] + "', false)");
+            st.execute("UPDATE clientes SET vendedor_id = CASE WHEN substr(documento, 2)::int <= 300 THEN " + v[0]
+                    + " WHEN substr(documento, 2)::int <= 800 THEN " + v[1] + " ELSE " + v[2] + " END WHERE tenant_id = 'perf-a'");
+            st.execute("ANALYZE clientes");
+        }
+        Map<String, String> informe = new LinkedHashMap<>();
+        Map<String, Double> guardadas = new LinkedHashMap<>();
+        medirDeuda("B clientes primero · 300", DeudaDeLaRuta.CLIENTES_PRIMERO, v[0], 300, informe, guardadas, true);
+        medirDeuda("B clientes primero · 500", DeudaDeLaRuta.CLIENTES_PRIMERO, v[1], 500, informe, guardadas, true);
+        medirDeuda("A vista del negocio · 1.200", DeudaDeLaRuta.VISTA_DEL_NEGOCIO, v[2], 1200, informe, guardadas, true);
+        try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
+             Statement st = c.createStatement()) {
+            st.execute("SELECT set_config('app.user_id', '" + v[0] + "', false)");
+            st.execute("UPDATE clientes SET vendedor_id = " + v[3] + " WHERE tenant_id = 'perf-a'");
+            st.execute("ANALYZE clientes");
+        }
+        medirDeuda("A vista del negocio · 2.000", DeudaDeLaRuta.VISTA_DEL_NEGOCIO, v[3], 2000, informe, guardadas, true);
+        medirDeuda("B clientes primero · 2.000 (fuera de su tramo, sin guarda)", DeudaDeLaRuta.CLIENTES_PRIMERO, v[3], 2000, informe, guardadas, false);
+        System.out.println("── F6.0b D-b4: deuda compacta por vendedor ── " + informe);
+        assertThat(DeudaDeLaRuta.UMBRAL_DE_CLIENTES).isEqualTo(500);
+        assertThat(guardadas).as("ECM: cada consulta en su tramo, menos de 150 ms").allSatisfy((k, ms) -> assertThat(ms).as(k).isLessThan(150.0));
+    }
+
+    private void medirDeuda(String caso, String sql, long vendedor, int esperadas, Map<String, String> informe, Map<String, Double> guardadas,
+                            boolean conGuarda) throws Exception {
+        try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), "app_user", "app_pw");
+             Statement st = c.createStatement()) {
+            st.execute("SELECT set_config('app.tenant_id', 'perf-a', false)");
+            st.execute("SET jit = off");
+            double ms = Double.MAX_VALUE;
+            for (int vuelta = 0; vuelta < 3; vuelta++) {
+                try (var ps = c.prepareStatement("EXPLAIN (ANALYZE) " + sql)) {
+                    ps.setString(1, "perf-a");
+                    ps.setLong(2, vendedor);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            String l = rs.getString(1);
+                            if (l.startsWith("Execution Time:")) {
+                                ms = Math.min(ms, Double.parseDouble(l.replaceAll("[^0-9.]", "")));
+                            }
+                        }
+                    }
+                }
+            }
+            StringBuilder json = new StringBuilder("[");
+            int filas = 0;
+            try (var ps = c.prepareStatement(sql)) {
+                ps.setString(1, "perf-a");
+                ps.setLong(2, vendedor);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        json.append(filas++ == 0 ? "" : ",").append("[\"").append(rs.getString(1)).append("\",")
+                                .append(rs.getBigDecimal(2).stripTrailingZeros().toPlainString()).append(',')
+                                .append(rs.getBigDecimal(3).stripTrailingZeros().toPlainString()).append(',')
+                                .append(rs.getObject(4)).append(']');
+                    }
+                }
+            }
+            byte[] crudo = json.append(']').toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            var gz = new java.io.ByteArrayOutputStream();
+            try (var out = new java.util.zip.GZIPOutputStream(gz)) {
+                out.write(crudo);
+            }
+            informe.put(caso, filas + " filas · " + String.format(java.util.Locale.ROOT, "%.2f", ms) + " ms · " + crudo.length + " B · " + gz.size() + " B gzip");
+            if (conGuarda) {
+                guardadas.put(caso, ms);
+            }
+            assertThat(filas).as(caso).isEqualTo(esperadas);
+        }
     }
 }
