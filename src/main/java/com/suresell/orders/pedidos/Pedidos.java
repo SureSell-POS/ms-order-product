@@ -544,7 +544,7 @@ public class Pedidos {
                 SELECT p.id, p.numero, p.estado, p.origen, p.modalidad, p.cliente_documento, c.nombre AS cliente,
                        p.vendedor_id, u.nombre AS vendedor, p.fecha_entrega_prometida, p.ocurrido_en, p.plazo_dias,
                        p.condicion_pago, t.lineas, t.total, COALESCE(p.fecha_entrega_prometida, 'infinity'::date)::text AS entrega_orden,
-                       pr.valor AS valor_pendiente
+                       pr.valor AS valor_pendiente, ret.motivo AS motivo_de_retencion, ret.nota AS nota_de_retencion
                   FROM pedidos.pedidos p
                   LEFT JOIN clientes c ON c.tenant_id = p.tenant_id AND c.documento = p.cliente_documento
                   LEFT JOIN users u ON u.tenant_id = p.tenant_id AND u.id = p.vendedor_id
@@ -553,6 +553,10 @@ public class Pedidos {
                                        FROM pedidos.v_pedidos_lineas v
                                       WHERE v.tenant_id = p.tenant_id AND v.pedido_id = p.id) t ON true
                   LEFT JOIN pedidos.v_pedidos_pendiente_de_reversa pr ON pr.tenant_id = p.tenant_id AND pr.pedido_id = p.id
+                  -- F5.4: por qué está retenido (el último RETENIDO), solo si lo está; la nota de la política dice los días.
+                  LEFT JOIN LATERAL (SELECT e.motivo, e.nota FROM pedidos.pedidos_eventos e
+                                      WHERE e.tenant_id = p.tenant_id AND e.pedido_id = p.id AND e.tipo = 'RETENIDO'
+                                      ORDER BY e.secuencia DESC LIMIT 1) ret ON p.estado = 'RETENIDO'
                  WHERE p.tenant_id = ?""");
         List<Object> args = new ArrayList<>(List.of(quien.negocio()));
         filtrosComunes(quien, origen, vendedorId, fecha, entregaEl, clienteDocumento, sql, args);
@@ -614,6 +618,8 @@ public class Pedidos {
             r.put("total", f.get("total"));
             r.put("pendienteDeReversa", f.get("valor_pendiente") != null);
             r.put("valorPendienteDeReversa", f.get("valor_pendiente") == null ? BigDecimal.ZERO : f.get("valor_pendiente"));
+            r.put("motivoDeRetencion", f.get("motivo_de_retencion"));
+            r.put("notaDeRetencion", f.get("nota_de_retencion"));
             r.put("cursor", f.get("entrega_orden") + "_" + f.get("numero"));
             pedidos.add(r);
         }

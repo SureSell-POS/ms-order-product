@@ -201,6 +201,20 @@ class PoliticaDeCreditoTest {
 
         // El de la vendedora también: la política es del negocio, no de quién toma el pedido.
         assertThat(tomar(ANA, "vendedor", MOROSA, "retener-ana").get("estado").asText()).isEqualTo("RETENIDO");
+        // La bandeja dice por qué está retenido; a uno no retenido, null.
+        JsonNode bandeja = json.readTree(mockMvc.perform(get("/api/pedidos").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        JsonNode filas = bandeja.has("pedidos") ? bandeja.get("pedidos") : bandeja;
+        JsonNode fila = null;
+        for (JsonNode f : filas) {
+            if (f.get("id").asText().equals(retenido.get("id").asText())) {
+                fila = f;
+            }
+        }
+        assertThat(fila).isNotNull();
+        assertThat(fila.get("motivoDeRetencion").asText()).isEqualTo("FACTURA_VENCIDA");
+        assertThat(fila.get("notaDeRetencion").asText()).contains("10 días");
+
         // Control: la tienda al día sigue su camino.
         assertThat(tomar(CAJA, "cajero", AL_DIA, "al-dia").get("estado").asText()).isEqualTo("CONFIRMADO");
 
@@ -215,6 +229,14 @@ class PoliticaDeCreditoTest {
                         .contentType(MediaType.APPLICATION_JSON).content("{\"idempotencyKey\":\"retener-1-confirma\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.estado").value("CONFIRMADO"));
+        JsonNode trasConfirmar = json.readTree(mockMvc.perform(get("/api/pedidos").header("Authorization", bearer(ADMIN, "admin")))
+                .andReturn().getResponse().getContentAsString());
+        for (JsonNode f : trasConfirmar.has("pedidos") ? trasConfirmar.get("pedidos") : trasConfirmar) {
+            if (f.get("id").asText().equals(id.toString())) {
+                assertThat(f.get("motivoDeRetencion").isNull()).isTrue();
+                assertThat(f.get("notaDeRetencion").isNull()).isTrue();
+            }
+        }
     }
 
     @Test
