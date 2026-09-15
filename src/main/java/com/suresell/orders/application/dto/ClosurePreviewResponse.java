@@ -28,6 +28,10 @@ import java.time.LocalDateTime;
  * y {@code totalExpected} (salieron del cajón); se informan aparte porque no son gasto.
  * {@code recaudoComoSaldoAFavorEfectivo} (F4.12, aditivo): de {@code recaudoCarteraEfectivo}, la parte que quedó como
  * saldo a favor del cliente. YA está dentro del recaudo y del efectivo esperado; es su línea propia, no se suma otra vez.
+ * {@code ventasEfectivo}, {@code ventasTarjeta}, {@code ventasQr} (cierre imprimible, aditivos): las ventas del turno
+ * por medio, con los pagos de las ventas mixtas repartidos; el MISMO cálculo que el cierre. {@code totalExpectedCard}
+ * y {@code totalExpectedQr} valen lo mismo que las dos últimas; {@code totalExpectedCash} además suma el recaudo y resta
+ * las devoluciones, y no incluye la base inicial.
  * {@code previousBaseBalance} se conserva con el mismo valor que
  * {@code baseInicial} para los clientes que ya lo leían.
  */
@@ -49,5 +53,8 @@ public record ClosurePreviewResponse(
         BigDecimal vendidoACredito,
         BigDecimal recaudoCarteraEfectivo,
         BigDecimal devolucionesSaldoAFavorEfectivo,
-        BigDecimal recaudoComoSaldoAFavorEfectivo) {
+        BigDecimal recaudoComoSaldoAFavorEfectivo,
+        BigDecimal ventasEfectivo,
+        BigDecimal ventasTarjeta,
+        BigDecimal ventasQr) {
 }

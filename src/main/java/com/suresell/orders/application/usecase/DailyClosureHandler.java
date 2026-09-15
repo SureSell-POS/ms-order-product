@@ -81,6 +81,7 @@ implements DailyClosurePort {
         totalQr = medios.getOrDefault(PAYMENT_QR, BigDecimal.ZERO);
         // F1.13: a crédito no entra al cajón; se informa aparte.
         vendidoACredito = medios.getOrDefault("CREDITO", BigDecimal.ZERO);
+        BigDecimal ventasEfectivo = totalCash;
         // F4.5: los abonos de cartera en efectivo del turno están en el cajón (no son venta).
         BigDecimal recaudoCartera = recaudoEnCaja
                 .map(r -> r.efectivoEntre(com.suresell.orders.multitenant.TenantContext.get(), ventanaDesde, endOfDay))
@@ -120,7 +121,10 @@ implements DailyClosurePort {
                 vendidoACredito,
                 recaudoCartera,
                 devolucionesSaldoAFavor,
-                recibidoComoSaldoAFavor);
+                recibidoComoSaldoAFavor,
+                ventasEfectivo,
+                totalCard,
+                totalQr);
     }
     @Transactional
     public ClosureResponse executeClosure(ClosureRequest request) {

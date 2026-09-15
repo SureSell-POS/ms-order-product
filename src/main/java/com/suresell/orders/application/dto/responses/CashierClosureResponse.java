@@ -28,6 +28,13 @@ import java.util.Map;
  *
  * <p>{@code recaudoComoSaldoAFavorEfectivo} (F4.12, aditivo): de {@code recaudoCarteraEfectivo}, la parte que quedó
  * como saldo a favor. YA está dentro del recaudo y del efectivo esperado; es su línea propia.
+ *
+ * <p><b>Cierre imprimible</b> (aditivos, todos del mismo cálculo del cierre; nada se recalcula aparte):
+ * {@code ventasEfectivo}, {@code ventasTarjeta}, {@code ventasQr} (con los pagos de las ventas mixtas repartidos
+ * por medio; la venta del POS no tiene transferencia), {@code numeroDeVentas} (una venta mixta cuenta una vez;
+ * incluye las de crédito), {@code gastos} (gastos menores declarados en el cierre), {@code efectivoEsperado}
+ * (base inicial + ventas en efectivo − gastos + recaudo − devoluciones de saldo a favor), {@code efectivoContado}
+ * y {@code diferenciaEfectivo} (contado − esperado).
  */
 public record CashierClosureResponse(
         String status,
@@ -40,5 +47,13 @@ public record CashierClosureResponse(
         BigDecimal vendidoACredito,
         BigDecimal recaudoCarteraEfectivo,
         BigDecimal devolucionesSaldoAFavorEfectivo,
-        BigDecimal recaudoComoSaldoAFavorEfectivo
+        BigDecimal recaudoComoSaldoAFavorEfectivo,
+        BigDecimal ventasEfectivo,
+        BigDecimal ventasTarjeta,
+        BigDecimal ventasQr,
+        Integer numeroDeVentas,
+        BigDecimal gastos,
+        BigDecimal efectivoEsperado,
+        BigDecimal efectivoContado,
+        BigDecimal diferenciaEfectivo
 ) {}

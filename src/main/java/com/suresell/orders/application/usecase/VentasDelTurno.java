@@ -16,6 +16,9 @@ import java.util.Map;
  *   <li>{@code splits}: filas [medio, suma] de los pagos de las ventas MIXED ({@code sumSplitsByMethod}).</li>
  *   <li>NEQUI (histórico o de un APK viejo) se pliega dentro de QR: la categoría ya no existe (N2/6.6).</li>
  * </ul>
+ *
+ * <p>El cierre guardado no cambia para turnos sin MIXED: la consulta agrupa solo por medio, así que el {@code put}
+ * del cálculo anterior y el {@code merge} de este dan lo mismo (verificado por ECM al aceptar F4.5c).
  */
 public final class VentasDelTurno {
 

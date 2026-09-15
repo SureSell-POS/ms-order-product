@@ -177,6 +177,8 @@ public class ExecuteDailyClosureUseCase {
                 .orElseGet(() -> siteService.baseCajaConfigurada().orElse(BigDecimal.ZERO));
 
         BigDecimal salesCash = expected.getOrDefault("CASH", BigDecimal.ZERO);
+        Integer ventasContadas = orderRepository.countByStatus(com.suresell.orders.domain.model.OrderStatus.pagado, openingTime, closingTime);
+        int numeroDeVentas = ventasContadas == null ? 0 : ventasContadas;
 
         // Calcular gastos menores acumulados y sumarlos de forma automática en el backend
         BigDecimal totalPettyCashExpenses = BigDecimal.ZERO;
@@ -274,7 +276,16 @@ public class ExecuteDailyClosureUseCase {
                 expected.getOrDefault("CREDITO", BigDecimal.ZERO),
                 recaudoCartera,
                 devolucionesSaldoAFavor,
-                recibidoComoSaldoAFavor
+                recibidoComoSaldoAFavor,
+                // Cierre imprimible (aditivos): del mismo cálculo de arriba.
+                salesCash,
+                expected.getOrDefault("CARD", BigDecimal.ZERO),
+                expected.getOrDefault("QR", BigDecimal.ZERO),
+                numeroDeVentas,
+                totalPettyCashExpenses,
+                trueExpectedCash,
+                calculatedTotalCash,
+                diffCash
         );
     }
 

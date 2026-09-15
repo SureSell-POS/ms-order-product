@@ -34,6 +34,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * F4.5c por la API real: el preview del cierre y el cierre cuentan las MISMAS ventas por medio. Desde el multipago
  * (1eeb797, 2026-07-22) el cierre sumaba los pagos de las ventas MIXED y el preview las descartaba: con una venta
  * mixta en el turno, el esperado del preview no era el que cuadraba el cierre. La fila guardada siempre fue correcta.
+ *
+ * <p>Cierre imprimible: la respuesta del cierre trae los datos del turno para imprimir y cuadra campo a campo con el
+ * preview del mismo turno.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @AutoConfigureMockMvc
@@ -66,15 +69,16 @@ class CierreConPagoMixtoTest {
 
     private static String bearer() {
         return "Bearer " + Jwts.builder().subject(CAJA).claim("tenant_id", T).claim("role", "cajero")
-                .claim("modules", List.of("ventas", "cierre"))
+                .claim("modules", List.of("ventas", "cierre", "mayorista", "cartera"))
                 .signWith(Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8))).compact();
     }
 
     @BeforeEach
     void sembrar() {
         dueno = new JdbcTemplate(new DriverManagerDataSource(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword()));
-        for (String tabla : new String[] {"public.inventario_intenciones", "order_payments", "order_delivery_tracking", "order_item", "orders",
-                "tenant_order_counters", "daily_closures", "menu_products", "sites", "users"}) {
+        for (String tabla : new String[] {"public.inventario_intenciones", "cartera_aplicaciones", "debt_transactions", "recibos_de_caja",
+                "contadores_de_recibos", "clientes_eventos", "accounts_receivable", "clientes", "order_payments", "order_delivery_tracking",
+                "order_item", "orders", "tenant_order_counters", "daily_closures", "menu_products", "sites", "users"}) {
             dueno.update("DELETE FROM " + tabla + " WHERE tenant_id = ?", T);
         }
         dueno.update("INSERT INTO tenants (id, name, plan) VALUES (?, 'Cierre mixto', 'pro') ON CONFLICT (id) DO NOTHING", T);
@@ -82,6 +86,7 @@ class CierreConPagoMixtoTest {
         dueno.update("INSERT INTO users (email, password_hash, tenant_id, role, nombre) VALUES (?, '!', ?, 'cajero', 'Caja')", CAJA, T);
         dueno.update("INSERT INTO menu_products (id_product, tenant_id, name_product, price, active) VALUES "
                 + "('mixto-hamburguesa', ?, 'Hamburguesa', 12000, true), ('mixto-gaseosa', ?, 'Gaseosa', 5000, true)", T, T);
+        dueno.update("INSERT INTO clientes (tenant_id, documento, nombre, plazo_dias, creado_por) VALUES (?, '900', 'Tienda', 8, 's')", T);
     }
 
     private ResultActions vender(String cuerpo) throws Exception {
@@ -121,5 +126,52 @@ class CierreConPagoMixtoTest {
                 .isEqualByComparingTo(p.get("totalExpectedCash").decimalValue());
         assertThat(dueno.queryForObject("SELECT total_expected_card FROM daily_closures WHERE tenant_id = ?", BigDecimal.class, T))
                 .isEqualByComparingTo(p.get("totalExpectedCard").decimalValue());
+    }
+
+    @Test
+    @DisplayName("🔴 cierre imprimible: la respuesta del cierre trae ventas por medio, número de ventas, gastos, esperado, contado y diferencia, y cuadra campo a campo con el preview del mismo turno")
+    void cierreImprimibleCuadraConElPreview() throws Exception {
+        vender("{\"pagerColor\":\"MESA\",\"pagerNumber\":\"1\",\"paymentMethod\":\"MIXED\",\"payments\":[{\"method\":\"CASH\",\"amount\":10000},"
+                + "{\"method\":\"CARD\",\"amount\":14000}],\"items\":[{\"productId\":\"mixto-hamburguesa\",\"quantity\":2,\"unitPrice\":12000}],"
+                + "\"idempotencyKey\":\"imp-1\"}").andExpect(status().isCreated());
+        vender("{\"pagerColor\":\"MESA\",\"pagerNumber\":\"2\",\"paymentMethod\":\"CASH\",\"items\":[{\"productId\":\"mixto-gaseosa\",\"quantity\":1,"
+                + "\"unitPrice\":5000}],\"idempotencyKey\":\"imp-2\"}").andExpect(status().isCreated());
+        vender("{\"pagerColor\":\"MESA\",\"pagerNumber\":\"3\",\"paymentMethod\":\"QR\",\"items\":[{\"productId\":\"mixto-gaseosa\",\"quantity\":1,"
+                + "\"unitPrice\":5000}],\"idempotencyKey\":\"imp-3\"}").andExpect(status().isCreated());
+        vender("{\"pagerColor\":\"MESA\",\"pagerNumber\":\"4\",\"paymentMethod\":\"CREDITO\",\"clienteDocumento\":\"900\",\"items\":[{\"productId\":\"mixto-gaseosa\","
+                + "\"quantity\":2,\"unitPrice\":5000}],\"idempotencyKey\":\"imp-4\"}").andExpect(status().isCreated());
+        mockMvc.perform(post("/api/cartera/recibos").header("Authorization", bearer()).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"clienteDocumento\":\"900\",\"monto\":4000,\"medio\":\"EFECTIVO\",\"idempotencyKey\":\"imp-abono\"}"))
+                .andExpect(status().isCreated());
+
+        JsonNode p = preview();
+        assertThat(p.get("ventasEfectivo").decimalValue()).isEqualByComparingTo("15000");
+        assertThat(p.get("ventasTarjeta").decimalValue()).isEqualByComparingTo("14000");
+        assertThat(p.get("ventasQr").decimalValue()).isEqualByComparingTo("5000");
+
+        // Cuenta 20.000 en efectivo con 3.000 de gastos: esperado 15.000 − 3.000 + 4.000 = 16.000, sobran 4.000.
+        String cuerpo = "{\"cashDetail\":{\"bill100k\":0,\"bill50k\":0,\"bill20k\":1,\"bill10k\":0,\"bill5k\":0,"
+                + "\"bill2k\":0,\"coin1000\":0,\"coin500\":0,\"coin200\":0,\"coin100\":0,\"coin50\":0},"
+                + "\"countedCard\":14000,\"countedQr\":5000,\"notes\":\"turno\",\"pettyCashExpenses\":[{\"concept\":\"Hielo\",\"amount\":3000}],"
+                + "\"baseForNextDay\":0}";
+        JsonNode c = json.readTree(mockMvc.perform(post("/api/closures").header("Authorization", bearer()).header("X-User-Name", "Caja")
+                        .contentType(MediaType.APPLICATION_JSON).content(cuerpo))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+
+        // Campo a campo con el preview del mismo turno.
+        for (String campo : new String[] {"ventasEfectivo", "ventasTarjeta", "ventasQr", "vendidoACredito", "recaudoCarteraEfectivo",
+                "devolucionesSaldoAFavorEfectivo", "recaudoComoSaldoAFavorEfectivo"}) {
+            assertThat(c.get(campo).decimalValue()).as(campo + " " + c).isEqualByComparingTo(p.get(campo).decimalValue());
+        }
+        assertThat(c.get("numeroDeVentas").asInt()).isEqualTo(p.get("totalOrders").asInt()).isEqualTo(4);
+        assertThat(c.get("vendidoACredito").decimalValue()).isEqualByComparingTo("10000");
+        assertThat(c.get("recaudoCarteraEfectivo").decimalValue()).isEqualByComparingTo("4000");
+        assertThat(c.get("gastos").decimalValue()).isEqualByComparingTo("3000");
+        BigDecimal esperado = p.get("totalExpectedCash").decimalValue().add(p.get("baseInicial").decimalValue()).subtract(new BigDecimal("3000"));
+        assertThat(c.get("efectivoEsperado").decimalValue()).isEqualByComparingTo(esperado).isEqualByComparingTo("16000");
+        assertThat(c.get("efectivoContado").decimalValue()).isEqualByComparingTo("20000");
+        assertThat(c.get("diferenciaEfectivo").decimalValue()).isEqualByComparingTo("4000");
+        assertThat(dueno.queryForObject("SELECT total_expected_cash FROM daily_closures WHERE tenant_id = ?", BigDecimal.class, T))
+                .as("la fila guardada dice lo mismo que la respuesta").isEqualByComparingTo(c.get("efectivoEsperado").decimalValue());
     }
 }
