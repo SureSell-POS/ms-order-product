@@ -86,6 +86,11 @@ class CostoDelPedidoTest {
             s.execute("INSERT INTO pedidos.entregas (tenant_id, pedido_id, evento_id, resultado, recibe_nombre, recibe_documento, registrado_por, ocurrido_en) "
                     + "SELECT e.tenant_id, e.pedido_id, e.id, 'ENTREGADO_CON_NOVEDAD', 'x', '1', p.capturado_por, now() "
                     + "FROM pedidos.pedidos_eventos e JOIN pedidos.pedidos p ON p.id = e.pedido_id WHERE p.estado = 'ENTREGADO_CON_NOVEDAD' AND e.tipo = 'DESPACHADO'");
+            // F5.4e: uno de cada cincuenta, retenido hace entre 0 y 71 horas (su último evento es el RETENIDO).
+            s.execute("UPDATE pedidos.pedidos SET estado = 'RETENIDO' WHERE numero % 50 = 1");
+            s.execute("INSERT INTO pedidos.pedidos_eventos (tenant_id, pedido_id, secuencia, tipo, actor, actor_tenant_id, motivo, ocurrido_en, idempotency_key) "
+                    + "SELECT p.tenant_id, p.id, 4, 'RETENIDO', 'PROVEEDOR', p.tenant_id, 'MORA', now() - make_interval(hours => (p.numero % 72)::int), "
+                    + "p.idempotency_key || ':RETENIDO' FROM pedidos.pedidos p WHERE p.estado = 'RETENIDO'");
             s.execute("ANALYZE");
             try (ResultSet rs = s.executeQuery("SELECT id FROM pedidos.pedidos WHERE tenant_id = 'perf-a' AND numero = 7777")) {
                 rs.next();
@@ -190,6 +195,27 @@ class CostoDelPedidoTest {
             }
             plan(s, "detalle: cantidades de un pedido", """
                     SELECT * FROM pedidos.v_pedidos_lineas WHERE tenant_id = 'perf-a' AND pedido_id = '%s'""".formatted(unPedido));
+        }
+        // F5.4e, como app_user (RLS aplica): la bandeja de retenidos por antigüedad y el conteo de más de 24 horas.
+        try (Connection c = comoApp(); Statement s = c.createStatement()) {
+            String ret = """
+                    LEFT JOIN LATERAL (SELECT e.motivo, e.nota, e.ocurrido_en FROM pedidos.pedidos_eventos e
+                                        WHERE e.tenant_id = p.tenant_id AND e.pedido_id = p.id AND e.tipo = 'RETENIDO'
+                                        ORDER BY e.secuencia DESC LIMIT 1) ret ON p.estado = 'RETENIDO'""";
+            plan(s, "bandeja: todo, primera página con el último RETENIDO (F5.4e añade ocurrido_en al mismo LATERAL)", """
+                    SELECT p.id, p.numero, ret.motivo, ret.nota, ret.ocurrido_en FROM pedidos.pedidos p %s
+                     WHERE p.tenant_id = 'perf-a'
+                     ORDER BY COALESCE(p.fecha_entrega_prometida, 'infinity'::date), p.numero LIMIT 51""".formatted(ret));
+            plan(s, "bandeja: solo RETENIDO, por antigüedad de la retención, primera página (F5.4e)", """
+                    SELECT p.id, p.numero, ret.ocurrido_en FROM pedidos.pedidos p %s
+                     WHERE p.tenant_id = 'perf-a' AND p.estado = ANY ('{RETENIDO}')
+                     ORDER BY ret.ocurrido_en, p.numero LIMIT 51""".formatted(ret));
+            plan(s, "conteo de retenidos hace más de 24 horas (F5.4e)", """
+                    SELECT count(*) FROM pedidos.pedidos p
+                     CROSS JOIN LATERAL (SELECT e.ocurrido_en FROM pedidos.pedidos_eventos e
+                                          WHERE e.tenant_id = p.tenant_id AND e.pedido_id = p.id AND e.tipo = 'RETENIDO'
+                                          ORDER BY e.secuencia DESC LIMIT 1) ret
+                     WHERE p.tenant_id = 'perf-a' AND p.estado = 'RETENIDO' AND ret.ocurrido_en < now() - interval '24 hours'""");
         }
         try (Connection c = comoApp(); PreparedStatement ps = c.prepareStatement(
                 "SELECT pedidos.fn_pedido_transicionar(?, 'CONFIRMADO', NULL, NULL, NULL, now(), 'medir-confirmar')")) {

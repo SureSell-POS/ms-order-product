@@ -520,4 +520,126 @@ class PedidosTest {
             c.commit();
         }
     }
+
+    // ---------------------------------------------------------------- F5.4e: cuánto lleva retenido
+
+    /** El reloj de la base, no el de Java (lección del test de medianoche). */
+    private OffsetDateTime ahoraDeLaBase() {
+        return dueno.queryForObject("SELECT now()", OffsetDateTime.class);
+    }
+
+    private UUID tomadoYRetenido(String clave, OffsetDateTime tomado, OffsetDateTime retenido) throws Exception {
+        UUID id = UUID.fromString(leer(tomar(ANA, "vendedor", clave, lineas(2, 1), tomado).andExpect(status().isCreated())).get("id").asText());
+        retener(id, clave + "-r", retenido);
+        return id;
+    }
+
+    private void retener(UUID id, String clave, OffsetDateTime cuando) throws Exception {
+        accion(ADMIN, "admin", id, "retener", "{\"motivo\":\"MORA\",\"ocurridoEn\":\"" + cuando + "\",\"idempotencyKey\":\"" + clave + "\"}")
+                .andExpect(status().isOk()).andExpect(jsonPath("$.estado").value("RETENIDO"));
+    }
+
+    private JsonNode filaDe(JsonNode bandeja, UUID id) {
+        for (JsonNode f : bandeja.get("pedidos")) {
+            if (f.get("id").asText().equals(id.toString())) {
+                return f;
+            }
+        }
+        throw new AssertionError("el pedido " + id + " no está en la bandeja");
+    }
+
+    private static java.time.Instant instante(JsonNode n) {
+        return OffsetDateTime.parse(n.asText()).toInstant();
+    }
+
+    @Test
+    @DisplayName("🔴 F5.4e: retenidoDesde es el RETENIDO mientras lo está (liberado: null, y no se retiene otra vez); más de 24 h cuenta, 23 h no; el vendedor ve lo suyo y otro negocio no suma")
+    void cuantoLlevaRetenido() throws Exception {
+        OffsetDateTime ahora = ahoraDeLaBase();
+        UUID hace25 = tomadoYRetenido("f54e-25", ahora.minusHours(26), ahora.minusHours(25));
+        UUID hace23 = tomadoYRetenido("f54e-23", ahora.minusHours(24), ahora.minusHours(23));
+        // Retenido hace 30 h y liberado: ya no está retenido, y no puede volver a retenerse (solo ENVIADO pasa a RETENIDO,
+        // V2 de pedidos): un pedido tiene a lo sumo un RETENIDO. La lectura toma igual el último.
+        UUID liberado = tomadoYRetenido("f54e-lib", ahora.minusHours(40), ahora.minusHours(30));
+        accion(ADMIN, "admin", liberado, "liberar", "{\"motivo\":\"PAGO_RECIBIDO\",\"idempotencyKey\":\"f54e-lib-l\"}").andExpect(status().isOk());
+        accion(ADMIN, "admin", liberado, "retener", "{\"motivo\":\"MORA\",\"idempotencyKey\":\"f54e-lib-r2\"}")
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.codigo").value("TRANSICION_NO_PERMITIDA"));
+
+        // Otro negocio con un retenido de hace 30 h.
+        dueno.update("INSERT INTO menu_products (id_product, tenant_id, name_product, price, active) VALUES ('qa-otro-01', ?, 'Otro', 1000, true)", OTRO);
+        dueno.update("INSERT INTO clientes (tenant_id, documento, nombre, plazo_dias, creado_por) VALUES (?, '777', 'Del otro', 8, 's')", OTRO);
+        UUID delOtro = UUID.fromString(leer(mockMvc.perform(post("/api/pedidos").header("Authorization", bearer(ADMIN_OTRO, "admin", OTRO))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"clienteDocumento\":\"777\",\"origen\":\"televenta\",\"confirmar\":false,\"lineas\":[{\"productoId\":\"qa-otro-01\",\"cantidad\":1}],"
+                        + "\"ocurridoEn\":\"" + ahora.minusHours(40) + "\",\"idempotencyKey\":\"f54e-otro\"}"))
+                .andExpect(status().isCreated())).get("id").asText());
+        accion(ADMIN_OTRO, "admin", OTRO, delOtro, "retener", "{\"motivo\":\"MORA\",\"ocurridoEn\":\"" + ahora.minusHours(30)
+                + "\",\"idempotencyKey\":\"f54e-otro-r\"}").andExpect(status().isOk());
+
+        JsonNode bandeja = leer(mockMvc.perform(get("/api/pedidos").param("limite", "50").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk()));
+        assertThat(instante(filaDe(bandeja, hace25).get("retenidoDesde"))).isEqualTo(ahora.minusHours(25).toInstant());
+        assertThat(instante(filaDe(bandeja, hace23).get("retenidoDesde"))).isEqualTo(ahora.minusHours(23).toInstant());
+        assertThat(instante(filaDe(bandeja, hace25).get("ocurridoEn"))).as("no es la captura").isNotEqualTo(ahora.minusHours(25).toInstant());
+        assertThat(filaDe(bandeja, liberado).get("retenidoDesde").isNull()).as("liberado: null").isTrue();
+
+        mockMvc.perform(get("/api/pedidos/conteos").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.retenidosMasDe24Horas").value(1))
+                .andExpect(jsonPath("$.conteos.RETENIDO").value(2));
+        mockMvc.perform(get("/api/pedidos/conteos").header("Authorization", bearer(ANA, "vendedor")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.retenidosMasDe24Horas").value(1));
+        mockMvc.perform(get("/api/pedidos/conteos").header("Authorization", bearer(PEDRO, "vendedor")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.retenidosMasDe24Horas").value(0));
+        mockMvc.perform(get("/api/pedidos/conteos").header("Authorization", bearer(ADMIN_OTRO, "admin", OTRO)))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.retenidosMasDe24Horas").value(1));
+    }
+
+    @Test
+    @DisplayName("🔴 F5.4e: con el filtro solo RETENIDO la bandeja va por retenidoDesde ascendente en 3 páginas; con otro estado, el orden de siempre")
+    void retenidosPorAntiguedad() throws Exception {
+        OffsetDateTime ahora = ahoraDeLaBase();
+        int[] horas = {1, 5, 3, 9, 7};
+        List<UUID> ids = new ArrayList<>();
+        for (int i = 0; i < horas.length; i++) {
+            ids.add(tomadoYRetenido("f54e-p" + i, ahora.minusHours(10), ahora.minusHours(horas[i])));
+        }
+        List<UUID> esperado = List.of(ids.get(3), ids.get(4), ids.get(1), ids.get(2), ids.get(0));
+        List<String> vistos = new ArrayList<>();
+        String despuesDe = null;
+        int paginas = 0;
+        do {
+            var peticion = get("/api/pedidos").param("estado", "RETENIDO").param("limite", "2").header("Authorization", bearer(ADMIN, "admin"));
+            if (despuesDe != null) {
+                peticion.param("despuesDe", despuesDe);
+            }
+            JsonNode pagina = leer(mockMvc.perform(peticion).andExpect(status().isOk()));
+            pagina.get("pedidos").forEach(f -> vistos.add(f.get("id").asText()));
+            despuesDe = pagina.get("siguiente").isNull() ? null : pagina.get("siguiente").asText();
+            paginas++;
+        } while (despuesDe != null && paginas < 10);
+        assertThat(vistos).as("la más vieja retención arriba").containsExactlyElementsOf(esperado.stream().map(UUID::toString).toList());
+        assertThat(paginas).isEqualTo(3);
+
+        // Control: con otro estado (y con dos estados) sigue el orden de siempre, por entrega y número.
+        List<UUID> enviados = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            enviados.add(UUID.fromString(leer(tomar(ANA, "vendedor", "f54e-e" + i, lineas(1, 1), ahora.minusHours(1))
+                    .andExpect(status().isCreated())).get("id").asText()));
+        }
+        JsonNode soloEnviados = leer(mockMvc.perform(get("/api/pedidos").param("estado", "ENVIADO").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk()));
+        List<String> ordenEnviados = new ArrayList<>();
+        soloEnviados.get("pedidos").forEach(f -> ordenEnviados.add(f.get("id").asText()));
+        assertThat(ordenEnviados).containsExactlyElementsOf(enviados.stream().map(UUID::toString).toList());
+        JsonNode dos = leer(mockMvc.perform(get("/api/pedidos").param("estado", "RETENIDO,ENVIADO").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk()));
+        List<String> ordenDos = new ArrayList<>();
+        dos.get("pedidos").forEach(f -> ordenDos.add(f.get("id").asText()));
+        List<String> porNumero = new ArrayList<>(ids.stream().map(UUID::toString).toList());
+        porNumero.addAll(enviados.stream().map(UUID::toString).toList());
+        assertThat(ordenDos).as("dos estados: por entrega y número").containsExactlyElementsOf(porNumero);
+        // Un cursor de la bandeja de siempre no vale en la de retenidos.
+        mockMvc.perform(get("/api/pedidos").param("estado", "RETENIDO").param("despuesDe", "infinity_3").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("despuesDe"));
+    }
 }

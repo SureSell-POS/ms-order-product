@@ -612,7 +612,9 @@ public class Pedidos {
                 SELECT p.id, p.numero, p.estado, p.origen, p.modalidad, p.cliente_documento, c.nombre AS cliente,
                        p.vendedor_id, u.nombre AS vendedor, p.fecha_entrega_prometida, p.ocurrido_en, p.plazo_dias,
                        p.condicion_pago, t.lineas, t.total, COALESCE(p.fecha_entrega_prometida, 'infinity'::date)::text AS entrega_orden,
-                       pr.valor AS valor_pendiente, ret.motivo AS motivo_de_retencion, ret.nota AS nota_de_retencion
+                       pr.valor AS valor_pendiente, ret.motivo AS motivo_de_retencion, ret.nota AS nota_de_retencion,
+                       ret.ocurrido_en AS retenido_desde,
+                       to_char(ret.ocurrido_en AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS retenido_orden
                   FROM pedidos.pedidos p
                   LEFT JOIN clientes c ON c.tenant_id = p.tenant_id AND c.documento = p.cliente_documento
                   LEFT JOIN users u ON u.tenant_id = p.tenant_id AND u.id = p.vendedor_id
@@ -622,12 +624,15 @@ public class Pedidos {
                                       WHERE v.tenant_id = p.tenant_id AND v.pedido_id = p.id) t ON true
                   LEFT JOIN pedidos.v_pedidos_pendiente_de_reversa pr ON pr.tenant_id = p.tenant_id AND pr.pedido_id = p.id
                   -- F5.4: por qué está retenido (el último RETENIDO), solo si lo está; la nota de la política dice los días.
-                  LEFT JOIN LATERAL (SELECT e.motivo, e.nota FROM pedidos.pedidos_eventos e
+                  -- F5.4e: y desde cuándo (el ocurrido_en de ese mismo evento).
+                  LEFT JOIN LATERAL (SELECT e.motivo, e.nota, e.ocurrido_en FROM pedidos.pedidos_eventos e
                                       WHERE e.tenant_id = p.tenant_id AND e.pedido_id = p.id AND e.tipo = 'RETENIDO'
                                       ORDER BY e.secuencia DESC LIMIT 1) ret ON p.estado = 'RETENIDO'
                  WHERE p.tenant_id = ?""");
         List<Object> args = new ArrayList<>(List.of(quien.negocio()));
         filtrosComunes(quien, origen, vendedorId, fecha, entregaEl, clienteDocumento, sql, args);
+        // F5.4e: con el filtro solo RETENIDO, la bandeja va por antigüedad de la retención (la más vieja arriba), con su cursor.
+        boolean porRetencion = false;
         if (estado != null && !estado.isBlank()) {
             List<String> estados = new ArrayList<>();
             for (String e : estado.split(",")) {
@@ -639,6 +644,7 @@ public class Pedidos {
             }
             sql.append(" AND p.estado = ANY (?)");
             args.add(estados.toArray(new String[0]));
+            porRetencion = estados.stream().distinct().toList().equals(List.of("RETENIDO"));
         }
         if (pendienteDeReversa != null) {
             sql.append(pendienteDeReversa ? " AND pr.pedido_id IS NOT NULL" : " AND pr.pedido_id IS NULL");
@@ -647,14 +653,19 @@ public class Pedidos {
             String[] partes = despuesDe.trim().split("_", 2);
             long numero;
             try {
-                if (partes.length != 2 || !(partes[0].equals("infinity") || partes[0].matches("\\d{4}-\\d{2}-\\d{2}"))) {
+                boolean formaValida = porRetencion
+                        ? partes[0].matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{6}Z")
+                        : partes[0].equals("infinity") || partes[0].matches("\\d{4}-\\d{2}-\\d{2}");
+                if (partes.length != 2 || !formaValida) {
                     throw new NumberFormatException();
                 }
                 numero = Long.parseLong(partes[1]);
             } catch (NumberFormatException e) {
                 throw new DatoInvalidoException("despuesDe", "El cursor no es válido: usa el «siguiente» de la página anterior.");
             }
-            sql.append(" AND (COALESCE(p.fecha_entrega_prometida, 'infinity'::date), p.numero) > (?::date, ?)");
+            sql.append(porRetencion
+                    ? " AND (ret.ocurrido_en, p.numero) > (?::timestamptz, ?)"
+                    : " AND (COALESCE(p.fecha_entrega_prometida, 'infinity'::date), p.numero) > (?::date, ?)");
             args.add(partes[0]);
             args.add(numero);
         }
@@ -662,7 +673,8 @@ public class Pedidos {
         if (n < 1 || n > LIMITE_MAXIMO_DE_BANDEJA) {
             throw new DatoInvalidoException("limite", "El límite va de 1 a " + LIMITE_MAXIMO_DE_BANDEJA + ".");
         }
-        sql.append(" ORDER BY COALESCE(p.fecha_entrega_prometida, 'infinity'::date), p.numero LIMIT ?");
+        sql.append(porRetencion ? " ORDER BY ret.ocurrido_en, p.numero LIMIT ?"
+                : " ORDER BY COALESCE(p.fecha_entrega_prometida, 'infinity'::date), p.numero LIMIT ?");
         args.add(n + 1);
         List<Map<String, Object>> filas = jdbc.queryForList(sql.toString(), args.toArray());
         boolean hayMas = filas.size() > n;
@@ -688,7 +700,8 @@ public class Pedidos {
             r.put("valorPendienteDeReversa", f.get("valor_pendiente") == null ? BigDecimal.ZERO : f.get("valor_pendiente"));
             r.put("motivoDeRetencion", f.get("motivo_de_retencion"));
             r.put("notaDeRetencion", f.get("nota_de_retencion"));
-            r.put("cursor", f.get("entrega_orden") + "_" + f.get("numero"));
+            r.put("retenidoDesde", momento(f.get("retenido_desde")));
+            r.put("cursor", (porRetencion ? f.get("retenido_orden") : f.get("entrega_orden")) + "_" + f.get("numero"));
             pedidos.add(r);
         }
         Map<String, Object> salida = new LinkedHashMap<>();
@@ -725,9 +738,20 @@ public class Pedidos {
                  WHERE p.tenant_id = ?""");
         List<Object> pargs = new ArrayList<>(List.of(quien.negocio()));
         filtrosComunes(quien, origen, vendedorId, fecha, entregaEl, clienteDocumento, pend, pargs);
+        // F5.4e: retenidos hace más de 24 horas, del negocio (el vendedor, solo lo suyo), sin los demás filtros: es la alerta de
+        // que una retención espera a una persona. Reloj de la base; el último RETENIDO por la clave (pedido_id, secuencia).
+        StringBuilder viejos = new StringBuilder("""
+                SELECT count(*) FROM pedidos.pedidos p
+                 CROSS JOIN LATERAL (SELECT e.ocurrido_en FROM pedidos.pedidos_eventos e
+                                      WHERE e.tenant_id = p.tenant_id AND e.pedido_id = p.id AND e.tipo = 'RETENIDO'
+                                      ORDER BY e.secuencia DESC LIMIT 1) ret
+                 WHERE p.tenant_id = ? AND p.estado = 'RETENIDO' AND ret.ocurrido_en < now() - interval '24 hours'""");
+        List<Object> vargs = new ArrayList<>(List.of(quien.negocio()));
+        filtrosComunes(quien, null, null, null, null, null, viejos, vargs);
         Map<String, Object> salida = new LinkedHashMap<>();
         salida.put("conteos", porEstado);
         salida.put("pendientesDeReversa", jdbc.queryForObject(pend.toString(), Long.class, pargs.toArray()));
+        salida.put("retenidosMasDe24Horas", jdbc.queryForObject(viejos.toString(), Long.class, vargs.toArray()));
         return salida;
     }
 
