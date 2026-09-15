@@ -162,23 +162,9 @@ public class ExecuteDailyClosureUseCase {
         );
         log.info("totales: {}", totals);
 
-        Map<String, BigDecimal> expected = parseTotals(totals);
-
-        // F5 multipago: sumar los splits de las órdenes MIXED por método.
-        for (Object[] row : orderPaymentRepository.sumSplitsByMethod(openingTime, closingTime)) {
-            String method = String.valueOf(row[0]);
-            BigDecimal amount = (BigDecimal) row[1];
-            expected.merge(method, amount == null ? BigDecimal.ZERO : amount, BigDecimal::add);
-        }
-
-        // N2/6.6 — Nequi eliminado: lo que llegue rotulado NEQUI (histórico o de
-        // un APK viejo) se PLIEGA dentro de QR antes de cualquier cálculo, para
-        // que el cierre no arrastre una categoría que ya no existe.
-        BigDecimal nequiHeredado = expected.remove("NEQUI");
-        if (nequiHeredado != null && nequiHeredado.compareTo(BigDecimal.ZERO) != 0) {
-            expected.merge("QR", nequiHeredado, BigDecimal::add);
-            log.info("Cierre: ${} rotulados NEQUI se contabilizan como QR (Nequi eliminado)", nequiHeredado);
-        }
+        // Ventas por medio, con los pagos de las MIXED y NEQUI dentro de QR: el MISMO cálculo que el preview.
+        Map<String, BigDecimal> expected = VentasDelTurno.porMedio(totals,
+                orderPaymentRepository.sumSplitsByMethod(openingTime, closingTime));
 
         BigDecimal pureSales = expected.getOrDefault("CASH", BigDecimal.ZERO)
                 .add(expected.getOrDefault("CARD", BigDecimal.ZERO))
@@ -290,16 +276,6 @@ public class ExecuteDailyClosureUseCase {
                 devolucionesSaldoAFavor,
                 recibidoComoSaldoAFavor
         );
-    }
-
-    private Map<String, BigDecimal> parseTotals(List<Object[]> queryResults) {
-        Map<String, BigDecimal> map = new HashMap<>();
-        for (Object[] result : queryResults) {
-            String method = (String) result[0];
-            BigDecimal amount = new BigDecimal(result[1].toString());
-            map.put(method, amount);
-        }
-        return map;
     }
 
     private DailyClosure saveClosureAudit(ExecuteClosureRequest request,

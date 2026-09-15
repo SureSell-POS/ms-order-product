@@ -53,7 +53,6 @@ implements DailyClosurePort {
                 .map(DailyClosure::getClosingTime)
                 .orElse(startOfDay);
         LocalDateTime endOfDay = LocalDateTime.now(BOGOTA_ZONE).with(LocalTime.MAX);
-        List<Object[]> results = this.orderRepositoryPort.findTotalByPaymentMethodAndStatus(OrderStatus.pagado, ventanaDesde, endOfDay);
         Integer countOrders = this.orderRepositoryPort.countByStatus(OrderStatus.pagado, ventanaDesde, endOfDay);
         BigDecimal totalCash = BigDecimal.ZERO;
         BigDecimal totalCard = BigDecimal.ZERO;
@@ -72,39 +71,16 @@ implements DailyClosurePort {
         LocalDate hoy = LocalDate.now(BOGOTA_ZONE);
         int cierresHoy = this.closureRepositoryPort.countClosuresOn(hoy);
         int turno = this.closureRepositoryPort.ultimoTurnoDel(hoy) + 1;
-        for (Object[] result : results) {
-            String paymentMethod = (String)result[0];
-            BigDecimal sumTotal = result[1] == null ? BigDecimal.ZERO : (BigDecimal) result[1];
-            if (paymentMethod == null) {
-                continue;
-            }
-            switch (paymentMethod) {
-                case "CASH": {
-                    totalCash = sumTotal;
-                    break;
-                }
-                case "CARD": {
-                    totalCard = sumTotal;
-                    break;
-                }
-                // N2/6.6 — Nequi eliminado. V18 migró todo a QR, así que no
-                // debería quedar ninguna; si apareciera una (p.ej. un APK viejo
-                // que escribió antes del deploy), se SUMA a QR en vez de
-                // descartarse en silencio, que descuadraría el cierre.
-                case "NEQUI":
-                case "QR": {
-                    totalQr = totalQr.add(sumTotal);
-                    break;
-                }
-                // F1.13: a crédito no entra al cajón; se informa aparte.
-                case "CREDITO": {
-                    vendidoACredito = sumTotal;
-                    break;
-                }
-                default: {
-                }
-            }
-        }
+        // F4.5c: el MISMO cálculo que el cierre (VentasDelTurno). Antes se sumaba orders.payment_method y las ventas
+        // MIXED caían en default: con una venta mixta el esperado del preview no era el que cuadraba el cierre.
+        java.util.Map<String, BigDecimal> medios = VentasDelTurno.porMedio(
+                this.orderRepository.sumTotalsByPaymentMethodAndSeller(ventanaDesde, endOfDay),
+                this.orderPaymentRepository.sumSplitsByMethod(ventanaDesde, endOfDay));
+        totalCash = medios.getOrDefault(PAYMENT_CASH, BigDecimal.ZERO);
+        totalCard = medios.getOrDefault(PAYMENT_CARD, BigDecimal.ZERO);
+        totalQr = medios.getOrDefault(PAYMENT_QR, BigDecimal.ZERO);
+        // F1.13: a crédito no entra al cajón; se informa aparte.
+        vendidoACredito = medios.getOrDefault("CREDITO", BigDecimal.ZERO);
         // F4.5: los abonos de cartera en efectivo del turno están en el cajón (no son venta).
         BigDecimal recaudoCartera = recaudoEnCaja
                 .map(r -> r.efectivoEntre(com.suresell.orders.multitenant.TenantContext.get(), ventanaDesde, endOfDay))
@@ -248,9 +224,17 @@ implements DailyClosurePort {
     // F4.5: el efectivo que la cartera metió al cajón en el turno (solo en la nube).
     private final java.util.Optional<com.suresell.orders.cartera.RecaudoEnCaja> recaudoEnCaja;
 
+    // F4.5c: las mismas consultas de ventas que el cierre (ExecuteDailyClosureUseCase).
+    private final com.suresell.orders.infrastructure.persistence.OrderRepository orderRepository;
+    private final com.suresell.orders.infrastructure.persistence.OrderPaymentRepository orderPaymentRepository;
+
     public DailyClosureHandler(DailyClosureRepositoryPort closureRepositoryPort, OrderRepositoryPort orderRepositoryPort, com.suresell.orders.domain.port.out.SyncOutboxRepositoryPort syncOutboxRepositoryPort, com.fasterxml.jackson.databind.ObjectMapper objectMapper, SiteService siteService,
-                               java.util.Optional<com.suresell.orders.cartera.RecaudoEnCaja> recaudoEnCaja) {
+                               java.util.Optional<com.suresell.orders.cartera.RecaudoEnCaja> recaudoEnCaja,
+                               com.suresell.orders.infrastructure.persistence.OrderRepository orderRepository,
+                               com.suresell.orders.infrastructure.persistence.OrderPaymentRepository orderPaymentRepository) {
         this.recaudoEnCaja = recaudoEnCaja;
+        this.orderRepository = orderRepository;
+        this.orderPaymentRepository = orderPaymentRepository;
         this.closureRepositoryPort = closureRepositoryPort;
         this.orderRepositoryPort = orderRepositoryPort;
         this.syncOutboxRepositoryPort = syncOutboxRepositoryPort;
