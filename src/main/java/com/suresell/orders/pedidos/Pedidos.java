@@ -332,14 +332,7 @@ public class Pedidos {
                                       WHERE v.tenant_id = p.tenant_id AND v.pedido_id = p.id) t ON true
                  WHERE p.tenant_id = ?""");
         List<Object> args = new ArrayList<>(List.of(quien.negocio()));
-        if (quien.esVendedor()) {
-            sql.append(" AND (p.vendedor_id = ? OR p.capturado_por = ?)");
-            args.add(quien.usuarioId() == null ? -1L : quien.usuarioId());
-            args.add(quien.usuarioId() == null ? -1L : quien.usuarioId());
-        } else if (vendedorId != null) {
-            sql.append(" AND p.vendedor_id = ?");
-            args.add(vendedorId);
-        }
+        filtrosComunes(quien, origen, vendedorId, fecha, entregaEl, clienteDocumento, sql, args);
         if (estado != null && !estado.isBlank()) {
             List<String> estados = new ArrayList<>();
             for (String e : estado.split(",")) {
@@ -351,31 +344,6 @@ public class Pedidos {
             }
             sql.append(" AND p.estado = ANY (?)");
             args.add(estados.toArray(new String[0]));
-        }
-        if (origen != null && !origen.isBlank()) {
-            List<String> origenes = new ArrayList<>();
-            for (String o : origen.split(",")) {
-                String x = o.trim().toLowerCase(Locale.ROOT);
-                if (!ORIGENES_DEL_ENUM.contains(x)) {
-                    throw new DatoInvalidoException("origen", "El origen es uno o varios (separados por coma) de: " + String.join(", ", ORIGENES_DEL_ENUM) + ".");
-                }
-                origenes.add(x);
-            }
-            sql.append(" AND p.origen = ANY (?)");
-            args.add(origenes.toArray(new String[0]));
-        }
-        if (fecha != null) {
-            sql.append(" AND p.ocurrido_en >= ? AND p.ocurrido_en < ?");
-            args.add(Timestamp.from(fecha.atStartOfDay(BOGOTA).toInstant()));
-            args.add(Timestamp.from(fecha.plusDays(1).atStartOfDay(BOGOTA).toInstant()));
-        }
-        if (entregaEl != null) {
-            sql.append(" AND p.fecha_entrega_prometida = ?");
-            args.add(java.sql.Date.valueOf(entregaEl));
-        }
-        if (clienteDocumento != null && !clienteDocumento.isBlank()) {
-            sql.append(" AND p.cliente_documento = ?");
-            args.add(clienteDocumento.trim());
         }
         if (despuesDe != null && !despuesDe.isBlank()) {
             String[] partes = despuesDe.trim().split("_", 2);
@@ -426,6 +394,68 @@ public class Pedidos {
         salida.put("siguiente", hayMas ? pedidos.get(pedidos.size() - 1).get("cursor") : null);
         pedidos.forEach(x -> x.remove("cursor"));
         return salida;
+    }
+
+    /**
+     * GET /api/pedidos/conteos: cuántos pedidos hay en cada estado (sin CREADO_BORRADOR),
+     * con los mismos filtros y la misma visibilidad que la bandeja, en UNA consulta
+     * agrupada. Vienen todos los estados, también los que están en 0.
+     */
+    public Map<String, Object> conteos(Quien quien, String origen, Long vendedorId, LocalDate fecha, LocalDate entregaEl,
+                                       String clienteDocumento) {
+        exigirRol(quien, Set.of("admin", "cajero", "vendedor"), "ver los pedidos");
+        StringBuilder sql = new StringBuilder("SELECT p.estado, count(*) AS n FROM pedidos.pedidos p WHERE p.tenant_id = ?");
+        List<Object> args = new ArrayList<>(List.of(quien.negocio()));
+        filtrosComunes(quien, origen, vendedorId, fecha, entregaEl, clienteDocumento, sql, args);
+        sql.append(" AND p.estado <> 'CREADO_BORRADOR' GROUP BY p.estado");
+        Map<String, Object> porEstado = new LinkedHashMap<>();
+        for (String e : ESTADOS) {
+            if (!e.equals("CREADO_BORRADOR")) {
+                porEstado.put(e, 0L);
+            }
+        }
+        for (Map<String, Object> f : jdbc.queryForList(sql.toString(), args.toArray())) {
+            porEstado.put((String) f.get("estado"), ((Number) f.get("n")).longValue());
+        }
+        return Map.of("conteos", porEstado);
+    }
+
+    /** Visibilidad por rol y los filtros que comparten la bandeja y los conteos. */
+    private static void filtrosComunes(Quien quien, String origen, Long vendedorId, LocalDate fecha, LocalDate entregaEl,
+                                       String clienteDocumento, StringBuilder sql, List<Object> args) {
+        if (quien.esVendedor()) {
+            sql.append(" AND (p.vendedor_id = ? OR p.capturado_por = ?)");
+            args.add(quien.usuarioId() == null ? -1L : quien.usuarioId());
+            args.add(quien.usuarioId() == null ? -1L : quien.usuarioId());
+        } else if (vendedorId != null) {
+            sql.append(" AND p.vendedor_id = ?");
+            args.add(vendedorId);
+        }
+        if (origen != null && !origen.isBlank()) {
+            List<String> origenes = new ArrayList<>();
+            for (String o : origen.split(",")) {
+                String x = o.trim().toLowerCase(Locale.ROOT);
+                if (!ORIGENES_DEL_ENUM.contains(x)) {
+                    throw new DatoInvalidoException("origen", "El origen es uno o varios (separados por coma) de: " + String.join(", ", ORIGENES_DEL_ENUM) + ".");
+                }
+                origenes.add(x);
+            }
+            sql.append(" AND p.origen = ANY (?)");
+            args.add(origenes.toArray(new String[0]));
+        }
+        if (fecha != null) {
+            sql.append(" AND p.ocurrido_en >= ? AND p.ocurrido_en < ?");
+            args.add(Timestamp.from(fecha.atStartOfDay(BOGOTA).toInstant()));
+            args.add(Timestamp.from(fecha.plusDays(1).atStartOfDay(BOGOTA).toInstant()));
+        }
+        if (entregaEl != null) {
+            sql.append(" AND p.fecha_entrega_prometida = ?");
+            args.add(java.sql.Date.valueOf(entregaEl));
+        }
+        if (clienteDocumento != null && !clienteDocumento.isBlank()) {
+            sql.append(" AND p.cliente_documento = ?");
+            args.add(clienteDocumento.trim());
+        }
     }
 
     /** GET /api/pedidos/{id}: cabecera, líneas con sus cantidades por etapa y la línea de tiempo. */

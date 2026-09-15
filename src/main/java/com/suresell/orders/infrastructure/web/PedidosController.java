@@ -60,6 +60,17 @@ public class PedidosController {
         return pedidos.bandeja(quien(http), estado, origen, vendedorId, fecha, entregaEl, clienteDocumento, limite, despuesDe);
     }
 
+    @GetMapping("/conteos")
+    @Operation(summary = "F5.3 — Cuántos pedidos hay por estado, con los filtros y la visibilidad de la bandeja, en una consulta")
+    public Map<String, Object> conteos(@RequestParam(required = false) String origen,
+                                       @RequestParam(required = false) Long vendedorId,
+                                       @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate fecha,
+                                       @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate entregaEl,
+                                       @RequestParam(required = false) String clienteDocumento,
+                                       HttpServletRequest http) {
+        return pedidos.conteos(quien(http), origen, vendedorId, fecha, entregaEl, clienteDocumento);
+    }
+
     @GetMapping("/{id}")
     @Operation(summary = "F5.3 — Detalle: líneas con cantidades por etapa y precios, y la línea de tiempo de eventos")
     public Map<String, Object> detalle(@PathVariable UUID id, HttpServletRequest http) {

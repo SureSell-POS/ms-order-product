@@ -420,6 +420,24 @@ class PedidosTest {
                 .andExpect(status().isOk()).andExpect(jsonPath("$.pedidos.length()").value(5));
         mockMvc.perform(get("/api/pedidos").param("origen", "whatsapp").header("Authorization", bearer(ADMIN, "admin")))
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("origen"));
+
+        // Conteos por estado: todos presentes, con los filtros y la visibilidad de la bandeja.
+        mockMvc.perform(get("/api/pedidos/conteos").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.conteos.length()").value(13))
+                .andExpect(jsonPath("$.conteos.CONFIRMADO").value(4))
+                .andExpect(jsonPath("$.conteos.ENVIADO").value(1))
+                .andExpect(jsonPath("$.conteos.RETENIDO").value(0))
+                .andExpect(jsonPath("$.conteos.CREADO_BORRADOR").doesNotExist());
+        mockMvc.perform(get("/api/pedidos/conteos").param("origen", "televenta").param("entregaEl", hoy.plusDays(1).toString())
+                        .header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.conteos.CONFIRMADO").value(2)).andExpect(jsonPath("$.conteos.ENVIADO").value(0));
+        mockMvc.perform(get("/api/pedidos/conteos").param("vendedorId", String.valueOf(pedro)).header("Authorization", bearer(ANA, "vendedor")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.conteos.ENVIADO").value(1)).andExpect(jsonPath("$.conteos.CONFIRMADO").value(0));
+        mockMvc.perform(get("/api/pedidos/conteos").header("Authorization", bearer(PEDRO, "vendedor")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.conteos.ENVIADO").value(0));
+        mockMvc.perform(get("/api/pedidos/conteos").param("origen", "whatsapp").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("origen"));
     }
 
     @Test
