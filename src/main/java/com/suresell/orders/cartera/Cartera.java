@@ -816,8 +816,25 @@ public class Cartera {
 
     static final Set<String> MOTIVOS_DE_EGRESO = Set.of("CLIENTE_LO_PIDIO", "CIERRE_DE_CUENTA", "DEVUELTO_AL_PROCESO");
 
+    /**
+     * F4.13 (d), aditivo: {@code beneficiario} DEUDOR (por defecto) o LIQUIDADOR (con nombre y documento, solo en
+     * liquidación); {@code forma} DINERO (por defecto) o MERCANCIA, con {@code mercancia} (documental: sin venta ni inventario).
+     */
     public record Devolucion(BigDecimal monto, String medio, String referenciaMedio, String motivo, String referencia,
-                             OffsetDateTime ocurridoEn, String idempotencyKey, Long siteId) {}
+                             OffsetDateTime ocurridoEn, String idempotencyKey, Long siteId, String beneficiario,
+                             String beneficiarioNombre, String beneficiarioDocumento, String forma,
+                             List<RenglonDeMercancia> mercancia) {
+        public Devolucion(BigDecimal monto, String medio, String referenciaMedio, String motivo, String referencia,
+                          OffsetDateTime ocurridoEn, String idempotencyKey, Long siteId) {
+            this(monto, medio, referenciaMedio, motivo, referencia, ocurridoEn, idempotencyKey, siteId, null, null, null, null, null);
+        }
+    }
+
+    public record RenglonDeMercancia(String productoId, BigDecimal cantidad, BigDecimal valorUnitario) {}
+
+    static final String MEDIO_MERCANCIA = "MERCANCIA";
+    /** TEXTOS §B4 (F4.13 d). */
+    static final String EN_LIQUIDACION_AL_LIQUIDADOR = "En liquidación el saldo a favor se entrega al liquidador, no al cliente. No se registró nada.";
 
     /** Aplica el saldo a favor del cliente a sus facturas vivas (V74). En insolvencia no cruza nada: compensar es ineficaz. */
     BigDecimal aplicarSaldoAFavor(String negocio, String documento) {
@@ -847,13 +864,10 @@ public class Cartera {
         Optional<LocalDate> insolvente = insolventeDesde(negocio, documento);
         estado.put("saldoAFavor", saldoAFavor(negocio, documento));
         estado.put("saldoAFavorCongelado", insolvente.isPresent());
-        estado.put("egresos", jdbc.queryForList("""
-                SELECT e.id, e.numero, e.monto, e.medio, e.motivo, e.referencia, e.pagado_por, u.nombre, e.ocurrido_en
-                  FROM egresos_de_cartera e LEFT JOIN users u ON u.tenant_id = e.tenant_id AND u.id = e.pagado_por
+        estado.put("egresos", egresos(negocio, jdbc.queryForList(COLUMNAS_DEL_EGRESO + """
                  WHERE e.tenant_id = ? AND e.cliente_documento = ?
                    AND (e.ocurrido_en AT TIME ZONE 'America/Bogota')::date BETWEEN ? AND ?
-                 ORDER BY e.numero""", negocio, documento, java.sql.Date.valueOf(inicio), java.sql.Date.valueOf(fin))
-                .stream().map(Cartera::egreso).toList());
+                 ORDER BY e.numero""", negocio, documento, java.sql.Date.valueOf(inicio), java.sql.Date.valueOf(fin))));
         estado.put("aplicacionesARevisarPorInsolvencia", insolvente.map(desde -> jdbc.queryForList("""
                 SELECT a.id, r.numero AS recibo_numero, d.order_uuid, o.id_order, a.monto, a.ocurrido_en
                   FROM cartera_aplicaciones a
@@ -872,6 +886,63 @@ public class Cartera {
             m.put("aplicadaEn", instante(f.get("ocurrido_en")));
             return m;
         }).toList()).orElse(List.of()));
+    }
+
+    private static final String COLUMNAS_DEL_EGRESO = """
+            SELECT e.id, e.numero, e.monto, e.medio, e.motivo, e.referencia, e.pagado_por, u.nombre, e.ocurrido_en,
+                   e.cliente_documento, e.beneficiario, e.beneficiario_nombre, e.beneficiario_documento, e.forma,
+                   c.nombre AS cliente_nombre
+              FROM egresos_de_cartera e
+              LEFT JOIN users u ON u.tenant_id = e.tenant_id AND u.id = e.pagado_por
+              LEFT JOIN clientes c ON c.tenant_id = e.tenant_id AND c.documento = e.cliente_documento
+            """;
+
+    /** Los egresos con su mercancía (F4.13 d): una sola lectura de renglones para todos, no una por egreso. */
+    private List<Map<String, Object>> egresos(String negocio, List<Map<String, Object>> filas) {
+        Map<Object, List<Map<String, Object>>> renglones = new java.util.HashMap<>();
+        List<UUID> enMercancia = filas.stream().filter(f -> MEDIO_MERCANCIA.equals(f.get("forma"))).map(f -> (UUID) f.get("id")).toList();
+        if (!enMercancia.isEmpty()) {
+            jdbc.query("""
+                    SELECT egreso_id, renglon, producto_id, producto_nombre, cantidad, valor_unitario, valor
+                      FROM egresos_de_cartera_mercancia WHERE tenant_id = ? AND egreso_id = ANY (?) ORDER BY egreso_id, renglon""",
+                    rs -> {
+                        Map<String, Object> m = new LinkedHashMap<>();
+                        m.put("renglon", rs.getInt("renglon"));
+                        m.put("productoId", rs.getString("producto_id"));
+                        m.put("productoNombre", rs.getString("producto_nombre"));
+                        m.put("cantidad", rs.getBigDecimal("cantidad").stripTrailingZeros());
+                        m.put("valorUnitario", rs.getBigDecimal("valor_unitario"));
+                        m.put("valor", rs.getBigDecimal("valor"));
+                        renglones.computeIfAbsent(rs.getObject("egreso_id"), k -> new ArrayList<>()).add(m);
+                    }, negocio, enMercancia.toArray(new UUID[0]));
+        }
+        return filas.stream().map(f -> {
+            Map<String, Object> m = egreso(f);
+            List<Map<String, Object>> suyos = renglones.getOrDefault(f.get("id"), List.of());
+            m.put("beneficiario", f.get("beneficiario"));
+            m.put("beneficiarioNombre", f.get("beneficiario_nombre"));
+            m.put("beneficiarioDocumento", f.get("beneficiario_documento"));
+            m.put("forma", f.get("forma"));
+            m.put("mercancia", suyos);
+            m.put("documentoDeSatisfaccion", MEDIO_MERCANCIA.equals(f.get("forma")) ? documentoDeSatisfaccion(f, suyos) : null);
+            return m;
+        }).toList();
+    }
+
+    /** TEXTOS §B4 (F4.13 d): el documento de la entrega de mercancía como pago del saldo a favor. */
+    static String documentoDeSatisfaccion(Map<String, Object> e, List<Map<String, Object>> renglones) {
+        Object ocurrido = e.get("ocurrido_en");
+        LocalDate fecha = (ocurrido instanceof OffsetDateTime odt ? odt.toInstant() : ((Timestamp) ocurrido).toInstant())
+                .atZone(BOGOTA).toLocalDate();
+        boolean liquidador = "LIQUIDADOR".equals(e.get("beneficiario"));
+        String nombre = liquidador ? (String) e.get("beneficiario_nombre") : (String) e.get("cliente_nombre");
+        String documento = liquidador ? (String) e.get("beneficiario_documento") : (String) e.get("cliente_documento");
+        String detalle = String.join("; ", renglones.stream().map(r -> ((BigDecimal) r.get("cantidad")).toPlainString() + " × "
+                + r.get("productoNombre") + " a " + pesos((BigDecimal) r.get("valorUnitario")) + " = " + pesos((BigDecimal) r.get("valor"))).toList());
+        return fecha.format(FECHA_LARGA) + " · Entrega de mercancía como pago del saldo a favor, comprobante de egreso N.º "
+                + e.get("numero") + ", al " + (liquidador ? "liquidador " : "cliente ") + nombre + " (" + documento + "): " + detalle
+                + ". Total " + pesos(decimal(e.get("monto"))) + ". No es una venta ni se descuenta de una venta. "
+                + "El descuento de inventario se registra aparte.";
     }
 
     private static Map<String, Object> egreso(Map<String, Object> f) {
@@ -907,9 +978,24 @@ public class Cartera {
             throw new DatoInvalidoException("idempotencyKey", "La clave de idempotencia tiene máximo 100 caracteres.");
         }
         BigDecimal monto = montoValido(d.monto(), "monto");
-        String medio = d.medio() == null ? null : d.medio().trim().toUpperCase(Locale.ROOT);
-        if (medio == null || !MEDIOS.contains(medio)) {
+        String forma = d.forma() == null || d.forma().isBlank() ? "DINERO" : d.forma().trim().toUpperCase(Locale.ROOT);
+        if (!Set.of("DINERO", MEDIO_MERCANCIA).contains(forma)) {
+            throw new DatoInvalidoException("forma", "La forma de la devolución es dinero o mercancía.");
+        }
+        // F4.13 (d): la mercancía no tiene medio de dinero; su medio es la mercancía (el cierre de caja no la cuenta).
+        String medio = MEDIO_MERCANCIA.equals(forma) ? MEDIO_MERCANCIA : d.medio() == null ? null : d.medio().trim().toUpperCase(Locale.ROOT);
+        if (medio == null || (!MEDIOS.contains(medio) && !MEDIO_MERCANCIA.equals(forma))) {
             throw new DatoInvalidoException("medio", "El medio es uno de: EFECTIVO, TRANSFERENCIA, BRE_B, QR, TARJETA, CHEQUE.");
+        }
+        String beneficiario = d.beneficiario() == null || d.beneficiario().isBlank() ? "DEUDOR" : d.beneficiario().trim().toUpperCase(Locale.ROOT);
+        if (!Set.of("DEUDOR", "LIQUIDADOR").contains(beneficiario)) {
+            throw new DatoInvalidoException("beneficiario", "Se le entrega al cliente o al liquidador.");
+        }
+        String beneficiarioNombre = null;
+        String beneficiarioDocumento = null;
+        if ("LIQUIDADOR".equals(beneficiario)) {
+            beneficiarioNombre = obligatorio(d.beneficiarioNombre(), "beneficiarioNombre", "Falta el nombre del liquidador.");
+            beneficiarioDocumento = obligatorio(d.beneficiarioDocumento(), "beneficiarioDocumento", "Falta el documento del liquidador.");
         }
         String motivo = d.motivo() == null ? null : d.motivo().trim().toUpperCase(Locale.ROOT);
         if (motivo == null || !MOTIVOS_DE_EGRESO.contains(motivo)) {
@@ -937,10 +1023,21 @@ public class Cartera {
                     "Esa clave de idempotencia ya se usó para otra devolución (cliente, monto o medio distintos). No se registró nada.");
         }
 
-        fichaVisible(quien, doc);
+        Map<String, Object> ficha = fichaVisible(quien, doc);
         if ("DEVUELTO_AL_PROCESO".equals(motivo) && referencia == null) {
             throw new DatoInvalidoException("referencia", "Una devolución al proceso lleva la referencia de la autorización.");
         }
+        // F4.13 (d): el beneficiario según la etapa. La base lo repite (V78).
+        String etapa = ficha == null || ficha.get("en_insolvencia_desde") == null ? null : jdbc.queryForList(
+                "SELECT etapa FROM v_insolvencia_vigente WHERE tenant_id = ? AND cliente_documento = ? AND en_proceso",
+                String.class, negocio, doc).stream().findFirst().orElse(null);
+        if ("LIQUIDACION".equals(etapa) && !"LIQUIDADOR".equals(beneficiario)) {
+            throw new ConflictoDeCarteraException(ConflictoDeCarteraException.BENEFICIARIO_DEBE_SER_EL_LIQUIDADOR, EN_LIQUIDACION_AL_LIQUIDADOR);
+        }
+        if (!"LIQUIDACION".equals(etapa) && "LIQUIDADOR".equals(beneficiario)) {
+            throw new DatoInvalidoException("beneficiario", "El liquidador solo recibe el saldo a favor cuando el proceso está en liquidación.");
+        }
+        List<Object[]> renglones = renglonesDeMercancia(negocio, forma, d.mercancia(), monto);
         String cuenta = cuentaBloqueada(negocio, doc)
                 .orElseThrow(() -> new DatoInvalidoException("clienteDocumento", "Ese cliente no tiene cuenta por cobrar."));
         List<Map<String, Object>> recibos = jdbc.queryForList("""
@@ -962,10 +1059,18 @@ public class Cartera {
                 debito, negocio, cuenta, monto, java.sql.Date.valueOf(dia), autorDelLibro(quien));
         UUID egresoId = jdbc.queryForObject("""
                 INSERT INTO egresos_de_cartera (tenant_id, numero, cliente_documento, monto, medio, referencia_medio, motivo,
-                                                referencia, debito_tx_id, pagado_por, site_id, ocurrido_en, idempotency_key)
-                VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                RETURNING id""", UUID.class, negocio, doc, monto, medio, recortarONulo(d.referenciaMedio()), motivo, referencia,
-                debito, quien.usuarioId(), d.siteId(), Timestamp.from(ocurrido.toInstant()), clave);
+                                                referencia, debito_tx_id, pagado_por, site_id, ocurrido_en, idempotency_key,
+                                                beneficiario, beneficiario_nombre, beneficiario_documento, forma)
+                VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING id""", UUID.class, negocio, doc, monto, medio,
+                MEDIO_MERCANCIA.equals(forma) ? null : recortarONulo(d.referenciaMedio()), motivo, referencia,
+                debito, quien.usuarioId(), d.siteId(), Timestamp.from(ocurrido.toInstant()), clave,
+                beneficiario, beneficiarioNombre, beneficiarioDocumento, forma);
+        for (Object[] r : renglones) {
+            jdbc.update("""
+                    INSERT INTO egresos_de_cartera_mercancia (tenant_id, egreso_id, renglon, producto_id, producto_nombre, cantidad, valor_unitario, valor)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", negocio, egresoId, r[0], r[1], r[2], r[3], r[4], r[5]);
+        }
         BigDecimal falta = monto;
         for (Map<String, Object> f : recibos) {
             if (falta.signum() <= 0) {
@@ -984,12 +1089,50 @@ public class Cartera {
         return new Registro(egresoPorId(negocio, egresoId), false);
     }
 
+    /**
+     * F4.13 (d): los renglones de una devolución en mercancía, validados. Productos del negocio (activos o no, con precio o no:
+     * el valor lo pacta el admin), cantidad y valor mayores que 0, y la suma igual al monto. En dinero, ninguno.
+     */
+    private List<Object[]> renglonesDeMercancia(String negocio, String forma, List<RenglonDeMercancia> mercancia, BigDecimal monto) {
+        if (!MEDIO_MERCANCIA.equals(forma)) {
+            if (mercancia != null && !mercancia.isEmpty()) {
+                throw new DatoInvalidoException("mercancia", "Una devolución en dinero no lleva productos.");
+            }
+            return List.of();
+        }
+        if (mercancia == null || mercancia.isEmpty()) {
+            throw new DatoInvalidoException("mercancia", "Con mercancía, di qué productos se entregan.");
+        }
+        List<Object[]> filas = new ArrayList<>();
+        BigDecimal suma = BigDecimal.ZERO;
+        for (int i = 0; i < mercancia.size(); i++) {
+            RenglonDeMercancia r = mercancia.get(i);
+            String campo = "mercancia[" + i + "]";
+            String producto = r == null ? null : recortarONulo(r.productoId());
+            List<String> nombre = producto == null ? List.of() : jdbc.queryForList(
+                    "SELECT name_product FROM menu_products WHERE tenant_id = ? AND id_product = ?", String.class, negocio, producto);
+            if (nombre.isEmpty()) {
+                throw new DatoInvalidoException(campo + ".productoId", "Ese producto no existe en el negocio.");
+            }
+            if (r.cantidad() == null || r.cantidad().signum() <= 0 || r.cantidad().stripTrailingZeros().scale() > 3) {
+                throw new DatoInvalidoException(campo + ".cantidad", "La cantidad es mayor que 0.");
+            }
+            if (r.valorUnitario() == null || r.valorUnitario().signum() <= 0 || r.valorUnitario().stripTrailingZeros().scale() > 2) {
+                throw new DatoInvalidoException(campo + ".valorUnitario", "El valor es mayor que 0.");
+            }
+            BigDecimal valor = r.cantidad().multiply(r.valorUnitario()).setScale(2, RoundingMode.HALF_UP);
+            suma = suma.add(valor);
+            filas.add(new Object[] {i + 1, producto, nombre.get(0), r.cantidad(), r.valorUnitario(), valor});
+        }
+        if (suma.compareTo(monto) != 0) {
+            throw new DatoInvalidoException("mercancia", "Los productos suman " + pesos(suma) + " y la devolución es de "
+                    + pesos(monto) + ": tienen que ser iguales.");
+        }
+        return filas;
+    }
+
     private Map<String, Object> egresoPorId(String negocio, UUID id) {
-        Map<String, Object> e = egreso(jdbc.queryForMap("""
-                SELECT e.id, e.numero, e.monto, e.medio, e.motivo, e.referencia, e.pagado_por, u.nombre, e.ocurrido_en,
-                       e.cliente_documento
-                  FROM egresos_de_cartera e LEFT JOIN users u ON u.tenant_id = e.tenant_id AND u.id = e.pagado_por
-                 WHERE e.tenant_id = ? AND e.id = ?""", negocio, id));
+        Map<String, Object> e = egresos(negocio, jdbc.queryForList(COLUMNAS_DEL_EGRESO + " WHERE e.tenant_id = ? AND e.id = ?", negocio, id)).get(0);
         e.put("saldoAFavorQueda", saldoAFavor(negocio, (String) jdbc.queryForObject(
                 "SELECT cliente_documento FROM egresos_de_cartera WHERE tenant_id = ? AND id = ?", String.class, negocio, id)));
         return e;

@@ -3,6 +3,7 @@ package com.suresell.orders.cartera;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -100,6 +101,7 @@ class SaldoAFavorTest {
         for (String t : new String[] {T, OTRO}) {
             ProcesoDeInsolvenciaTest.limpiarInsolvencia(dueno, t);
             dueno.update("DELETE FROM cartera_aplicaciones WHERE tenant_id = ?", t);
+            dueno.update("DELETE FROM egresos_de_cartera_mercancia WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM egresos_de_cartera WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM contadores_de_egresos WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM ventas_a_insolvente_resoluciones WHERE tenant_id = ?", t);
@@ -579,5 +581,142 @@ class SaldoAFavorTest {
                 .andExpect(jsonPath("$.saldoAFavorAplicado").doesNotExist())
                 .andExpect(jsonPath("$.saldoAFavorRestante").doesNotExist());
         assertThat(estadoDeCuenta(TIENDA).get("saldoAFavor").decimalValue()).isEqualByComparingTo("20000");
+    }
+
+    // ---------------------------------------------------------------- F4.13 (d): a quién y cómo
+
+    private static String mercancia(int monto, String clave, String renglones) {
+        return "{\"monto\":" + monto + ",\"motivo\":\"CLIENTE_LO_PIDIO\",\"forma\":\"MERCANCIA\",\"idempotencyKey\":\"" + clave + "\","
+                + "\"mercancia\":[" + renglones + "]}";
+    }
+
+    private void etapaDeLaTienda(String etapa) throws Exception {
+        mockMvc.perform(post("/api/cartera/clientes/" + TIENDA + "/insolvencia/etapas").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"etapa\":\"" + etapa + "\",\"fecha\":\"" + hoy + "\",\"documento\":\"Auto\",\"informadoPor\":\"abogado\"}"))
+                .andExpect(status().isCreated());
+    }
+
+    @Test
+    @DisplayName("🔴 F4.13 (d): devolver en mercancía (producto inactivo y sin precio) deja su documento, no toca ninguna venta y el cierre de caja no la cuenta")
+    void devolverEnMercancia() throws Exception {
+        dueno.update("INSERT INTO menu_products (id_product, tenant_id, name_product, price, active) VALUES (?, ?, 'Aceite viejo', 0, false)",
+                "aceite-viejo-" + T, T);
+        abonarConSaldoAFavor("m-abono");
+        BigDecimal efectivoAntes = preview().get("totalExpectedCash").decimalValue();
+
+        JsonNode egreso = leer(devolver(ADMIN, "admin", TIENDA, mercancia(15000, "m-devolucion",
+                        "{\"productoId\":\"aceite-viejo-" + T + "\",\"cantidad\":3,\"valorUnitario\":5000}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.forma").value("MERCANCIA"))
+                .andExpect(jsonPath("$.medio").value("MERCANCIA"))
+                .andExpect(jsonPath("$.beneficiario").value("DEUDOR"))
+                .andExpect(jsonPath("$.mercancia[0].productoNombre").value("Aceite viejo"))
+                .andExpect(jsonPath("$.mercancia[0].valor").value(15000))
+                .andExpect(jsonPath("$.saldoAFavorQueda").value(5000)));
+        String fecha = hoy.format(java.time.format.DateTimeFormatter.ofPattern("d 'de' MMMM 'de' yyyy", java.util.Locale.forLanguageTag("es-CO")));
+        assertThat(egreso.get("documentoDeSatisfaccion").asText()).isEqualTo(fecha
+                + " · Entrega de mercancía como pago del saldo a favor, comprobante de egreso N.º 1, al cliente Tienda (" + TIENDA
+                + "): 3 × Aceite viejo a $5.000 = $15.000. Total $15.000. No es una venta ni se descuenta de una venta. "
+                + "El descuento de inventario se registra aparte.");
+        JsonNode estado = estadoDeCuenta(TIENDA);
+        assertThat(estado.get("egresos").get(0).get("mercancia")).hasSize(1);
+        assertThat(estado.get("egresos").get(0).get("documentoDeSatisfaccion").asText()).startsWith(fecha);
+
+        // Documental: ni orden, ni venta, ni intención de inventario; el cierre sigue contando solo efectivo.
+        assertThat(contar("SELECT count(*) FROM orders WHERE tenant_id = ?", T)).isZero();
+        assertThat(contar("SELECT count(*) FROM inventario_intenciones WHERE tenant_id = ?", T)).isZero();
+        JsonNode cierre = preview();
+        assertThat(cierre.get("devolucionesSaldoAFavorEfectivo").decimalValue()).isZero();
+        assertThat(cierre.get("totalExpectedCash").decimalValue()).isEqualByComparingTo(efectivoAntes);
+        assertThat(libro(TIENDA)).isEqualByComparingTo("-5000");
+    }
+
+    @Test
+    @DisplayName("🔴 F4.13 (d): la mercancía se valida: suma igual al monto, producto del negocio, cantidad y valor mayores que 0; dinero sin productos")
+    void mercanciaValidada() throws Exception {
+        dueno.update("INSERT INTO menu_products (id_product, tenant_id, name_product, price, active) VALUES (?, ?, 'Del otro', 1000, true)",
+                "del-otro-" + T, OTRO);
+        abonarConSaldoAFavor("mv-abono");
+        devolver(ADMIN, "admin", TIENDA, mercancia(15000, "mv-1", "{\"productoId\":\"" + PRODUCTO + "\",\"cantidad\":1,\"valorUnitario\":5000}"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("mercancia"))
+                .andExpect(jsonPath("$.message").value("Los productos suman $5.000 y la devolución es de $15.000: tienen que ser iguales."));
+        devolver(ADMIN, "admin", TIENDA, mercancia(1000, "mv-2", "{\"productoId\":\"del-otro-" + T + "\",\"cantidad\":1,\"valorUnitario\":1000}"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("mercancia[0].productoId"));
+        devolver(ADMIN, "admin", TIENDA, mercancia(1000, "mv-3", "{\"productoId\":\"" + PRODUCTO + "\",\"cantidad\":0,\"valorUnitario\":1000}"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("mercancia[0].cantidad"));
+        devolver(ADMIN, "admin", TIENDA, mercancia(1000, "mv-4", ""))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("mercancia"));
+        devolver(ADMIN, "admin", TIENDA, devolucion(1000, "CLIENTE_LO_PIDIO", null, "mv-5").replace("}", ",\"forma\":\"TRUEQUE\"}"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("forma"))
+                .andExpect(jsonPath("$.message").value("La forma de la devolución es dinero o mercancía."));
+        devolver(ADMIN, "admin", TIENDA, devolucion(1000, "CLIENTE_LO_PIDIO", null, "mv-6")
+                        .replace("}", ",\"mercancia\":[{\"productoId\":\"" + PRODUCTO + "\",\"cantidad\":1,\"valorUnitario\":1000}]}"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("mercancia"));
+        assertThat(contar("SELECT count(*) FROM egresos_de_cartera WHERE tenant_id = ?", T)).isZero();
+    }
+
+    @Test
+    @DisplayName("🔴 F4.13 (d): en liquidación solo el liquidador recibe (409 al cliente), con nombre y documento; y el liquidador solo en liquidación")
+    void enLiquidacionAlLiquidador() throws Exception {
+        abonarConSaldoAFavor("liq-abono");
+        String liquidador = ",\"beneficiario\":\"LIQUIDADOR\",\"beneficiarioNombre\":\"Liquidadora S.A.S.\",\"beneficiarioDocumento\":\"900123456\"}";
+        devolver(ADMIN, "admin", TIENDA, devolucion(5000, "CLIENTE_LO_PIDIO", null, "liq-antes").replace("}", liquidador))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("beneficiario"));
+        etapaDeLaTienda("INICIO");
+        etapaDeLaTienda("LIQUIDACION");
+        devolver(ADMIN, "admin", TIENDA, devolucion(5000, "DEVUELTO_AL_PROCESO", "Oficio 9", "liq-cliente"))
+                .andExpect(ConflictoConMensaje.de("BENEFICIARIO_DEBE_SER_EL_LIQUIDADOR"))
+                .andExpect(jsonPath("$.message").value("En liquidación el saldo a favor se entrega al liquidador, no al cliente. No se registró nada."));
+        devolver(ADMIN, "admin", TIENDA, devolucion(5000, "DEVUELTO_AL_PROCESO", "Oficio 9", "liq-sin-doc")
+                        .replace("}", ",\"beneficiario\":\"LIQUIDADOR\",\"beneficiarioNombre\":\"Liquidadora\"}"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("beneficiarioDocumento"));
+        devolver(ADMIN, "admin", TIENDA, devolucion(5000, "DEVUELTO_AL_PROCESO", "Oficio 9", "liq-ok").replace("}", liquidador))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.beneficiario").value("LIQUIDADOR"))
+                .andExpect(jsonPath("$.beneficiarioNombre").value("Liquidadora S.A.S."))
+                .andExpect(jsonPath("$.beneficiarioDocumento").value("900123456"))
+                .andExpect(jsonPath("$.documentoDeSatisfaccion").isEmpty());
+        assertThat(contar("SELECT count(*) FROM egresos_de_cartera WHERE tenant_id = ?", T)).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("🔴 F4.13 (d): una venta descontada con el saldo a favor, disfrazada, no pasa por ninguna vía en proceso; fuera de proceso la regla normal sí aplica")
+    void ventaDescontadaDisfrazada() throws Exception {
+        abonarConSaldoAFavor("dis-abono");
+        etapaDeLaTienda("INICIO");
+        mockMvc.perform(put("/api/cartera/clientes/" + TIENDA + "/insolvencia/credito-posterior").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"habilitado\":true,\"motivo\":\"Acuerdo\"}"))
+                .andExpect(status().isOk());
+        // Vía 1: la venta a crédito habilitada no se lleva el saldo a favor.
+        vender(ventaACredito(TIENDA, "dis-venta", false)).andExpect(status().isCreated())
+                .andExpect(jsonPath("$.saldoAFavorAplicado").value(0)).andExpect(jsonPath("$.ventaPosteriorAlInicio").value(true));
+        String debitoDeLaVenta = dueno.queryForObject("SELECT d.id FROM debt_transactions d JOIN orders o ON o.uuid_id = d.order_uuid "
+                + "WHERE o.tenant_id = ? AND o.idempotency_key = 'dis-venta' AND d.type = 'DEBIT'", String.class, T);
+        // Vía 2: una aplicación de devolución escrita directo contra la venta, como app_user: la base la rechaza.
+        String recibo = dueno.queryForObject("SELECT recibo_id::text FROM v_saldo_a_favor_por_recibo WHERE tenant_id = ? LIMIT 1", String.class, T);
+        String credito = dueno.queryForObject("SELECT id FROM debt_transactions WHERE recibo_id = ?::uuid", String.class, recibo);
+        JdbcTemplate app = new JdbcTemplate(new DriverManagerDataSource(PG.getJdbcUrl(), "app_user", "app_pw"));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> app.execute((org.springframework.jdbc.core.ConnectionCallback<Object>) c -> {
+            c.setAutoCommit(false);
+            try (var st = c.createStatement()) {
+                st.execute("SELECT set_config('app.tenant_id', '" + T + "', true)");
+                st.execute("INSERT INTO cartera_aplicaciones (tenant_id, recibo_id, credito_tx_id, debito_tx_id, monto, regla, usuario_id) VALUES ('"
+                        + T + "', '" + recibo + "', '" + credito + "', '" + debitoDeLaVenta + "', 1000, 'DEVOLUCION_DE_SALDO_A_FAVOR', " + admin + ")");
+            } finally {
+                c.rollback();
+            }
+            return null;
+        })).rootCause().hasMessageContaining("no una venta");
+        // Vía 3: devolver en mercancía y vender: la venta sigue debiendo entera.
+        devolver(ADMIN, "admin", TIENDA, mercancia(20000, "dis-mercancia", "{\"productoId\":\"" + PRODUCTO + "\",\"cantidad\":1,\"valorUnitario\":20000}"))
+                .andExpect(status().isCreated());
+        assertThat(saldoDeLaVenta("dis-venta")).isEqualByComparingTo("50000");
+        assertThat(contar("SELECT count(*) FROM cartera_aplicaciones WHERE tenant_id = ? AND debito_tx_id = ?", T, debitoDeLaVenta)).isZero();
+
+        // Control positivo, fuera de proceso: la Vecina con saldo a favor compra a crédito y la regla normal lo aplica.
+        abonar(abono(VECINA, 10000, "dis-vecina-abono", "SALDO_A_FAVOR")).andExpect(status().isCreated());
+        vender(ventaACredito(VECINA, "dis-vecina-venta", false)).andExpect(status().isCreated())
+                .andExpect(jsonPath("$.saldoAFavorAplicado").value(10000));
     }
 }
