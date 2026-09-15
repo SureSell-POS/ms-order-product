@@ -219,6 +219,15 @@ public class Order implements org.springframework.data.domain.Persistable<java.u
     @Column(name = "excede_cupo", insertable = false, updatable = false)
     private Boolean excedeCupo;
 
+    /**
+     * V72 (F4.11) — true si esta venta a crédito entró marcada como
+     * VENTA_A_INSOLVENTE_POR_REVISAR (la hizo una caja a un cliente ya en insolvencia).
+     * No es columna: se lee de {@code ventas_a_insolvente} para la respuesta de crear orden.
+     */
+    @Transient
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private Boolean revisionPorInsolvencia;
+
     @Column(name = "total_discrepancia")
     private BigDecimal totalDiscrepancia;
 

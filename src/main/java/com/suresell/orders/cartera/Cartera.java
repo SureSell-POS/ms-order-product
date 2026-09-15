@@ -236,6 +236,13 @@ public class Cartera {
         r.put("clientesConSaldo", totales.get("clientes_con_saldo"));
         r.put("porEdad", porEdad);
         r.put("topDeudores", top);
+        // F4.11: el aviso del tablero. Ventas de caja a clientes en insolvencia sin decisión.
+        r.put("ventasAInsolventePorRevisar", jdbc.queryForObject("""
+                SELECT count(*) FROM ventas_a_insolvente m
+                 WHERE m.tenant_id = ?
+                   AND NOT EXISTS (SELECT 1 FROM ventas_a_insolvente_resoluciones r
+                                    WHERE r.tenant_id = m.tenant_id AND r.venta_a_insolvente_id = m.id)""",
+                Long.class, quien.negocio()));
         return r;
     }
 
@@ -703,6 +710,110 @@ public class Cartera {
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("clienteDocumento", doc);
         r.put("enInsolvenciaDesde", desde == null ? null : desde.toString());
+        return r;
+    }
+
+    // ------------------------------------------------------------ ventas a insolventes (F4.11)
+
+    public static final String POR_REVISAR = "VENTA_A_INSOLVENTE_POR_REVISAR";
+    static final Set<String> DECISIONES_SOBRE_VENTA_A_INSOLVENTE = Set.of("DEJAR_COMO_DEUDA", "COBRAR_DE_CONTADO");
+    private static final String NO_EXISTE_LA_MARCA = "Esa venta por revisar no existe en el negocio.";
+
+    private static final String VENTAS_A_INSOLVENTE = """
+            SELECT m.id, m.order_uuid, o.id_order, m.cliente_documento, c.nombre AS cliente_nombre,
+                   m.en_insolvencia_desde, m.total, m.terminal_id, t.codigo AS terminal_codigo,
+                   m.operado_por, op.nombre AS operado_por_nombre, m.vendedor_id, u.nombre AS vendedor,
+                   m.ocurrido_en, m.registrado_en,
+                   r.decision, r.nota, r.usuario_id AS resuelto_por, ru.nombre AS resuelto_por_nombre, r.resuelto_en
+              FROM ventas_a_insolvente m
+              LEFT JOIN ventas_a_insolvente_resoluciones r ON r.tenant_id = m.tenant_id AND r.venta_a_insolvente_id = m.id
+              LEFT JOIN orders o     ON o.uuid_id = m.order_uuid AND o.tenant_id = m.tenant_id
+              LEFT JOIN clientes c   ON c.tenant_id = m.tenant_id AND c.documento = m.cliente_documento
+              LEFT JOIN terminals t  ON t.tenant_id = m.tenant_id AND t.id = m.terminal_id
+              LEFT JOIN users op     ON op.tenant_id = m.tenant_id AND op.id = m.operado_por
+              LEFT JOIN users u      ON u.tenant_id = m.tenant_id AND u.id = m.vendedor_id
+              LEFT JOIN users ru     ON ru.tenant_id = r.tenant_id AND ru.id = r.usuario_id
+             WHERE m.tenant_id = ?""";
+
+    /**
+     * GET /api/cartera/ventas-a-insolvente (admin, F4.11): las ventas a crédito que una caja
+     * le hizo a un cliente ya en insolvencia. Entraron con su deuda (V72); cada una espera la
+     * decisión del admin. {@code pendientes} true (por defecto) = solo las que no tienen
+     * resolución; false = todas. La más reciente primero, máximo 200.
+     */
+    public List<Map<String, Object>> ventasAInsolvente(Quien quien, Boolean pendientes) {
+        String filtro = Boolean.FALSE.equals(pendientes) ? "" : " AND r.id IS NULL";
+        return jdbc.queryForList(VENTAS_A_INSOLVENTE + filtro + " ORDER BY m.registrado_en DESC, m.id LIMIT 200",
+                quien.negocio()).stream().map(Cartera::ventaAInsolvente).toList();
+    }
+
+    /**
+     * POST /api/cartera/ventas-a-insolvente/{id}/resolucion (admin, F4.11). Anexa la
+     * decisión sobre la marca, que no cambia: DEJAR_COMO_DEUDA o COBRAR_DE_CONTADO. No
+     * mueve la deuda (el cobro de contado es un recibo como cualquier otro; anular la venta
+     * espera a D7). Una sola resolución por marca: la segunda es 409 VENTA_YA_RESUELTA.
+     */
+    @Transactional
+    public Map<String, Object> resolverVentaAInsolvente(Quien quien, UUID marca, String decision, String nota) {
+        String laDecision = decision == null ? null : decision.trim().toUpperCase(Locale.ROOT);
+        if (laDecision == null || !DECISIONES_SOBRE_VENTA_A_INSOLVENTE.contains(laDecision)) {
+            throw new DatoInvalidoException("decision", "La decisión es una de: DEJAR_COMO_DEUDA, COBRAR_DE_CONTADO.");
+        }
+        String laNota = recortarONulo(nota);
+        if (laNota != null && laNota.length() > 500) {
+            throw new DatoInvalidoException("nota", "La nota tiene máximo 500 caracteres.");
+        }
+        if (quien.usuarioId() == null) {
+            throw new DatoInvalidoException("usuario", "La sesión no tiene un usuario: la decisión necesita autor.");
+        }
+        if (marca == null) {
+            throw new DatoInvalidoException("id", NO_EXISTE_LA_MARCA);
+        }
+        String negocio = quien.negocio();
+        jdbc.query("SELECT pg_advisory_xact_lock(hashtext(?))", rs -> null, "venta-a-insolvente:" + negocio + ":" + marca);
+        List<Map<String, Object>> filas = jdbc.queryForList(VENTAS_A_INSOLVENTE + " AND m.id = ?", negocio, marca);
+        if (filas.isEmpty()) {
+            throw new DatoInvalidoException("id", NO_EXISTE_LA_MARCA);
+        }
+        if (filas.get(0).get("decision") != null) {
+            throw new ConflictoDeCarteraException(ConflictoDeCarteraException.VENTA_YA_RESUELTA,
+                    "Esa venta ya se resolvió como " + filas.get(0).get("decision") + ".");
+        }
+        jdbc.update("""
+                INSERT INTO ventas_a_insolvente_resoluciones (tenant_id, venta_a_insolvente_id, decision, nota, usuario_id)
+                VALUES (?, ?, ?, ?, ?)""", negocio, marca, laDecision, laNota, quien.usuarioId());
+        return ventaAInsolvente(jdbc.queryForList(VENTAS_A_INSOLVENTE + " AND m.id = ?", negocio, marca).get(0));
+    }
+
+    private static Map<String, Object> ventaAInsolvente(Map<String, Object> f) {
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("id", f.get("id"));
+        r.put("tipo", POR_REVISAR);
+        r.put("orderUuid", f.get("order_uuid"));
+        r.put("idOrder", f.get("id_order"));
+        r.put("clienteDocumento", f.get("cliente_documento"));
+        r.put("clienteNombre", f.get("cliente_nombre"));
+        r.put("enInsolvenciaDesde", fecha(f.get("en_insolvencia_desde")));
+        r.put("total", f.get("total"));
+        r.put("terminalId", f.get("terminal_id"));
+        r.put("terminalCodigo", f.get("terminal_codigo"));
+        r.put("operadoPorId", f.get("operado_por"));
+        r.put("operadoPor", f.get("operado_por_nombre"));
+        r.put("vendedorId", f.get("vendedor_id"));
+        r.put("vendedor", f.get("vendedor"));
+        r.put("ocurridoEn", instante(f.get("ocurrido_en")));
+        r.put("registradoEn", instante(f.get("registrado_en")));
+        if (f.get("decision") == null) {
+            r.put("resolucion", null);
+        } else {
+            Map<String, Object> res = new LinkedHashMap<>();
+            res.put("decision", f.get("decision"));
+            res.put("nota", f.get("nota"));
+            res.put("usuarioId", f.get("resuelto_por"));
+            res.put("usuario", f.get("resuelto_por_nombre"));
+            res.put("resueltoEn", instante(f.get("resuelto_en")));
+            r.put("resolucion", res);
+        }
         return r;
     }
 
