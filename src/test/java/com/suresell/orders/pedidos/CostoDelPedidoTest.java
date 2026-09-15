@@ -77,6 +77,8 @@ class CostoDelPedidoTest {
                         + "JOIN pedidos.pedidos_lineas l ON l.tenant_id = e.tenant_id AND l.pedido_id = e.pedido_id "
                         + "WHERE e.tenant_id = '" + t + "' AND e.tipo IN ('CONFIRMADO', 'DESPACHADO')");
             }
+            // Uno de cada diez sigue por despachar, con entrega en la semana: lo que mira la bandeja.
+            s.execute("UPDATE pedidos.pedidos SET estado = 'ENVIADO', fecha_entrega_prometida = current_date + (numero % 7)::int WHERE numero % 10 = 0");
             s.execute("ANALYZE");
             try (ResultSet rs = s.executeQuery("SELECT id FROM pedidos.pedidos WHERE tenant_id = 'perf-a' AND numero = 7777")) {
                 rs.next();
@@ -101,6 +103,21 @@ class CostoDelPedidoTest {
                       FROM pedidos.pedidos_lineas l
                       JOIN pedidos.v_pedidos_lineas v ON v.tenant_id = l.tenant_id AND v.linea_id = l.id
                      WHERE l.tenant_id = 'perf-a' AND l.pedido_id = '%s'""".formatted(unPedido));
+            plan(s, "bandeja: por despachar, por entrega y número, primera página con totales", """
+                    SELECT p.id, p.numero, p.estado, c.nombre, u.nombre, t.lineas, t.total
+                      FROM pedidos.pedidos p
+                      LEFT JOIN clientes c ON c.tenant_id = p.tenant_id AND c.documento = p.cliente_documento
+                      LEFT JOIN users u ON u.tenant_id = p.tenant_id AND u.id = p.vendedor_id
+                      LEFT JOIN LATERAL (SELECT count(*) AS lineas,
+                                                sum(COALESCE(v.confirmada, v.pedida) * COALESCE(v.precio_confirmado, v.precio_visto)) AS total
+                                           FROM pedidos.v_pedidos_lineas v
+                                          WHERE v.tenant_id = p.tenant_id AND v.pedido_id = p.id) t ON true
+                     WHERE p.tenant_id = 'perf-a' AND p.estado = ANY ('{ENVIADO,CONFIRMADO}')
+                     ORDER BY COALESCE(p.fecha_entrega_prometida, 'infinity'::date), p.numero LIMIT 51""");
+            plan(s, "bandeja: todo, por entrega y número, primera página", """
+                    SELECT p.id, p.numero FROM pedidos.pedidos p
+                     WHERE p.tenant_id = 'perf-a'
+                     ORDER BY COALESCE(p.fecha_entrega_prometida, 'infinity'::date), p.numero LIMIT 51""");
             plan(s, "detalle: cantidades de un pedido", """
                     SELECT * FROM pedidos.v_pedidos_lineas WHERE tenant_id = 'perf-a' AND pedido_id = '%s'""".formatted(unPedido));
         }

@@ -46,6 +46,7 @@ class EstadoGuardadoEsDerivadoTest {
     static final int PASOS_MAXIMOS = 8;
     static final Map<String, List<String>> MOTIVOS = Map.of(
             "RETENIDO", List.of("CUPO_EXCEDIDO", "FACTURA_VENCIDA", "MORA"),
+            "LIBERADO", List.of("PAGO_RECIBIDO", "ACUERDO_DE_PAGO", "AUTORIZADO_POR_ADMIN"),
             "RECHAZADO", List.of("SIN_EXISTENCIA", "DUPLICADO"),
             "CANCELADO", List.of("CLIENTE_DESISTIO", "DUPLICADO"),
             "ENTREGA_FALLIDA", List.of("CERRADO", "SIN_DINERO", "DIRECCION_ERRADA", "RECHAZO_EN_PUERTA"),

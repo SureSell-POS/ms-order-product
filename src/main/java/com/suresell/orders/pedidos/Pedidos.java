@@ -50,16 +50,19 @@ public class Pedidos {
 
     static final ZoneId BOGOTA = ZoneId.of("America/Bogota");
     public static final Set<String> ORIGENES = Set.of("vendedor", "televenta", "mostrador");
+    /** Todos los orígenes del enum de V2: la bandeja filtra también los del canal cuando la red los abra. */
+    public static final List<String> ORIGENES_DEL_ENUM = List.of("vendedor", "televenta", "canal_app", "enlace", "mostrador");
     public static final Set<String> MODALIDADES = Set.of("PREVENTA", "AUTOVENTA");
     public static final List<String> ESTADOS = List.of("CREADO_BORRADOR", "ENVIADO", "CONFIRMADO", "AJUSTADO", "RETENIDO",
             "LIBERADO", "RECHAZADO", "CANCELADO", "DESPACHADO", "ENTREGADO", "ENTREGADO_CON_NOVEDAD", "ENTREGA_FALLIDA",
             "RECIBIDO", "RECIBIDO_CON_NOVEDAD");
-    /** Motivos por evento: el CHECK de V2 admite los 18 en cualquiera; la API acota a los que tienen sentido. */
+    /** Motivos por evento: los mismos que impone `ck_pedidos_eventos_motivo_por_tipo` (V2 de pedidos). */
     public static final Set<String> MOTIVOS_DE_AJUSTE = Set.of("SIN_EXISTENCIA", "PRODUCTO_DESCONTINUADO", "ERROR_DE_PRECIO", "DUPLICADO");
     public static final Set<String> MOTIVOS_DE_RECHAZO = Set.of("SIN_EXISTENCIA", "PRODUCTO_DESCONTINUADO", "DUPLICADO",
             "CUPO_EXCEDIDO", "FACTURA_VENCIDA", "MORA", "FUERA_DE_VENTANA");
     public static final Set<String> MOTIVOS_DE_CANCELACION = Set.of("CLIENTE_DESISTIO", "DUPLICADO", "SIN_EXISTENCIA", "FUERA_DE_VENTANA");
     public static final Set<String> MOTIVOS_DE_RETENCION = Set.of("CUPO_EXCEDIDO", "FACTURA_VENCIDA", "MORA");
+    public static final Set<String> MOTIVOS_DE_LIBERACION = Set.of("PAGO_RECIBIDO", "ACUERDO_DE_PAGO", "AUTORIZADO_POR_ADMIN");
     /** Lo despachado ya es venta (F5.5): cancelarlo sin la reversa dejaría el inventario descontado (D7). */
     static final Set<String> YA_DESPACHADO = Set.of("DESPACHADO", "ENTREGADO", "ENTREGADO_CON_NOVEDAD");
     static final Set<String> CONFIRMAN = Set.of("admin", "cajero");
@@ -88,9 +91,10 @@ public class Pedidos {
 
     public record LineaNueva(String productoId, Integer cantidad) {}
 
+    /** {@code confirmar}: solo cuenta para admin y cajero; ausente = true. */
     public record PedidoNuevo(String clienteDocumento, String origen, String modalidad, Long vendedorId, Long siteId,
-                              LocalDate fechaEntregaPrometida, List<LineaNueva> lineas, OffsetDateTime ocurridoEn,
-                              String idempotencyKey) {}
+                              LocalDate entregaEl, List<LineaNueva> lineas, OffsetDateTime ocurridoEn,
+                              String idempotencyKey, Boolean confirmar) {}
 
     public record LineaDeEvento(UUID lineaId, Integer cantidad, BigDecimal precio) {}
 
@@ -105,7 +109,8 @@ public class Pedidos {
 
     /**
      * POST /api/pedidos. Nace ENVIADO; si quien lo toma puede confirmar (admin o cajero),
-     * se confirma en la misma transacción. Idempotente por clave: el reintento con los
+     * se confirma en la misma transacción, salvo que pida {@code confirmar=false} (la
+     * televenta que revisa existencias antes). A un vendedor ese campo no le cambia nada. Idempotente por clave: el reintento con los
      * mismos datos devuelve el mismo pedido; con otros, 409.
      */
     @Transactional
@@ -139,6 +144,9 @@ public class Pedidos {
             vendedor = quien.usuarioId();
         }
         OffsetDateTime ocurrido = cuerpo.ocurridoEn() == null ? OffsetDateTime.now(BOGOTA) : cuerpo.ocurridoEn();
+        if (cuerpo.entregaEl() != null && cuerpo.entregaEl().isBefore(ocurrido.atZoneSameInstant(BOGOTA).toLocalDate())) {
+            throw new DatoInvalidoException("entregaEl", "La entrega no puede ser antes del día en que se toma el pedido.");
+        }
 
         Map<String, Object> existente = pedidoPorClave(quien.negocio(), clave);
         if (existente != null) {
@@ -171,9 +179,9 @@ public class Pedidos {
         UUID id = traducir(() -> jdbc.queryForObject(
                 "SELECT pedidos.fn_pedido_crear('ENVIADO', ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?)", UUID.class,
                 documento, origen, modalidad, vendedorFinal, cuerpo.siteId(),
-                cuerpo.fechaEntregaPrometida() == null ? null : java.sql.Date.valueOf(cuerpo.fechaEntregaPrometida()),
+                cuerpo.entregaEl() == null ? null : java.sql.Date.valueOf(cuerpo.entregaEl()),
                 aJson(paraLaFuncion), Timestamp.from(ocurrido.toInstant()), clave));
-        if (CONFIRMAN.contains(quien.rol())) {
+        if (CONFIRMAN.contains(quien.rol()) && !Boolean.FALSE.equals(cuerpo.confirmar())) {
             transicionar(quien, id, "CONFIRMADO", null, null, null, ocurrido, clave + ":confirmado");
         }
         return new Resultado(detalleVisible(quien, id), false);
@@ -259,24 +267,10 @@ public class Pedidos {
         return conMotivo(quien, id, cuerpo, "RETENIDO", MOTIVOS_DE_RETENCION, "retener un pedido");
     }
 
-    /**
-     * POST /api/pedidos/{id}/liberar. D9 pide liberar «con motivo», pero ninguno de los
-     * 18 motivos de V2 describe una liberación: el motivo va escrito en {@code nota}, y es obligatorio.
-     */
+    /** POST /api/pedidos/{id}/liberar: con motivo de liberación (D9); la nota es opcional. */
     @Transactional
     public Map<String, Object> liberar(Quien quien, UUID id, Accion cuerpo) {
-        exigirRol(quien, Set.of("admin"), "liberar un pedido");
-        exigirUsuario(quien);
-        Accion a = requerida(cuerpo);
-        String clave = obligatorio(a.idempotencyKey(), "idempotencyKey", "Falta la clave de idempotencia.");
-        String nota = obligatorio(a.nota(), "nota", "Di por qué se libera el pedido.");
-        if (a.motivo() != null && !a.motivo().isBlank()) {
-            throw new DatoInvalidoException("motivo", "Liberar no lleva motivo del catálogo: escríbelo en «nota».");
-        }
-        cabeceraVisible(quien, id);
-        OffsetDateTime ocurrido = a.ocurridoEn() == null ? OffsetDateTime.now(BOGOTA) : a.ocurridoEn();
-        transicionar(quien, id, "LIBERADO", null, nota, null, ocurrido, clave);
-        return detalleVisible(quien, id);
+        return conMotivo(quien, id, cuerpo, "LIBERADO", MOTIVOS_DE_LIBERACION, "liberar un pedido");
     }
 
     private Map<String, Object> conMotivo(Quien quien, UUID id, Accion cuerpo, String tipo, Set<String> motivos, String queCosa) {
@@ -316,17 +310,19 @@ public class Pedidos {
     // ------------------------------------------------------------------ lectura
 
     /**
-     * GET /api/pedidos: la bandeja «Pedidos recibidos», de todos los orígenes, lo más
-     * reciente primero. {@code fecha} es el día (Bogotá) de la captura. Paginada por
-     * número: {@code antesDe} = el {@code siguienteAntesDe} de la página anterior.
+     * GET /api/pedidos: la bandeja «Pedidos recibidos», de todos los orígenes, en el orden
+     * de quien prepara el despacho: entrega prometida más cercana primero (sin fecha, al
+     * final) y, a igual día, por número. {@code fecha} es el día (Bogotá) de la captura y
+     * {@code entregaEl} el de la entrega prometida. Paginada por cursor: {@code despuesDe}
+     * = el {@code siguiente} de la página anterior.
      */
-    public Map<String, Object> bandeja(Quien quien, String estado, Long vendedorId, LocalDate fecha, String clienteDocumento,
-                                       Integer limite, Long antesDe) {
+    public Map<String, Object> bandeja(Quien quien, String estado, String origen, Long vendedorId, LocalDate fecha,
+                                       LocalDate entregaEl, String clienteDocumento, Integer limite, String despuesDe) {
         exigirRol(quien, Set.of("admin", "cajero", "vendedor"), "ver los pedidos");
         StringBuilder sql = new StringBuilder("""
                 SELECT p.id, p.numero, p.estado, p.origen, p.modalidad, p.cliente_documento, c.nombre AS cliente,
                        p.vendedor_id, u.nombre AS vendedor, p.fecha_entrega_prometida, p.ocurrido_en, p.plazo_dias,
-                       p.condicion_pago, t.lineas, t.total
+                       p.condicion_pago, t.lineas, t.total, COALESCE(p.fecha_entrega_prometida, 'infinity'::date)::text AS entrega_orden
                   FROM pedidos.pedidos p
                   LEFT JOIN clientes c ON c.tenant_id = p.tenant_id AND c.documento = p.cliente_documento
                   LEFT JOIN users u ON u.tenant_id = p.tenant_id AND u.id = p.vendedor_id
@@ -356,24 +352,51 @@ public class Pedidos {
             sql.append(" AND p.estado = ANY (?)");
             args.add(estados.toArray(new String[0]));
         }
+        if (origen != null && !origen.isBlank()) {
+            List<String> origenes = new ArrayList<>();
+            for (String o : origen.split(",")) {
+                String x = o.trim().toLowerCase(Locale.ROOT);
+                if (!ORIGENES_DEL_ENUM.contains(x)) {
+                    throw new DatoInvalidoException("origen", "El origen es uno o varios (separados por coma) de: " + String.join(", ", ORIGENES_DEL_ENUM) + ".");
+                }
+                origenes.add(x);
+            }
+            sql.append(" AND p.origen = ANY (?)");
+            args.add(origenes.toArray(new String[0]));
+        }
         if (fecha != null) {
             sql.append(" AND p.ocurrido_en >= ? AND p.ocurrido_en < ?");
             args.add(Timestamp.from(fecha.atStartOfDay(BOGOTA).toInstant()));
             args.add(Timestamp.from(fecha.plusDays(1).atStartOfDay(BOGOTA).toInstant()));
         }
+        if (entregaEl != null) {
+            sql.append(" AND p.fecha_entrega_prometida = ?");
+            args.add(java.sql.Date.valueOf(entregaEl));
+        }
         if (clienteDocumento != null && !clienteDocumento.isBlank()) {
             sql.append(" AND p.cliente_documento = ?");
             args.add(clienteDocumento.trim());
         }
-        if (antesDe != null) {
-            sql.append(" AND p.numero < ?");
-            args.add(antesDe);
+        if (despuesDe != null && !despuesDe.isBlank()) {
+            String[] partes = despuesDe.trim().split("_", 2);
+            long numero;
+            try {
+                if (partes.length != 2 || !(partes[0].equals("infinity") || partes[0].matches("\\d{4}-\\d{2}-\\d{2}"))) {
+                    throw new NumberFormatException();
+                }
+                numero = Long.parseLong(partes[1]);
+            } catch (NumberFormatException e) {
+                throw new DatoInvalidoException("despuesDe", "El cursor no es válido: usa el «siguiente» de la página anterior.");
+            }
+            sql.append(" AND (COALESCE(p.fecha_entrega_prometida, 'infinity'::date), p.numero) > (?::date, ?)");
+            args.add(partes[0]);
+            args.add(numero);
         }
         int n = limite == null ? LIMITE_DE_BANDEJA : limite;
         if (n < 1 || n > LIMITE_MAXIMO_DE_BANDEJA) {
             throw new DatoInvalidoException("limite", "El límite va de 1 a " + LIMITE_MAXIMO_DE_BANDEJA + ".");
         }
-        sql.append(" ORDER BY p.numero DESC LIMIT ?");
+        sql.append(" ORDER BY COALESCE(p.fecha_entrega_prometida, 'infinity'::date), p.numero LIMIT ?");
         args.add(n + 1);
         List<Map<String, Object>> filas = jdbc.queryForList(sql.toString(), args.toArray());
         boolean hayMas = filas.size() > n;
@@ -389,17 +412,19 @@ public class Pedidos {
             r.put("cliente", f.get("cliente"));
             r.put("vendedorId", f.get("vendedor_id"));
             r.put("vendedor", f.get("vendedor"));
-            r.put("fechaEntregaPrometida", fecha(f.get("fecha_entrega_prometida")));
+            r.put("entregaEl", fecha(f.get("fecha_entrega_prometida")));
             r.put("ocurridoEn", momento(f.get("ocurrido_en")));
             r.put("plazoDias", f.get("plazo_dias"));
             r.put("condicionPago", f.get("condicion_pago"));
             r.put("lineas", f.get("lineas"));
             r.put("total", f.get("total"));
+            r.put("cursor", f.get("entrega_orden") + "_" + f.get("numero"));
             pedidos.add(r);
         }
         Map<String, Object> salida = new LinkedHashMap<>();
         salida.put("pedidos", pedidos);
-        salida.put("siguienteAntesDe", hayMas ? pedidos.get(pedidos.size() - 1).get("numero") : null);
+        salida.put("siguiente", hayMas ? pedidos.get(pedidos.size() - 1).get("cursor") : null);
+        pedidos.forEach(x -> x.remove("cursor"));
         return salida;
     }
 
@@ -425,7 +450,7 @@ public class Pedidos {
         r.put("siteId", p.get("site_id"));
         r.put("plazoDias", p.get("plazo_dias"));
         r.put("condicionPago", p.get("condicion_pago"));
-        r.put("fechaEntregaPrometida", fecha(p.get("fecha_entrega_prometida")));
+        r.put("entregaEl", fecha(p.get("fecha_entrega_prometida")));
         r.put("listaPrecioId", p.get("lista_precio_id"));
         r.put("precioCongeladoEn", momento(p.get("precio_congelado_en")));
         r.put("ocurridoEn", momento(p.get("ocurrido_en")));

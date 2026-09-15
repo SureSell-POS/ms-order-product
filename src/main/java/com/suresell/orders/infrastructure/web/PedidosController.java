@@ -39,7 +39,7 @@ public class PedidosController {
     }
 
     @PostMapping
-    @Operation(summary = "F5.3 — Tomar un pedido. Nace ENVIADO; si lo toma un admin o cajero, CONFIRMADO. "
+    @Operation(summary = "F5.3 — Tomar un pedido. Nace ENVIADO; si lo toma un admin o cajero, CONFIRMADO salvo confirmar=false. "
             + "201 nuevo; 200 si es el reintento de la misma clave")
     public ResponseEntity<Map<String, Object>> crear(@RequestBody Pedidos.PedidoNuevo cuerpo, HttpServletRequest http) {
         Pedidos.Resultado r = pedidos.crear(quien(http), cuerpo);
@@ -47,15 +47,17 @@ public class PedidosController {
     }
 
     @GetMapping
-    @Operation(summary = "F5.3 — Bandeja «Pedidos recibidos»: todos los orígenes, lo más reciente primero; un vendedor ve los suyos")
+    @Operation(summary = "F5.3 — Bandeja «Pedidos recibidos»: todos los orígenes, por entrega prometida y número; un vendedor ve los suyos")
     public Map<String, Object> bandeja(@RequestParam(required = false) String estado,
+                                       @RequestParam(required = false) String origen,
                                        @RequestParam(required = false) Long vendedorId,
                                        @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate fecha,
+                                       @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate entregaEl,
                                        @RequestParam(required = false) String clienteDocumento,
                                        @RequestParam(required = false) Integer limite,
-                                       @RequestParam(required = false) Long antesDe,
+                                       @RequestParam(required = false) String despuesDe,
                                        HttpServletRequest http) {
-        return pedidos.bandeja(quien(http), estado, vendedorId, fecha, clienteDocumento, limite, antesDe);
+        return pedidos.bandeja(quien(http), estado, origen, vendedorId, fecha, entregaEl, clienteDocumento, limite, despuesDe);
     }
 
     @GetMapping("/{id}")
@@ -95,7 +97,7 @@ public class PedidosController {
     }
 
     @PostMapping("/{id}/liberar")
-    @Operation(summary = "F5.3 — Liberar un pedido retenido (admin), con el porqué en «nota»")
+    @Operation(summary = "F5.3 — Liberar un pedido retenido (admin), con motivo PAGO_RECIBIDO, ACUERDO_DE_PAGO o AUTORIZADO_POR_ADMIN")
     public Map<String, Object> liberar(@PathVariable UUID id, @RequestBody Accion cuerpo, HttpServletRequest http) {
         return pedidos.liberar(quien(http), id, cuerpo);
     }

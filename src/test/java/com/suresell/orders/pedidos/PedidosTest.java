@@ -284,9 +284,16 @@ class PedidosTest {
                 .andExpect(jsonPath("$.pedidos[0].id").value(deAna.toString()))
                 .andExpect(jsonPath("$.pedidos[0].lineas").value(3))
                 .andExpect(jsonPath("$.pedidos[0].vendedor").value("Ana"));
-        mockMvc.perform(get("/api/pedidos").param("limite", "1").header("Authorization", bearer(ADMIN, "admin")))
+        JsonNode pagina1 = leer(mockMvc.perform(get("/api/pedidos").param("limite", "1").header("Authorization", bearer(ADMIN, "admin")))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.pedidos.length()").value(1))
-                .andExpect(jsonPath("$.siguienteAntesDe").isNumber());
+                .andExpect(jsonPath("$.siguiente").isString()));
+        JsonNode pagina2 = leer(mockMvc.perform(get("/api/pedidos").param("limite", "1").param("despuesDe", pagina1.get("siguiente").asText())
+                        .header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.pedidos.length()").value(1))
+                .andExpect(jsonPath("$.siguiente").doesNotExist()));
+        assertThat(pagina2.get("pedidos").get(0).get("id").asText()).isNotEqualTo(pagina1.get("pedidos").get(0).get("id").asText());
+        mockMvc.perform(get("/api/pedidos").param("despuesDe", "cualquier-cosa").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("despuesDe"));
         mockMvc.perform(get("/api/pedidos").param("estado", "INVENTADO").header("Authorization", bearer(ADMIN, "admin")))
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("estado"));
     }
@@ -299,10 +306,13 @@ class PedidosTest {
                 .andExpect(status().isOk()).andExpect(jsonPath("$.estado").value("RETENIDO"));
         accion(CAJA, "cajero", uno, "confirmar", "{\"idempotencyKey\":\"c-retenido\"}")
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.codigo").value("TRANSICION_NO_PERMITIDA"));
-        accion(ADMIN, "admin", uno, "liberar", "{\"idempotencyKey\":\"l1\"}")
-                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("nota"));
         accion(ADMIN, "admin", uno, "liberar", "{\"nota\":\"Pagó la factura vencida\",\"idempotencyKey\":\"l1\"}")
-                .andExpect(status().isOk()).andExpect(jsonPath("$.estado").value("LIBERADO"));
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("motivo"));
+        accion(ADMIN, "admin", uno, "liberar", "{\"motivo\":\"MORA\",\"idempotencyKey\":\"l1\"}")
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("motivo"));
+        accion(ADMIN, "admin", uno, "liberar", "{\"motivo\":\"PAGO_RECIBIDO\",\"idempotencyKey\":\"l1\"}")
+                .andExpect(status().isOk()).andExpect(jsonPath("$.estado").value("LIBERADO"))
+                .andExpect(jsonPath("$.eventos[2].motivo").value("PAGO_RECIBIDO"));
         accion(CAJA, "cajero", uno, "confirmar", "{\"idempotencyKey\":\"c1\"}")
                 .andExpect(status().isOk()).andExpect(jsonPath("$.estado").value("CONFIRMADO"));
 
@@ -362,6 +372,71 @@ class PedidosTest {
                 .andExpect(jsonPath("$.lineas[0].precioConfirmado").value(800.0));
         accion(CAJA, "cajero", id, "confirmar", "{\"lineas\":[{\"lineaId\":\"" + UUID.randomUUID() + "\",\"cantidad\":1}],\"idempotencyKey\":\"p-ajena\"}")
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("lineas"));
+    }
+
+    @Test
+    @DisplayName("🔴 F5.3: la bandeja va por entrega prometida (sin fecha al final) y número; entregaEl filtra y no es anterior a la captura")
+    void porEntrega() throws Exception {
+        java.time.LocalDate hoy = java.time.LocalDate.now(ZoneId.of("America/Bogota"));
+        String base = "{\"clienteDocumento\":\"" + TIENDA + "\",\"origen\":\"televenta\",\"lineas\":" + lineas(1, 1) + ",%s\"idempotencyKey\":\"%s\"}";
+        String sinFecha = leer(crearCon(String.format(base, "", "e-sin")).andExpect(status().isCreated())).get("id").asText();
+        String manana = leer(crearCon(String.format(base, "\"entregaEl\":\"" + hoy.plusDays(1) + "\",", "e-manana")).andExpect(status().isCreated())
+                .andExpect(jsonPath("$.entregaEl").value(hoy.plusDays(1).toString()))).get("id").asText();
+        String hoyId = leer(crearCon(String.format(base, "\"entregaEl\":\"" + hoy + "\",", "e-hoy")).andExpect(status().isCreated())).get("id").asText();
+        String manana2 = leer(crearCon(String.format(base, "\"entregaEl\":\"" + hoy.plusDays(1) + "\",", "e-manana-2")).andExpect(status().isCreated())).get("id").asText();
+        crearCon(String.format(base, "\"entregaEl\":\"" + hoy.minusDays(1) + "\",", "e-ayer"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("entregaEl"));
+
+        JsonNode bandeja = leer(mockMvc.perform(get("/api/pedidos").header("Authorization", bearer(ADMIN, "admin"))).andExpect(status().isOk()));
+        List<String> orden = new ArrayList<>();
+        bandeja.get("pedidos").forEach(p -> orden.add(p.get("id").asText()));
+        assertThat(orden).containsExactly(hoyId, manana, manana2, sinFecha);
+
+        // Por páginas de uno, el cursor recorre el mismo orden sin repetir ni saltar.
+        List<String> recorrido = new ArrayList<>();
+        String cursor = null;
+        do {
+            var peticion = get("/api/pedidos").param("limite", "1").header("Authorization", bearer(ADMIN, "admin"));
+            if (cursor != null) {
+                peticion.param("despuesDe", cursor);
+            }
+            JsonNode pagina = leer(mockMvc.perform(peticion).andExpect(status().isOk()));
+            pagina.get("pedidos").forEach(p -> recorrido.add(p.get("id").asText()));
+            cursor = pagina.get("siguiente").isNull() ? null : pagina.get("siguiente").asText();
+        } while (cursor != null);
+        assertThat(recorrido).containsExactly(hoyId, manana, manana2, sinFecha);
+
+        mockMvc.perform(get("/api/pedidos").param("entregaEl", hoy.plusDays(1).toString()).header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.pedidos.length()").value(2));
+
+        // Por origen: uno o varios, con los valores del enum.
+        leer(tomar(ANA, "vendedor", "e-vendedor", lineas(1, 1), OffsetDateTime.now()).andExpect(status().isCreated()));
+        mockMvc.perform(get("/api/pedidos").param("origen", "televenta").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.pedidos.length()").value(4))
+                .andExpect(jsonPath("$.pedidos[*].origen", org.hamcrest.Matchers.everyItem(org.hamcrest.Matchers.is("televenta"))));
+        mockMvc.perform(get("/api/pedidos").param("origen", "vendedor").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.pedidos.length()").value(1));
+        mockMvc.perform(get("/api/pedidos").param("origen", "vendedor, TELEVENTA,enlace").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.pedidos.length()").value(5));
+        mockMvc.perform(get("/api/pedidos").param("origen", "whatsapp").header("Authorization", bearer(ADMIN, "admin")))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("origen"));
+    }
+
+    @Test
+    @DisplayName("🔴 F5.3: confirmar=false deja en ENVIADO lo que toma un admin o cajero; ausente confirma; a un vendedor no le cambia nada")
+    void confirmarAlTomar() throws Exception {
+        String base = "{\"clienteDocumento\":\"" + TIENDA + "\",\"origen\":\"televenta\",\"lineas\":" + lineas(1, 1) + ",%s\"idempotencyKey\":\"%s\"}";
+        crearCon(String.format(base, "\"confirmar\":false,", "c-admin-no")).andExpect(status().isCreated())
+                .andExpect(jsonPath("$.estado").value("ENVIADO")).andExpect(jsonPath("$.eventos.length()").value(1));
+        mockMvc.perform(post("/api/pedidos").header("Authorization", bearer(CAJA, "cajero")).contentType(MediaType.APPLICATION_JSON)
+                        .content(String.format(base, "\"confirmar\":false,", "c-caja-no")))
+                .andExpect(status().isCreated()).andExpect(jsonPath("$.estado").value("ENVIADO"));
+        mockMvc.perform(post("/api/pedidos").header("Authorization", bearer(CAJA, "cajero")).contentType(MediaType.APPLICATION_JSON)
+                        .content(String.format(base, "", "c-caja-si")))
+                .andExpect(status().isCreated()).andExpect(jsonPath("$.estado").value("CONFIRMADO"));
+        mockMvc.perform(post("/api/pedidos").header("Authorization", bearer(ANA, "vendedor")).contentType(MediaType.APPLICATION_JSON)
+                        .content(String.format(base, "\"confirmar\":true,", "c-ana-si")))
+                .andExpect(status().isCreated()).andExpect(jsonPath("$.estado").value("ENVIADO"));
     }
 
     private ResultActions crearCon(String cuerpo) throws Exception {

@@ -142,11 +142,16 @@ CREATE TABLE pedidos.pedidos (
     CONSTRAINT ck_pedidos_cliente_del_mayorista CHECK (origen NOT IN ('vendedor', 'televenta', 'mostrador') OR cliente_documento IS NOT NULL),
     CONSTRAINT ck_pedidos_quien_captura CHECK (capturado_por IS NOT NULL OR acceso_id IS NOT NULL),
     CONSTRAINT ck_pedidos_reloj CHECK (ocurrido_en <= registrado_en + interval '5 minutes'),
+    -- Se entrega el día de la captura (en Bogotá) o después, nunca antes.
+    CONSTRAINT ck_pedidos_entrega CHECK (fecha_entrega_prometida IS NULL
+        OR fecha_entrega_prometida >= (ocurrido_en AT TIME ZONE 'America/Bogota')::date),
     -- Guarda de F5: la retira la migración de la red cuando se levante C1.
     CONSTRAINT ck_pedidos_sin_canal_en_f5 CHECK (comprador_tenant_id IS NULL AND relacion_id IS NULL
         AND acceso_id IS NULL AND origen NOT IN ('canal_app', 'enlace'))
 );
-CREATE INDEX ix_pedidos_bandeja ON pedidos.pedidos (tenant_id, estado, ocurrido_en DESC);
+-- La bandeja ordena por entrega prometida (sin fecha, al final) y a igual día por número.
+CREATE INDEX ix_pedidos_bandeja ON pedidos.pedidos (tenant_id, estado, (COALESCE(fecha_entrega_prometida, 'infinity'::date)), numero);
+CREATE INDEX ix_pedidos_por_entrega ON pedidos.pedidos (tenant_id, (COALESCE(fecha_entrega_prometida, 'infinity'::date)), numero);
 CREATE INDEX ix_pedidos_cliente ON pedidos.pedidos (tenant_id, cliente_documento) WHERE cliente_documento IS NOT NULL;
 CREATE INDEX ix_pedidos_vendedor ON pedidos.pedidos (tenant_id, vendedor_id) WHERE vendedor_id IS NOT NULL;
 COMMENT ON TABLE pedidos.pedidos IS
@@ -200,9 +205,22 @@ CREATE TABLE pedidos.pedidos_eventos (
     CONSTRAINT ck_pedidos_eventos_motivo CHECK (motivo IS NULL OR motivo IN (
         'CUPO_EXCEDIDO', 'FACTURA_VENCIDA', 'MORA', 'SIN_EXISTENCIA', 'PRODUCTO_DESCONTINUADO', 'ERROR_DE_PRECIO',
         'CLIENTE_DESISTIO', 'DUPLICADO', 'CERRADO', 'SIN_DINERO', 'FUERA_DE_VENTANA', 'DIRECCION_ERRADA', 'RECHAZO_EN_PUERTA',
-        'FALTANTE', 'SOBRANTE', 'AVERIA', 'PRODUCTO_NO_PEDIDO', 'VENCIDO')),
-    CONSTRAINT ck_pedidos_eventos_motivo_obligatorio CHECK ((tipo IN ('RETENIDO', 'RECHAZADO', 'CANCELADO', 'ENTREGA_FALLIDA',
+        'FALTANTE', 'SOBRANTE', 'AVERIA', 'PRODUCTO_NO_PEDIDO', 'VENCIDO',
+        'PAGO_RECIBIDO', 'ACUERDO_DE_PAGO', 'AUTORIZADO_POR_ADMIN')),
+    CONSTRAINT ck_pedidos_eventos_motivo_obligatorio CHECK ((tipo IN ('RETENIDO', 'LIBERADO', 'RECHAZADO', 'CANCELADO', 'ENTREGA_FALLIDA',
         'ENTREGADO_CON_NOVEDAD', 'RECIBIDO_CON_NOVEDAD')) = (motivo IS NOT NULL) OR (tipo = 'AJUSTADO')),
+    -- Cada motivo sirve solo para su evento (ECM 2026-09-14): liberar no se explica con «MORA».
+    CONSTRAINT ck_pedidos_eventos_motivo_por_tipo CHECK (motivo IS NULL OR CASE tipo
+        WHEN 'RETENIDO'              THEN motivo IN ('CUPO_EXCEDIDO', 'FACTURA_VENCIDA', 'MORA')
+        WHEN 'LIBERADO'              THEN motivo IN ('PAGO_RECIBIDO', 'ACUERDO_DE_PAGO', 'AUTORIZADO_POR_ADMIN')
+        WHEN 'RECHAZADO'             THEN motivo IN ('SIN_EXISTENCIA', 'PRODUCTO_DESCONTINUADO', 'DUPLICADO', 'CUPO_EXCEDIDO',
+                                                     'FACTURA_VENCIDA', 'MORA', 'FUERA_DE_VENTANA')
+        WHEN 'CANCELADO'             THEN motivo IN ('CLIENTE_DESISTIO', 'DUPLICADO', 'SIN_EXISTENCIA', 'FUERA_DE_VENTANA')
+        WHEN 'AJUSTADO'              THEN motivo IN ('SIN_EXISTENCIA', 'PRODUCTO_DESCONTINUADO', 'ERROR_DE_PRECIO', 'DUPLICADO')
+        WHEN 'ENTREGA_FALLIDA'       THEN motivo IN ('CERRADO', 'SIN_DINERO', 'DIRECCION_ERRADA', 'RECHAZO_EN_PUERTA', 'FUERA_DE_VENTANA')
+        WHEN 'ENTREGADO_CON_NOVEDAD' THEN motivo IN ('FALTANTE', 'SOBRANTE', 'AVERIA', 'PRODUCTO_NO_PEDIDO', 'VENCIDO')
+        WHEN 'RECIBIDO_CON_NOVEDAD'  THEN motivo IN ('FALTANTE', 'SOBRANTE', 'AVERIA', 'PRODUCTO_NO_PEDIDO', 'VENCIDO')
+        ELSE false END),
     -- El rastro nunca atribuye al proveedor lo que hizo un enlace: con enlace no hay negocio; sin él, sí.
     CONSTRAINT ck_pedidos_eventos_quien CHECK ((acceso_id IS NOT NULL AND actor = 'COMPRADOR' AND actor_tenant_id IS NULL)
         OR (acceso_id IS NULL AND actor_tenant_id IS NOT NULL)),
@@ -686,6 +704,35 @@ BEGIN
     EXCEPTION WHEN foreign_key_violation THEN v_rechazado := true;
     END;
     IF NOT v_rechazado THEN RAISE EXCEPTION 'V2 pedidos: la FK compuesta dejo pasar la linea de otro pedido'; END IF;
+
+    -- 6b. Cada motivo solo en su evento; liberar exige motivo de liberación; la entrega no es anterior a la captura.
+    v_rechazado := false;
+    BEGIN
+        PERFORM pedidos.fn_pedido_transicionar(v_otro_pedido, 'RETENIDO', 'PAGO_RECIBIDO', NULL, NULL, now(), 'v2p-retiene-mal');
+    EXCEPTION WHEN check_violation THEN v_rechazado := true;
+    END;
+    IF NOT v_rechazado THEN RAISE EXCEPTION 'V2 pedidos: un RETENIDO entro con un motivo de liberacion'; END IF;
+    PERFORM pedidos.fn_pedido_transicionar(v_otro_pedido, 'RETENIDO', 'MORA', NULL, NULL, now(), 'v2p-retiene');
+    v_rechazado := false;
+    BEGIN
+        PERFORM pedidos.fn_pedido_transicionar(v_otro_pedido, 'LIBERADO', NULL, 'sin motivo', NULL, now(), 'v2p-libera-sin');
+    EXCEPTION WHEN check_violation THEN v_rechazado := true;
+    END;
+    IF NOT v_rechazado THEN RAISE EXCEPTION 'V2 pedidos: un LIBERADO entro sin motivo'; END IF;
+    v_rechazado := false;
+    BEGIN
+        PERFORM pedidos.fn_pedido_transicionar(v_otro_pedido, 'LIBERADO', 'MORA', NULL, NULL, now(), 'v2p-libera-mal');
+    EXCEPTION WHEN check_violation THEN v_rechazado := true;
+    END;
+    IF NOT v_rechazado THEN RAISE EXCEPTION 'V2 pedidos: un LIBERADO entro con un motivo de retencion'; END IF;
+    PERFORM pedidos.fn_pedido_transicionar(v_otro_pedido, 'LIBERADO', 'ACUERDO_DE_PAGO', NULL, NULL, now(), 'v2p-libera');
+    v_rechazado := false;
+    BEGIN
+        PERFORM pedidos.fn_pedido_crear('ENVIADO', 'v2p-tienda', 'vendedor', 'PREVENTA', NULL, NULL,
+            ((now() AT TIME ZONE 'America/Bogota')::date - 1), '[{"producto_id":"v2p-arroz","cantidad":1}]', now(), 'v2p-entrega-ayer');
+    EXCEPTION WHEN check_violation THEN v_rechazado := true;
+    END;
+    IF NOT v_rechazado THEN RAISE EXCEPTION 'V2 pedidos: un pedido prometio entregar antes de tomarse'; END IF;
 
     -- 7. Despachar 17, entrega fallida, segundo despacho de 18, entregado; idempotencia del evento.
     PERFORM pedidos.fn_pedido_transicionar(v_pedido, 'DESPACHADO', NULL, NULL,
