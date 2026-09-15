@@ -313,8 +313,17 @@ class PedidosTest {
         accion(ADMIN, "admin", uno, "liberar", "{\"motivo\":\"PAGO_RECIBIDO\",\"idempotencyKey\":\"l1\"}")
                 .andExpect(status().isOk()).andExpect(jsonPath("$.estado").value("LIBERADO"))
                 .andExpect(jsonPath("$.eventos[2].motivo").value("PAGO_RECIBIDO"));
-        accion(CAJA, "cajero", uno, "confirmar", "{\"idempotencyKey\":\"c1\"}")
-                .andExpect(status().isOk()).andExpect(jsonPath("$.estado").value("CONFIRMADO"));
+        // Liberado y con una referencia agotada: se confirma con una línea menos (V3 de pedidos: LIBERADO → AJUSTADO).
+        String lineaUno = leer(mockMvc.perform(get("/api/pedidos/" + uno).header("Authorization", bearer(ADMIN, "admin"))))
+                .get("lineas").get(2).get("lineaId").asText();
+        accion(CAJA, "cajero", uno, "confirmar", "{\"lineas\":[{\"lineaId\":\"" + lineaUno + "\",\"cantidad\":0}],"
+                        + "\"motivo\":\"SIN_EXISTENCIA\",\"idempotencyKey\":\"c1\"}")
+                .andExpect(status().isOk()).andExpect(jsonPath("$.estado").value("CONFIRMADO"))
+                .andExpect(jsonPath("$.eventos[*].tipo").value(org.hamcrest.Matchers.contains("ENVIADO", "RETENIDO", "LIBERADO", "AJUSTADO", "CONFIRMADO")))
+                .andExpect(jsonPath("$.lineas[2].confirmada").value(0));
+        // Confirmado ya no se reajusta: el faltante va en el despacho.
+        accion(CAJA, "cajero", uno, "ajustar", "{\"lineas\":[{\"lineaId\":\"" + lineaUno + "\",\"cantidad\":1}],\"idempotencyKey\":\"c1-re\"}")
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.codigo").value("TRANSICION_NO_PERMITIDA"));
 
         UUID dos = nuevoDeAna("ana-dos");
         accion(ADMIN, "admin", dos, "rechazar", "{\"idempotencyKey\":\"x\"}")
