@@ -476,8 +476,7 @@ public class Cartera {
             // no cambia); con SALDO_A_FAVOR, se aplica lo que debe y el resto queda a su favor.
             if (!EXCEDENTE_A_FAVOR.equals(r.excedente() == null ? null : r.excedente().trim().toUpperCase(Locale.ROOT))) {
                 throw new com.suresell.orders.shared.exception.MontoPorEncimaDelMaximoException("monto", maximo,
-                        "El cliente debe " + pesos(maximo) + "; no se puede abonar más. Para dejar el resto a su favor, "
-                                + "manda excedente SALDO_A_FAVOR.");
+                        "El cliente debe " + pesos(maximo) + "; no se puede abonar más.");
             }
             if (r.aplicaciones() != null && !r.aplicaciones().isEmpty()) {
                 throw new DatoInvalidoException("aplicaciones",
