@@ -254,6 +254,23 @@ public class Order implements org.springframework.data.domain.Persistable<java.u
     private java.util.UUID pedidoId;
 
     /**
+     * V28 — La sede de la venta. La pone el disparador de numeración (la por defecto)
+     * cuando llega NULL, que es lo que manda toda venta de la caja y de meseros: igual
+     * que antes de mapearla. Solo la venta que nace de despachar un pedido (F5.5) trae
+     * la sede de despacho. {@code updatable = false}: un guardado de JPA nunca la cambia
+     * ni la vuelve NULL.
+     */
+    @Column(name = "site_id", insertable = true, updatable = false)
+    private Long siteId;
+
+    /**
+     * V71 — Plazo pactado de la venta que nace de un pedido (congelado en su captura).
+     * NULL en toda otra venta, que vence con el plazo del cliente. La base lo exige así.
+     */
+    @Column(name = "plazo_dias", insertable = true, updatable = false)
+    private Short plazoDias;
+
+    /**
      * V58 — Cliente de la factura electrónica, como JSON tal y como lo mandó el
      * POS: {@code { nombre, documento, correo, telefono? }}. NULL = esta venta
      * no pidió factura.

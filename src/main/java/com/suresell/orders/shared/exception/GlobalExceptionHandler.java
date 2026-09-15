@@ -208,6 +208,15 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(m);
     }
 
+    /** Un pedido que no se crea o no se mueve (F5.3): estado y código los pone quien rechaza. */
+    @ExceptionHandler(PedidoRechazadoException.class)
+    public ResponseEntity<Map<String, String>> handlePedidoRechazado(PedidoRechazadoException ex) {
+        logger.info("{} {}: {}", ex.estado().value(), ex.codigo(), ex.getMessage());
+        Map<String, String> m = cuerpo(ex.codigo(), ex.getMessage());
+        m.put("codigo", ex.codigo());
+        return ResponseEntity.status(ex.estado()).body(m);
+    }
+
     @ExceptionHandler(SoloAdministradorException.class)
     public ResponseEntity<Map<String, String>> handleSoloAdministrador(SoloAdministradorException ex) {
         logger.info("Rechazo por rol: {}", ex.getMessage());

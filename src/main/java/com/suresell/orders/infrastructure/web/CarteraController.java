@@ -25,6 +25,13 @@ import org.springframework.web.bind.annotation.*;
  * módulo {@code cartera} ({@code ModuleAccessFilter}). Las respuestas van en
  * camelCase. Un vendedor ve y cobra solo a sus clientes; el filtro lo pone el
  * servidor con el id del token.
+ *
+ * <p>🔴 <b>El cliente de otro vendedor responde 400, no 404, y es a propósito</b>
+ * (decidido por ECM el 2026-09-14): 400 {@code campo: clienteDocumento} con el MISMO
+ * texto que un cliente que no existe («Ese cliente no existe en el negocio.»), así
+ * que no confirma que exista. Es el contrato que ya consume el panel en estado de
+ * cuenta, recibos, cupo, insolvencia y comportamiento de pago. No cambiarlo a 404
+ * sin cambiarlo en todo {@code /api/cartera} y avisar al panel.
  */
 @RestController
 @RequestMapping("/api/cartera")
@@ -59,6 +66,15 @@ public class CarteraController {
                                               @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate hasta,
                                               HttpServletRequest http) {
         return cartera.estadoDeCuenta(quien(http, ROLES_QUE_COBRAN, "ver la cartera"), documento, desde, hasta);
+    }
+
+    @GetMapping("/clientes/{documento}/comportamiento-de-pago")
+    @Operation(summary = "F10.3 — Cómo paga el cliente: días promedio de pago por factura, % a tiempo, atraso; solo lectura")
+    public Map<String, Object> comportamientoDePago(@PathVariable String documento,
+                                                    @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate desde,
+                                                    @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate hasta,
+                                                    HttpServletRequest http) {
+        return cartera.comportamientoDePago(quien(http, ROLES_QUE_COBRAN, "ver la cartera"), documento, desde, hasta);
     }
 
     @PostMapping("/recibos")

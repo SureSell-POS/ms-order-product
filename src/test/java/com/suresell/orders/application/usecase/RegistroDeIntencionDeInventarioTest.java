@@ -70,6 +70,7 @@ class RegistroDeIntencionDeInventarioTest {
     private static Order orden(long id, OffsetDateTime ocurridoEn) {
         Order o = new Order();
         o.setIdOrder(id);
+        o.setUuidId(java.util.UUID.nameUUIDFromBytes(("orden-" + id).getBytes()));
         o.setOcurridoEn(ocurridoEn);
         o.setCreatedBy(5L);
         return o;
@@ -174,6 +175,18 @@ class RegistroDeIntencionDeInventarioTest {
                 .doesNotThrowAnyException();
         assertThat(jdbc.queryForObject(
                 "SELECT count(*) FROM public.inventario_intenciones", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("🔴 F5.5a: dos sedes con el mismo número de orden son dos ventas y dos intenciones; la clave es la del uuid")
+    void dosSedesMismoNumero() {
+        Order sede1 = orden(7, null);
+        Order sede2 = orden(7, null);
+        sede2.setUuidId(java.util.UUID.randomUUID());
+        tx.executeWithoutResult(s -> registro.registrar(sede1, lineas()));
+        tx.executeWithoutResult(s -> registro.registrar(sede2, lineas()));
+        assertThat(jdbc.queryForList("SELECT idempotency_key FROM public.inventario_intenciones ORDER BY idempotency_key", String.class))
+                .containsExactlyInAnyOrder("venta-" + sede1.getUuidId(), "venta-" + sede2.getUuidId());
     }
 
     @Test
