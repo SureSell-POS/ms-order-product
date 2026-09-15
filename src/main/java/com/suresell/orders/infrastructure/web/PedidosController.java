@@ -144,6 +144,20 @@ public class PedidosController {
         return pedidos.liberar(quien(http), id, cuerpo);
     }
 
+    @PostMapping(value = "/{id}/entregas/{entregaId}/prueba", consumes = org.springframework.http.MediaType.MULTIPART_FORM_DATA_VALUE)
+    @Operation(summary = "F5.7b — Foto (JPEG) y/o firma (PNG) de una entrega, hasta 1 MB cada una. Una vez: 409 PRUEBA_YA_REGISTRADA; "
+            + "413 si pesa más; 503 sin almacén; 502 si el almacén falla (la entrega sigue registrada)")
+    public Map<String, Object> registrarPrueba(@PathVariable UUID id, @PathVariable UUID entregaId,
+                                               @org.springframework.web.bind.annotation.RequestPart(value = "foto", required = false)
+                                               org.springframework.web.multipart.MultipartFile foto,
+                                               @org.springframework.web.bind.annotation.RequestPart(value = "firma", required = false)
+                                               org.springframework.web.multipart.MultipartFile firma,
+                                               HttpServletRequest http) throws java.io.IOException {
+        return pedidos.registrarPrueba(quien(http), id, entregaId,
+                foto == null ? null : foto.getBytes(), foto == null ? null : foto.getContentType(),
+                firma == null ? null : firma.getBytes(), firma == null ? null : firma.getContentType());
+    }
+
     private Quien quien(HttpServletRequest http) {
         String rol = tokens.resolveRole(http.getHeader("Authorization")).orElse("");
         return new Quien(TenantContext.get(), rol, usuarios.id().orElse(null));

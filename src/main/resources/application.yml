@@ -15,6 +15,12 @@ spring:
   jackson:
     deserialization:
       fail-on-unknown-properties: true
+  # F5.7b: la foto y la firma de una entrega pesan como mucho 1 MB cada una (lo comprueba Pedidos con su 413).
+  # El tope del servidor va algo por encima para que ese 413 salga con su mensaje y no con el error genérico.
+  servlet:
+    multipart:
+      max-file-size: 2MB
+      max-request-size: 5MB
   # Multi-tenancy (B1): las migraciones Flyway son SOLO para el esquema Postgres
   # cloud. Se desactiva el auto-run para NO ejecutarlas contra el SQLite local.
   flyway:

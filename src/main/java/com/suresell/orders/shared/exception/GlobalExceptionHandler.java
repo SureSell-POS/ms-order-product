@@ -221,6 +221,15 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(ex.estado()).body(m);
     }
 
+    /** F5.7b: una parte multipart por encima del tope del servidor: 413, como la foto de más de 1 MB. */
+    @ExceptionHandler(org.springframework.web.multipart.MaxUploadSizeExceededException.class)
+    public ResponseEntity<Map<String, String>> handleSubidaDemasiadoGrande(org.springframework.web.multipart.MaxUploadSizeExceededException ex) {
+        Map<String, String> m = cuerpo(PedidoRechazadoException.ARCHIVO_DEMASIADO_GRANDE,
+                "La foto y la firma pueden pesar como mucho 1 MB cada una: comprímelas antes de enviarlas.");
+        m.put("codigo", PedidoRechazadoException.ARCHIVO_DEMASIADO_GRANDE);
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(m);
+    }
+
     @ExceptionHandler(SoloAdministradorException.class)
     public ResponseEntity<Map<String, String>> handleSoloAdministrador(SoloAdministradorException ex) {
         logger.info("Rechazo por rol: {}", ex.getMessage());

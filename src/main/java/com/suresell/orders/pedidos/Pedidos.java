@@ -80,13 +80,19 @@ public class Pedidos {
     private final ObjectMapper json;
     private final com.suresell.orders.domain.port.in.OrderPort ventas;
     private final com.suresell.orders.cartera.Cartera cartera;
+    private final AlmacenDePruebas almacen;
+    private final org.springframework.transaction.support.TransactionTemplate transaccion;
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(Pedidos.class);
 
     public Pedidos(JdbcTemplate jdbc, ObjectMapper json, com.suresell.orders.domain.port.in.OrderPort ventas,
-                   com.suresell.orders.cartera.Cartera cartera) {
+                   com.suresell.orders.cartera.Cartera cartera, AlmacenDePruebas almacen,
+                   org.springframework.transaction.PlatformTransactionManager transacciones) {
         this.jdbc = jdbc;
         this.json = json;
         this.ventas = ventas;
         this.cartera = cartera;
+        this.almacen = almacen;
+        this.transaccion = new org.springframework.transaction.support.TransactionTemplate(transacciones);
     }
 
     /** Quién pide: su negocio, su rol y su id de {@code users}. */
@@ -950,19 +956,27 @@ public class Pedidos {
         r.put("registradoEn", momento(p.get("registrado_en")));
         // La última prueba de entrega y lo pendiente de reversa (F5.7, derivado de las cantidades).
         List<Map<String, Object>> entregas = jdbc.queryForList("""
-                SELECT resultado, recibe_nombre, recibe_documento, latitud, longitud, ocurrido_en
+                SELECT id, resultado, recibe_nombre, recibe_documento, latitud, longitud, ocurrido_en,
+                       foto_asset_id, firma_asset_id, foto_registrada_en, firma_registrada_en, prueba_purgada_en
                   FROM pedidos.entregas WHERE tenant_id = ? AND pedido_id = ? ORDER BY registrado_en DESC LIMIT 1""",
                 quien.negocio(), p.get("id"));
         if (entregas.isEmpty()) {
             r.put("entrega", null);
         } else {
             Map<String, Object> e = new LinkedHashMap<>();
+            e.put("id", entregas.get(0).get("id"));
             e.put("resultado", entregas.get(0).get("resultado"));
             e.put("recibeNombre", entregas.get(0).get("recibe_nombre"));
             e.put("recibeDocumento", entregas.get(0).get("recibe_documento"));
             e.put("latitud", entregas.get(0).get("latitud"));
             e.put("longitud", entregas.get(0).get("longitud"));
             e.put("ocurridoEn", momento(entregas.get(0).get("ocurrido_en")));
+            // F5.7b: URL firmadas de 15 minutos, fabricadas en cada lectura; nunca se guarda una URL.
+            e.put("fotoUrl", firmada((String) entregas.get(0).get("foto_asset_id")));
+            e.put("firmaUrl", firmada((String) entregas.get(0).get("firma_asset_id")));
+            e.put("fotoRegistradaEn", momento(entregas.get(0).get("foto_registrada_en")));
+            e.put("firmaRegistradaEn", momento(entregas.get(0).get("firma_registrada_en")));
+            e.put("pruebaPurgadaEn", momento(entregas.get(0).get("prueba_purgada_en")));
             r.put("entrega", e);
         }
         List<Map<String, Object>> pendiente = jdbc.queryForList("""
@@ -1318,6 +1332,129 @@ public class Pedidos {
         return valor.trim();
     }
 
+    // ------------------------------------------------------------ F5.7b: foto y firma de la entrega
+
+    static final int BYTES_MAXIMOS_DE_PRUEBA = 1024 * 1024;
+    static final int SEGUNDOS_DE_URL_FIRMADA = 900;
+    static final int PURGA_POR_EVENTO = 100;
+
+    /**
+     * POST /api/pedidos/{id}/entregas/{entregaId}/prueba (F5.7b). Foto (JPEG) y firma (PNG) opcionales, de hasta 1 MB
+     * cada una. Una PRUEBA es inmutable: si esa entrega ya tiene foto (o firma) registrada, o se purgó, 409
+     * PRUEBA_YA_REGISTRADA sin tocar el almacén. Mientras la ruta siga vacía, repetir sube de nuevo (el reintento cuando
+     * la subida salió bien y el registro no). Sin almacén, 503; si el almacén falla, 502: la entrega ya existe y solo
+     * se reintenta la prueba. Después, por EVENTO, se purgan hasta 100 pruebas de más de un año del negocio.
+     */
+    public Map<String, Object> registrarPrueba(Quien quien, UUID pedidoId, UUID entregaId, byte[] foto, String fotoTipo,
+                                               byte[] firma, String firmaTipo) {
+        exigirRol(quien, Set.of("admin", "cajero", "vendedor"), "registrar la prueba de una entrega");
+        exigirUsuario(quien);
+        boolean hayFoto = foto != null && foto.length > 0;
+        boolean hayFirma = firma != null && firma.length > 0;
+        if (!hayFoto && !hayFirma) {
+            throw new DatoInvalidoException("foto", "La prueba de entrega lleva foto, firma o las dos.");
+        }
+        if ((hayFoto && foto.length > BYTES_MAXIMOS_DE_PRUEBA) || (hayFirma && firma.length > BYTES_MAXIMOS_DE_PRUEBA)) {
+            throw new PedidoRechazadoException(HttpStatus.PAYLOAD_TOO_LARGE, PedidoRechazadoException.ARCHIVO_DEMASIADO_GRANDE,
+                    "La foto y la firma pueden pesar como mucho 1 MB cada una: comprímelas antes de enviarlas.");
+        }
+        if (hayFoto && !"image/jpeg".equalsIgnoreCase(fotoTipo)) {
+            throw new DatoInvalidoException("foto", "La foto va en JPEG.");
+        }
+        if (hayFirma && !"image/png".equalsIgnoreCase(firmaTipo)) {
+            throw new DatoInvalidoException("firma", "La firma va en PNG.");
+        }
+        cabeceraVisible(quien, pedidoId);
+        List<Map<String, Object>> filas = jdbc.queryForList("""
+                SELECT foto_asset_id, firma_asset_id, prueba_purgada_en FROM pedidos.entregas
+                 WHERE tenant_id = ? AND pedido_id = ? AND id = ?""", quien.negocio(), pedidoId, entregaId);
+        if (filas.isEmpty()) {
+            throw new PedidoRechazadoException(HttpStatus.NOT_FOUND, PedidoRechazadoException.NO_EXISTE,
+                    "Esa entrega no existe en este pedido.");
+        }
+        Map<String, Object> e = filas.get(0);
+        if (e.get("prueba_purgada_en") != null || (hayFoto && e.get("foto_asset_id") != null) || (hayFirma && e.get("firma_asset_id") != null)) {
+            throw pruebaYaRegistrada();
+        }
+        if (!almacen.configurado()) {
+            throw new PedidoRechazadoException(HttpStatus.SERVICE_UNAVAILABLE, PedidoRechazadoException.ALMACEN_NO_CONFIGURADO,
+                    "El almacén de fotos no está configurado: la entrega queda registrada sin foto ni firma.");
+        }
+        String base = quien.negocio() + "/" + pedidoId + "/" + entregaId + "/";
+        String rutaFoto = hayFoto ? base + "foto.jpg" : null;
+        String rutaFirma = hayFirma ? base + "firma.png" : null;
+        try {
+            if (hayFoto) {
+                almacen.subir(rutaFoto, foto, "image/jpeg");
+            }
+            if (hayFirma) {
+                almacen.subir(rutaFirma, firma, "image/png");
+            }
+        } catch (AlmacenDePruebas.NoDisponible ex) {
+            log.warn("F5.7b: el almacén falló al subir la prueba de la entrega {}: {}", entregaId, ex.getMessage());
+            throw new PedidoRechazadoException(HttpStatus.BAD_GATEWAY, PedidoRechazadoException.ALMACEN_NO_DISPONIBLE,
+                    "No se pudo guardar la foto o la firma: la entrega sigue registrada. Vuelve a intentar solo la prueba.");
+        }
+        transaccion.executeWithoutResult(t -> {
+            fijarAutor(quien);
+            traducir(() -> jdbc.queryForObject("SELECT pedidos.fn_entrega_registrar_prueba(?, ?, ?)::text", String.class,
+                    entregaId, rutaFoto, rutaFirma));
+        });
+        purgarPorEvento(quien);
+        return detalleVisible(quien, pedidoId);
+    }
+
+    /** La retención de un año, en su propia transacción: si el almacén o la base fallan, la prueba nueva ya quedó. */
+    void purgarPorEvento(Quien quien) {
+        try {
+            transaccion.executeWithoutResult(t -> {
+                List<Map<String, Object>> viejas = jdbc.queryForList("""
+                        SELECT id, foto_asset_id, firma_asset_id FROM pedidos.entregas
+                         WHERE tenant_id = ? AND registrado_en < now() - interval '1 year'
+                           AND (foto_asset_id IS NOT NULL OR firma_asset_id IS NOT NULL)
+                         ORDER BY registrado_en LIMIT ?""", quien.negocio(), PURGA_POR_EVENTO);
+                if (viejas.isEmpty()) {
+                    return;
+                }
+                List<String> rutas = new ArrayList<>();
+                List<UUID> ids = new ArrayList<>();
+                for (Map<String, Object> v : viejas) {
+                    ids.add((UUID) v.get("id"));
+                    if (v.get("foto_asset_id") != null) {
+                        rutas.add((String) v.get("foto_asset_id"));
+                    }
+                    if (v.get("firma_asset_id") != null) {
+                        rutas.add((String) v.get("firma_asset_id"));
+                    }
+                }
+                almacen.borrar(rutas);
+                fijarAutor(quien);
+                Integer n = jdbc.queryForObject("SELECT pedidos.fn_entregas_purgar(?::uuid[])", Integer.class,
+                        (Object) ids.stream().map(UUID::toString).toArray(String[]::new));
+                log.info("F5.7b: purgadas {} pruebas de entrega de más de un año del negocio {}", n, quien.negocio());
+            });
+        } catch (RuntimeException ex) {
+            log.warn("F5.7b: la purga por retención del negocio {} queda para la siguiente prueba: {}", quien.negocio(), ex.getMessage());
+        }
+    }
+
+    private String firmada(String ruta) {
+        if (ruta == null || !almacen.configurado()) {
+            return null;
+        }
+        try {
+            return almacen.firmar(ruta, SEGUNDOS_DE_URL_FIRMADA);
+        } catch (AlmacenDePruebas.NoDisponible ex) {
+            log.warn("F5.7b: no se pudo firmar {}: {}", ruta, ex.getMessage());
+            return null;
+        }
+    }
+
+    private static PedidoRechazadoException pruebaYaRegistrada() {
+        return new PedidoRechazadoException(HttpStatus.CONFLICT, PedidoRechazadoException.PRUEBA_YA_REGISTRADA,
+                "La prueba de esta entrega ya se registró: una prueba no se cambia.");
+    }
+
     private static void exigirRol(Quien quien, Set<String> roles, String queCosa) {
         if (!roles.contains(quien.rol())) {
             throw new SoloAdministradorException(queCosa);
@@ -1376,6 +1513,12 @@ public class Pedidos {
             }
             if (texto.contains("del futuro")) {
                 throw new DatoInvalidoException("ocurridoEn", "La hora de la captura no puede estar en el futuro.");
+            }
+            if (texto.startsWith("La prueba de esta entrega ya se registro")) {
+                throw pruebaYaRegistrada();
+            }
+            if (texto.startsWith("Esa entrega no existe")) {
+                throw new PedidoRechazadoException(HttpStatus.NOT_FOUND, PedidoRechazadoException.NO_EXISTE, "Esa entrega no existe en este pedido.");
             }
             if (texto.startsWith("Una entrega con diferencias")) {
                 throw new DatoInvalidoException("resultado", "Una entrega con diferencias es ENTREGADO_CON_NOVEDAD, con su motivo.");

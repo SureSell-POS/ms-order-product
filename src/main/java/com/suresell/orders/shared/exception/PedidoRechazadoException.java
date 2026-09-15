@@ -17,6 +17,9 @@ import org.springframework.http.HttpStatus;
  *   <li>400 {@code SIN_PRECIO} (F5.3f): una línea con cantidad tiene precio 0; lleva {@code productoId}.</li>
  *   <li>409 {@code VENTA_EN_CERO} (F5.3f): el despacho daría una venta de $0; no se crea venta ni deuda.</li>
  *   <li>400 {@code PRODUCTO_INACTIVO} (F5.3g): una línea con cantidad es de un producto inactivo; lleva {@code productoId}.</li>
+ *   <li>409 {@code PRUEBA_YA_REGISTRADA} (F5.7b): la foto o la firma de esa entrega ya se registró (o se purgó): no se cambia.</li>
+ *   <li>413 {@code ARCHIVO_DEMASIADO_GRANDE} (F5.7b): foto o firma de más de 1 MB.</li>
+ *   <li>503 {@code ALMACEN_NO_CONFIGURADO} y 502 {@code ALMACEN_NO_DISPONIBLE} (F5.7b): la entrega sigue registrada, sin prueba.</li>
  * </ul>
  */
 public class PedidoRechazadoException extends RuntimeException {
@@ -30,6 +33,10 @@ public class PedidoRechazadoException extends RuntimeException {
     public static final String SIN_PRECIO = "SIN_PRECIO";
     public static final String VENTA_EN_CERO = "VENTA_EN_CERO";
     public static final String PRODUCTO_INACTIVO = "PRODUCTO_INACTIVO";
+    public static final String PRUEBA_YA_REGISTRADA = "PRUEBA_YA_REGISTRADA";
+    public static final String ARCHIVO_DEMASIADO_GRANDE = "ARCHIVO_DEMASIADO_GRANDE";
+    public static final String ALMACEN_NO_CONFIGURADO = "ALMACEN_NO_CONFIGURADO";
+    public static final String ALMACEN_NO_DISPONIBLE = "ALMACEN_NO_DISPONIBLE";
 
     private final HttpStatus estado;
     private final String codigo;
