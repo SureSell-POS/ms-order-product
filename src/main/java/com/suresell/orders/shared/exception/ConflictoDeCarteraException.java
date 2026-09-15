@@ -18,6 +18,7 @@ public class ConflictoDeCarteraException extends RuntimeException {
     public static final String RECIBO_YA_ANULADO = "RECIBO_YA_ANULADO";
     public static final String RECIBO_ES_ANULACION = "RECIBO_ES_ANULACION";
     public static final String VENTA_YA_RESUELTA = "VENTA_YA_RESUELTA";
+    public static final String SALDO_A_FAVOR_YA_DEVUELTO = "SALDO_A_FAVOR_YA_DEVUELTO";
 
     private final String codigo;
 
