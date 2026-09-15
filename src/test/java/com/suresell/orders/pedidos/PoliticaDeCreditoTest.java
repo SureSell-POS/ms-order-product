@@ -274,4 +274,18 @@ class PoliticaDeCreditoTest {
                 .andExpect(jsonPath("$.actualizadoPorId").isEmpty())
                 .andExpect(jsonPath("$.historia.length()").value(0));
     }
+
+    @Test
+    @DisplayName("🔴 plurales: la nota de retención dice «hace 1 día» con 1 y «hace 2 días» con 2 (antes «1 días»)")
+    void notaConPluralCorrecto() throws Exception {
+        politica(ADMIN, "admin", "{\"politica\":\"RETENER_PEDIDO\",\"diasMoraParaRetener\":0}").andExpect(status().isOk());
+        dueno.update("INSERT INTO clientes (tenant_id, documento, nombre, vendedor_id, plazo_dias, creado_por) VALUES "
+                + "(?, 'un-dia', 'Un día', NULL, 8, 's'), (?, 'dos-dias', 'Dos días', NULL, 8, 's')", T, T);
+        debito(cuenta("un-dia"), 50000, hoy.minusDays(9), hoy.minusDays(1));
+        debito(cuenta("dos-dias"), 50000, hoy.minusDays(10), hoy.minusDays(2));
+        JsonNode uno = tomar(CAJA, "cajero", "un-dia", "plural-1");
+        JsonNode dos = tomar(CAJA, "cajero", "dos-dias", "plural-2");
+        assertThat(uno.get("eventos").get(1).get("nota").asText()).contains("hace 1 día (").doesNotContain("1 días");
+        assertThat(dos.get("eventos").get(1).get("nota").asText()).contains("hace 2 días (");
+    }
 }

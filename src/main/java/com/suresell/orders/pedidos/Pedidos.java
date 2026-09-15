@@ -222,7 +222,7 @@ public class Pedidos {
                 cartera.retencionPorPolitica(quien.negocio(), documento);
         if (retencion.isPresent()) {
             transicionar(quien, id, "RETENIDO", "FACTURA_VENCIDA",
-                    "Política de crédito: factura vencida hace " + retencion.get().diasVencido() + " días (retiene con más de "
+                    "Política de crédito: factura vencida hace " + dias(retencion.get().diasVencido()) + " (retiene con más de "
                             + retencion.get().diasMoraParaRetener() + ").",
                     null, ocurrido, clave + ":retenido");
         } else if (CONFIRMAN.contains(quien.rol()) && !Boolean.FALSE.equals(cuerpo.confirmar())) {
@@ -1448,6 +1448,11 @@ public class Pedidos {
             log.warn("F5.7b: no se pudo firmar {}: {}", ruta, ex.getMessage());
             return null;
         }
+    }
+
+    /** «1 día», «2 días»: el plural de una cantidad de días en un texto para personas. */
+    static String dias(Number n) {
+        return n + (n != null && n.longValue() == 1 ? " día" : " días");
     }
 
     private static PedidoRechazadoException pruebaYaRegistrada() {
