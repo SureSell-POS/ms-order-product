@@ -685,6 +685,164 @@ public class Pedidos {
         }
     }
 
+    /**
+     * Las cantidades vigentes de cada línea de los pedidos de {@code ped} en UNA pasada sobre sus
+     * eventos (F5.11): la última confirmada, la último despachada y la última entregada DESPUÉS del
+     * último despacho, igual que {@code v_pedidos_lineas} pero sin cuatro búsquedas por línea.
+     * Medido con 50.000 líneas: 202 ms frente a 1,05 s. {@code EstadoGuardadoEsDerivadoTest} compara
+     * las dos formas línea por línea sobre sus 1.000 recorridos. Espera un CTE {@code ped(id)} y el
+     * negocio como primer parámetro.
+     */
+    static final String ULTIMAS_CANTIDADES = """
+            ult AS (
+                SELECT el.linea_id,
+                       (array_agg(el.cantidad ORDER BY e.secuencia DESC) FILTER (WHERE e.tipo IN ('CONFIRMADO', 'AJUSTADO')))[1] AS confirmada,
+                       (array_agg(el.cantidad ORDER BY e.secuencia DESC) FILTER (WHERE e.tipo = 'DESPACHADO'))[1] AS despachada,
+                       CASE WHEN max(e.secuencia) FILTER (WHERE e.tipo IN ('ENTREGADO', 'ENTREGADO_CON_NOVEDAD'))
+                                 > max(e.secuencia) FILTER (WHERE e.tipo = 'DESPACHADO')
+                            THEN (array_agg(el.cantidad ORDER BY e.secuencia DESC) FILTER (WHERE e.tipo IN ('ENTREGADO', 'ENTREGADO_CON_NOVEDAD')))[1]
+                       END AS entregada
+                  FROM ped
+                  JOIN pedidos.pedidos_eventos e ON e.tenant_id = ? AND e.pedido_id = ped.id
+                  JOIN pedidos.pedidos_eventos_lineas el ON el.tenant_id = e.tenant_id AND el.pedido_id = e.pedido_id AND el.evento_id = e.id
+                 GROUP BY el.linea_id
+            )""";
+
+    public static final Set<String> AGRUPACIONES = Set.of("cliente", "vendedor", "producto");
+    static final Set<String> CANCELADOS_POR_EL_CLIENTE = Set.of("CLIENTE_DESISTIO", "DUPLICADO");
+    static final int VENTANA_MAXIMA_DE_CUMPLIMIENTO = 92;
+
+    /**
+     * GET /api/pedidos/cumplimiento (F5.11): pedidas, confirmadas, despachadas y entregadas por cliente,
+     * vendedor o producto, en los pedidos CAPTURADOS en la ventana (días de Bogotá, hasta 92).
+     *
+     * <ul>
+     *   <li>Cuentan todos los pedidos salvo el borrador y los cancelados por el cliente
+     *       (CLIENTE_DESISTIO, DUPLICADO): esos no son incumplimiento del proveedor (ECM). Un rechazado o
+     *       un cancelado por existencias o ventana sí cuenta, con 0 entregado.</li>
+     *   <li>Cumplimiento = entregado / pedido, en unidades y en valor al precio congelado; sin pedido, null.</li>
+     *   <li>Un vendedor ve solo sus pedidos.</li>
+     * </ul>
+     */
+    public Map<String, Object> cumplimiento(Quien quien, LocalDate desde, LocalDate hasta, String agrupar) {
+        exigirRol(quien, Set.of("admin", "cajero", "vendedor"), "ver el cumplimiento");
+        LocalDate hoy = LocalDate.now(BOGOTA);
+        LocalDate fin = hasta == null ? hoy : hasta;
+        LocalDate inicio = desde == null ? fin.withDayOfMonth(1) : desde;
+        if (inicio.isAfter(fin)) {
+            throw new DatoInvalidoException("desde", "«desde» no puede ser posterior a «hasta».");
+        }
+        if (java.time.temporal.ChronoUnit.DAYS.between(inicio, fin) + 1 > VENTANA_MAXIMA_DE_CUMPLIMIENTO) {
+            throw new DatoInvalidoException("desde", "La ventana es de " + VENTANA_MAXIMA_DE_CUMPLIMIENTO + " días como máximo.");
+        }
+        String grupo = agrupar == null || agrupar.isBlank() ? "cliente" : agrupar.trim().toLowerCase(Locale.ROOT);
+        if (!AGRUPACIONES.contains(grupo)) {
+            throw new DatoInvalidoException("agrupar", "Se agrupa por cliente, vendedor o producto.");
+        }
+        String clave = switch (grupo) {
+            case "vendedor" -> "lin.vendedor_id::text";
+            case "producto" -> "lin.producto_id";
+            default -> "lin.cliente_documento";
+        };
+        String nombre = switch (grupo) {
+            case "vendedor" -> "(SELECT u.nombre FROM users u WHERE u.tenant_id = ? AND u.id::text = r.clave)";
+            case "producto" -> "(SELECT m.name_product FROM menu_products m WHERE m.tenant_id = ? AND m.id_product = r.clave)";
+            default -> "(SELECT c.nombre FROM clientes c WHERE c.tenant_id = ? AND c.documento = r.clave)";
+        };
+        List<Object> args = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("WITH ped AS (SELECT p.id, p.cliente_documento, p.vendedor_id, p.estado, "
+                + "(SELECT e.motivo FROM pedidos.pedidos_eventos e WHERE e.tenant_id = p.tenant_id AND e.pedido_id = p.id "
+                + "ORDER BY e.secuencia DESC LIMIT 1) AS motivo_final FROM pedidos.pedidos p "
+                + "WHERE p.tenant_id = ? AND p.estado <> 'CREADO_BORRADOR' AND p.ocurrido_en >= ? AND p.ocurrido_en < ?");
+        args.add(quien.negocio());
+        args.add(Timestamp.from(inicio.atStartOfDay(BOGOTA).toInstant()));
+        args.add(Timestamp.from(fin.plusDays(1).atStartOfDay(BOGOTA).toInstant()));
+        if (quien.esVendedor()) {
+            sql.append(" AND (p.vendedor_id = ? OR p.capturado_por = ?)");
+            args.add(quien.usuarioId() == null ? -1L : quien.usuarioId());
+            args.add(quien.usuarioId() == null ? -1L : quien.usuarioId());
+        }
+        sql.append("), ").append(ULTIMAS_CANTIDADES);
+        args.add(quien.negocio());
+        sql.append("""
+                , lin AS (
+                    SELECT ped.id, ped.cliente_documento, ped.vendedor_id, ped.estado, l.producto_id, l.cantidad_pedida AS pedida,
+                           u.confirmada, u.despachada, u.entregada, COALESCE(l.precio_confirmado, l.precio_visto) AS precio,
+                           NOT (ped.estado = 'CANCELADO' AND ped.motivo_final IN ('CLIENTE_DESISTIO', 'DUPLICADO')) AS cuenta,
+                           ped.motivo_final
+                      FROM ped
+                      JOIN pedidos.pedidos_lineas l ON l.tenant_id = ? AND l.pedido_id = ped.id
+                      LEFT JOIN ult u ON u.linea_id = l.id
+                ), r AS (
+                    SELECT %s AS clave,
+                           count(DISTINCT lin.id) FILTER (WHERE lin.cuenta) AS pedidos,
+                           COALESCE(sum(lin.pedida) FILTER (WHERE lin.cuenta), 0) AS pedidas,
+                           COALESCE(sum(lin.confirmada) FILTER (WHERE lin.cuenta), 0) AS confirmadas,
+                           COALESCE(sum(lin.despachada) FILTER (WHERE lin.cuenta), 0) AS despachadas,
+                           COALESCE(sum(lin.entregada) FILTER (WHERE lin.cuenta), 0) AS entregadas,
+                           COALESCE(sum(lin.pedida * lin.precio) FILTER (WHERE lin.cuenta), 0) AS valor_pedido,
+                           COALESCE(sum(COALESCE(lin.entregada, 0) * lin.precio) FILTER (WHERE lin.cuenta), 0) AS valor_entregado,
+                           count(DISTINCT lin.id) FILTER (WHERE lin.estado = 'RECHAZADO') AS rechazados,
+                           count(DISTINCT lin.id) FILTER (WHERE lin.estado = 'CANCELADO' AND lin.cuenta) AS cancelados_por_el_negocio,
+                           count(DISTINCT lin.id) FILTER (WHERE NOT lin.cuenta) AS cancelados_por_el_cliente
+                      FROM lin GROUP BY 1
+                )
+                SELECT r.*, %s AS nombre FROM r ORDER BY r.valor_pedido DESC, r.clave""".formatted(clave, nombre));
+        args.add(quien.negocio());
+        args.add(quien.negocio());
+        List<Map<String, Object>> filas = new ArrayList<>();
+        Map<String, BigDecimal> totales = new LinkedHashMap<>();
+        for (String k : List.of("pedidas", "confirmadas", "despachadas", "entregadas", "valor_pedido", "valor_entregado")) {
+            totales.put(k, BigDecimal.ZERO);
+        }
+        for (Map<String, Object> f : jdbc.queryForList(sql.toString(), args.toArray())) {
+            Map<String, Object> r = new LinkedHashMap<>();
+            r.put("clave", f.get("clave"));
+            r.put("nombre", f.get("nombre"));
+            r.put("pedidos", f.get("pedidos"));
+            r.put("pedidas", f.get("pedidas"));
+            r.put("confirmadas", f.get("confirmadas"));
+            r.put("despachadas", f.get("despachadas"));
+            r.put("entregadas", f.get("entregadas"));
+            r.put("valorPedido", f.get("valor_pedido"));
+            r.put("valorEntregado", f.get("valor_entregado"));
+            r.put("cumplimientoUnidades", razon(f.get("entregadas"), f.get("pedidas")));
+            r.put("cumplimientoValor", razon(f.get("valor_entregado"), f.get("valor_pedido")));
+            r.put("rechazados", f.get("rechazados"));
+            r.put("canceladosPorElNegocio", f.get("cancelados_por_el_negocio"));
+            r.put("canceladosPorElCliente", f.get("cancelados_por_el_cliente"));
+            for (String k : totales.keySet()) {
+                totales.merge(k, new BigDecimal(f.get(k).toString()), BigDecimal::add);
+            }
+            filas.add(r);
+        }
+        Map<String, Object> total = new LinkedHashMap<>();
+        total.put("pedidas", totales.get("pedidas"));
+        total.put("confirmadas", totales.get("confirmadas"));
+        total.put("despachadas", totales.get("despachadas"));
+        total.put("entregadas", totales.get("entregadas"));
+        total.put("valorPedido", totales.get("valor_pedido"));
+        total.put("valorEntregado", totales.get("valor_entregado"));
+        total.put("cumplimientoUnidades", razon(totales.get("entregadas"), totales.get("pedidas")));
+        total.put("cumplimientoValor", razon(totales.get("valor_entregado"), totales.get("valor_pedido")));
+        Map<String, Object> salida = new LinkedHashMap<>();
+        salida.put("desde", inicio.toString());
+        salida.put("hasta", fin.toString());
+        salida.put("agrupar", grupo);
+        salida.put("filas", filas);
+        salida.put("total", total);
+        return salida;
+    }
+
+    /** Parte / todo con 4 decimales; sin todo, null (sin dato, nunca 0). */
+    private static BigDecimal razon(Object parte, Object todo) {
+        BigDecimal t = new BigDecimal(todo.toString());
+        if (t.signum() == 0) {
+            return null;
+        }
+        return new BigDecimal(parte.toString()).divide(t, 4, java.math.RoundingMode.HALF_UP);
+    }
+
     /** GET /api/pedidos/{id}: cabecera, líneas con sus cantidades por etapa y la línea de tiempo. */
     public Map<String, Object> detalle(Quien quien, UUID id) {
         exigirRol(quien, Set.of("admin", "cajero", "vendedor"), "ver los pedidos");

@@ -168,6 +168,30 @@ class EstadoGuardadoEsDerivadoTest {
         System.out.println("── F5.2: v_pedidos_lineas frente a la forma anterior: " + lineas + " líneas, " + distintas + " filas distintas ──");
         assertThat(lineas).as("la comparación mira líneas de verdad").isEqualTo(SECUENCIAS * 2);
         assertThat(distintas).as("semilla " + semilla + ": la vista nueva da las mismas filas").isZero();
+        // F5.11: las cantidades en una pasada (Pedidos.ULTIMAS_CANTIDADES) son las de la vista, línea por línea.
+        int lineasInforme;
+        int distintasInforme;
+        try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword());
+             PreparedStatement ps = c.prepareStatement("WITH ped AS (SELECT id FROM pedidos.pedidos WHERE tenant_id = ?), " + Pedidos.ULTIMAS_CANTIDADES
+                     + ", unaPasada AS (SELECT l.id, u.confirmada, u.despachada, u.entregada FROM pedidos.pedidos_lineas l LEFT JOIN ult u ON u.linea_id = l.id"
+                     + " WHERE l.tenant_id = ?), vista AS (SELECT linea_id, confirmada, despachada, entregada FROM pedidos.v_pedidos_lineas WHERE tenant_id = ?)"
+                     + " SELECT (SELECT count(*) FROM unaPasada), (SELECT count(*) FROM (SELECT * FROM unaPasada EXCEPT ALL SELECT * FROM vista) a)"
+                     + " + (SELECT count(*) FROM (SELECT * FROM vista EXCEPT ALL SELECT * FROM unaPasada) b),"
+                     + " (SELECT count(*) FROM vista WHERE entregada IS NOT NULL)")) {
+            ps.setString(1, NEGOCIO);
+            ps.setString(2, NEGOCIO);
+            ps.setString(3, NEGOCIO);
+            ps.setString(4, NEGOCIO);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                lineasInforme = rs.getInt(1);
+                distintasInforme = rs.getInt(2);
+                System.out.println("── F5.2: cantidades en una pasada (F5.11) frente a la vista: " + lineasInforme + " líneas, " + distintasInforme
+                        + " distintas; " + rs.getInt(3) + " con entrega ──");
+            }
+        }
+        assertThat(lineasInforme).isEqualTo(SECUENCIAS * 2);
+        assertThat(distintasInforme).as("semilla " + semilla + ": el informe cuenta lo mismo que la vista").isZero();
         System.out.println("── F5.2: " + SECUENCIAS + " pedidos, " + eventos + " eventos, " + diferencias + " diferencias ──");
         assertThat(primeras).as("semilla " + semilla).isEmpty();
         assertThat(diferencias).as("semilla " + semilla).isZero();

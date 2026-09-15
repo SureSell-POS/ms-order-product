@@ -73,6 +73,15 @@ public class PedidosController {
         return pedidos.conteos(quien(http), origen, vendedorId, fecha, entregaEl, clienteDocumento);
     }
 
+    @GetMapping("/cumplimiento")
+    @Operation(summary = "F5.11 — Cumplimiento: pedidas, confirmadas, despachadas y entregadas por cliente, vendedor o producto (hasta 92 días)")
+    public Map<String, Object> cumplimiento(@RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate desde,
+                                            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate hasta,
+                                            @RequestParam(required = false) String agrupar,
+                                            HttpServletRequest http) {
+        return pedidos.cumplimiento(quien(http), desde, hasta, agrupar);
+    }
+
     @GetMapping("/{id}")
     @Operation(summary = "F5.3 — Detalle: líneas con cantidades por etapa y precios, y la línea de tiempo de eventos")
     public Map<String, Object> detalle(@PathVariable UUID id, HttpServletRequest http) {
