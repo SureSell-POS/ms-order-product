@@ -344,7 +344,7 @@ class ProcesoDeInsolvenciaTest {
     @DisplayName("🔴 catálogo: lo que no sigue es 409 ETAPA_NO_PERMITIDA; en liquidación no se levanta (409 LIQUIDACION_NO_SE_LEVANTA); los datos malos, 400 con campo")
     void catalogoYValidaciones() throws Exception {
         etapa(cuerpo("ACUERDO_CONFIRMADO", hoy, null)).andExpect(status().isConflict())
-                .andExpect(jsonPath("$.codigo").value("ETAPA_NO_PERMITIDA"));
+                .andExpect(ConflictoConMensaje.de("ETAPA_NO_PERMITIDA"));
         etapa(cuerpo("ETAPA_RARA", hoy, null)).andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("etapa"))
                 .andExpect(jsonPath("$.message").value("La etapa no es válida."));
         etapa(cuerpo("INICIO", hoy.plusDays(1), null)).andExpect(status().isBadRequest())
@@ -362,16 +362,16 @@ class ProcesoDeInsolvenciaTest {
 
         etapa(cuerpo("INICIO", hoy, null)).andExpect(status().isCreated());
         etapa(cuerpo("CUMPLIDO_TERMINADO", hoy, null)).andExpect(status().isConflict())
-                .andExpect(jsonPath("$.codigo").value("ETAPA_NO_PERMITIDA"))
+                .andExpect(ConflictoConMensaje.de("ETAPA_NO_PERMITIDA"))
                 .andExpect(jsonPath("$.message").value("Un proceso en «Proceso iniciado» no pasa a «Acuerdo cumplido, proceso terminado». No se registró nada."));
         etapa(cuerpo("CORRECCION_DE_ERROR", hoy, "\"corrigeEtapaId\":\"" + UUID.randomUUID() + "\"")).andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.campo").value("corrigeEtapaId"));
         etapa(cuerpo("LIQUIDACION", hoy, null)).andExpect(status().isCreated());
         etapa(cuerpo("CORRECCION_DE_ERROR", hoy, null)).andExpect(status().isConflict())
-                .andExpect(jsonPath("$.codigo").value("LIQUIDACION_NO_SE_LEVANTA"))
+                .andExpect(ConflictoConMensaje.de("LIQUIDACION_NO_SE_LEVANTA"))
                 .andExpect(jsonPath("$.message").value("En liquidación la insolvencia no se levanta."));
         etapa(cuerpo("CUMPLIDO_TERMINADO", hoy, null)).andExpect(status().isConflict())
-                .andExpect(jsonPath("$.codigo").value("LIQUIDACION_NO_SE_LEVANTA"));
+                .andExpect(ConflictoConMensaje.de("LIQUIDACION_NO_SE_LEVANTA"));
         assertThat(columna()).isEqualTo(hoy.toString());
 
         // SOLICITUD_NO_ADMITIDA es terminal.
@@ -424,7 +424,7 @@ class ProcesoDeInsolvenciaTest {
     // ---------------------------------------------------------------- endpoint viejo (F4.4, R10)
 
     @Test
-    @DisplayName("🔴 endpoint viejo: la fecha registra INICIO sin documento y régimen pendiente; otra fecha corrige; null levanta; en liquidación 409; futura 400")
+    @DisplayName("🔴 endpoint viejo: la fecha registra INICIO sin documento y régimen pendiente; otra fecha corrige; null con proceso 409 LEVANTAR_SIN_ETAPA (b); en liquidación 409; futura 400")
     void endpointViejo() throws Exception {
         marcaAnterior(hoy.plusDays(1).toString()).andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.campo").value("fecha"))
@@ -448,16 +448,126 @@ class ProcesoDeInsolvenciaTest {
         assertThat(proceso().get("etapas").get(1).get("etapa").asText()).isEqualTo("CORRECCION_DE_ERROR");
         assertThat(contar("SELECT count(*) FROM insolvencia_fotos WHERE tenant_id = ? AND reemplaza_foto_id IS NOT NULL", T)).isEqualTo(1);
 
-        marcaAnterior(null).andExpect(status().isOk()).andExpect(jsonPath("$.enInsolvenciaDesde").isEmpty());
+        // F4.13 (b): con null ya no se levanta; se levanta informando la etapa (B8).
+        marcaAnterior(null).andExpect(status().isConflict())
+                .andExpect(ConflictoConMensaje.de("LEVANTAR_SIN_ETAPA"))
+                .andExpect(jsonPath("$.message").value("La insolvencia se levanta informando que el acuerdo se cumplió y el proceso "
+                        + "terminó, o que se marcó por error. No se registró nada."));
+        assertThat(columna()).isEqualTo(hoy.minusDays(2).toString());
+        etapa(cuerpo("CORRECCION_DE_ERROR", hoy, null)).andExpect(status().isCreated());
         assertThat(columna()).isNull();
         assertThat(proceso().get("abierto").asBoolean()).isFalse();
-        marcaAnterior(null).andExpect(status().isOk());
+        marcaAnterior(null).andExpect(status().isOk()).andExpect(jsonPath("$.enInsolvenciaDesde").isEmpty());
 
         marcaAnterior(hoy.toString()).andExpect(status().isOk());
         etapa(cuerpo("LIQUIDACION", hoy, null)).andExpect(status().isCreated());
         marcaAnterior(null).andExpect(status().isConflict())
-                .andExpect(jsonPath("$.codigo").value("LIQUIDACION_NO_SE_LEVANTA"))
+                .andExpect(ConflictoConMensaje.de("LIQUIDACION_NO_SE_LEVANTA"))
                 .andExpect(jsonPath("$.message").value("En liquidación la insolvencia no se levanta."));
         assertThat(columna()).isEqualTo(hoy.toString());
+    }
+
+    // ---------------------------------------------------------------- (b) bloqueos del §5
+
+    private ResultActions abonar(String cuerpo) throws Exception {
+        return mockMvc.perform(post("/api/cartera/recibos").header("Authorization", bearer(CAJA, "cajero"))
+                .contentType(MediaType.APPLICATION_JSON).content(cuerpo));
+    }
+
+    private static String abono(int monto, String clave, String extra) {
+        return "{\"clienteDocumento\":\"" + TIENDA + "\",\"monto\":" + monto + ",\"medio\":\"EFECTIVO\",\"idempotencyKey\":\"" + clave + "\""
+                + (extra == null ? "" : "," + extra) + "}";
+    }
+
+    private java.util.UUID ordenDe(String debito) {
+        return dueno.queryForObject("SELECT order_uuid FROM debt_transactions WHERE id = ?", java.util.UUID.class, debito);
+    }
+
+    private static String fechaLarga(LocalDate d) {
+        return d.format(java.time.format.DateTimeFormatter.ofPattern("d 'de' MMMM 'de' yyyy", java.util.Locale.forLanguageTag("es-CO")));
+    }
+
+    @Test
+    @DisplayName("🔴 (b) en proceso: abonar lo ANTERIOR es 409 ABONO_A_DEUDA_ANTERIOR (elegida o sin elegir); lo POSTERIOR se abona y la más antigua reparte solo entre posteriores")
+    void abonosEnProceso() throws Exception {
+        String anterior = factura(100000, hoy.minusDays(20), Instant.now().minusSeconds(86400L * 20));
+        etapa(cuerpo("INICIO", hoy.minusDays(5), null)).andExpect(status().isCreated());
+        String texto = "Esa factura es anterior al inicio del proceso (" + fechaLarga(hoy.minusDays(5))
+                + "): se reclama dentro del proceso. No se registró el abono.";
+
+        // Solo hay deuda anterior: sin elegir y sin excedente, 409; con excedente, todo a favor sin tocarla.
+        abonar(abono(10000, "b-sin-posterior", null)).andExpect(status().isConflict())
+                .andExpect(ConflictoConMensaje.de("ABONO_A_DEUDA_ANTERIOR")).andExpect(jsonPath("$.message").value(texto));
+        abonar(abono(10000, "b-anticipo", "\"excedente\":\"SALDO_A_FAVOR\"")).andExpect(status().isCreated())
+                .andExpect(jsonPath("$.saldoAFavor").value(10000));
+        assertThat(contar("SELECT count(*) FROM cartera_aplicaciones WHERE tenant_id = ?", T)).isZero();
+
+        String posterior = factura(50000, hoy.minusDays(1), Instant.now().minusSeconds(86400));
+        abonar(abono(20000, "b-elegida-anterior", "\"aplicaciones\":[{\"orderUuid\":\"" + ordenDe(anterior) + "\",\"monto\":20000}]"))
+                .andExpect(status().isConflict()).andExpect(ConflictoConMensaje.de("ABONO_A_DEUDA_ANTERIOR"));
+        abonar(abono(20000, "b-elegida-posterior", "\"aplicaciones\":[{\"orderUuid\":\"" + ordenDe(posterior) + "\",\"monto\":20000}]"))
+                .andExpect(status().isCreated());
+        // Sin elegir: se reparte solo entre posteriores; más que lo posterior sin excedente es el 400 de siempre con ese tope.
+        abonar(abono(40000, "b-pasado", null)).andExpect(status().isBadRequest()).andExpect(jsonPath("$.maximo").value(30000));
+        abonar(abono(30000, "b-mas-antigua", null)).andExpect(status().isCreated());
+
+        assertThat(dueno.queryForObject("SELECT saldo FROM v_cartera_por_documento WHERE tenant_id = ? AND debito_tx_id = ?",
+                java.math.BigDecimal.class, T, anterior)).as("lo anterior no se tocó").isEqualByComparingTo("100000");
+        assertThat(dueno.queryForObject("SELECT saldo FROM v_cartera_por_documento WHERE tenant_id = ? AND debito_tx_id = ?",
+                java.math.BigDecimal.class, T, posterior)).isEqualByComparingTo("0");
+        assertThat(contar("SELECT count(*) FROM recibos_de_caja WHERE tenant_id = ?", T)).as("ni un recibo de los 409").isEqualTo(3);
+    }
+
+    @Test
+    @DisplayName("🔴 (b) la base también: una aplicación de abono a lo ANTERIOR o un cruce de saldo a favor con el cliente en proceso abortan (V76)")
+    void laBaseTambien() throws Exception {
+        String anterior = factura(100000, hoy.minusDays(20), Instant.now().minusSeconds(86400L * 20));
+        String recibo = leer(abonar(abono(10000, "base-recibo", null)).andExpect(status().isCreated())).get("id").asText();
+        String credito = dueno.queryForObject("SELECT id FROM debt_transactions WHERE recibo_id = ?::uuid", String.class, recibo);
+        etapa(cuerpo("INICIO", hoy.minusDays(5), null)).andExpect(status().isCreated());
+        JdbcTemplate app = new JdbcTemplate(new DriverManagerDataSource(PG.getJdbcUrl(), "app_user", "app_pw"));
+        for (String regla : List.of("ELEGIDA_POR_USUARIO", "MAS_ANTIGUA_PRIMERO", "SALDO_A_FAVOR_AUTOMATICO")) {
+            assertThatThrownBy(() -> app.execute((org.springframework.jdbc.core.ConnectionCallback<Object>) c -> {
+                c.setAutoCommit(false);
+                try (var st = c.createStatement()) {
+                    st.execute("SELECT set_config('app.tenant_id', '" + T + "', true)");
+                    st.execute("INSERT INTO cartera_aplicaciones (tenant_id, recibo_id, credito_tx_id, debito_tx_id, monto, regla) VALUES ('"
+                            + T + "', '" + recibo + "', '" + credito + "', '" + anterior + "', 1, '" + regla + "')");
+                } finally {
+                    c.rollback();
+                }
+                return null;
+            })).as(regla).rootCause().hasMessageContaining("proceso");
+        }
+    }
+
+    @Test
+    @DisplayName("🔴 (b) la columna puesta sin proceso en curso conserva el 409 viejo de cobros; en SOLICITUD se abona como siempre")
+    void columnaSinProcesoYSolicitud() throws Exception {
+        factura(100000, hoy.minusDays(20), Instant.now().minusSeconds(86400L * 20));
+        etapa(cuerpo("SOLICITUD", hoy.minusDays(2), null)).andExpect(status().isCreated());
+        abonar(abono(10000, "sol-abono", null)).andExpect(status().isCreated());
+        assertThat(estadoDeCuenta().get("frase").isNull()).as("en SOLICITUD la frase se ofrece").isFalse();
+
+        dueno.update("UPDATE clientes SET en_insolvencia_desde = ? WHERE tenant_id = ? AND documento = ?",
+                java.sql.Date.valueOf(hoy.minusDays(1)), T, TIENDA);
+        abonar(abono(10000, "col-abono", null)).andExpect(status().isConflict())
+                .andExpect(ConflictoConMensaje.de("CLIENTE_EN_INSOLVENCIA"))
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("cobros")));
+    }
+
+    @Test
+    @DisplayName("🔴 (b) en proceso el estado de cuenta no ofrece la frase de cobro: frase null y motivoSinFrase; cerrado el proceso, vuelve")
+    void sinFraseEnProceso() throws Exception {
+        factura(100000, hoy.minusDays(20), Instant.now().minusSeconds(86400L * 20));
+        JsonNode antes = estadoDeCuenta();
+        assertThat(antes.get("frase").asText()).contains("Tienda");
+        assertThat(antes.get("motivoSinFrase").isNull()).isTrue();
+        etapa(cuerpo("INICIO", hoy, null)).andExpect(status().isCreated());
+        JsonNode enProceso = estadoDeCuenta();
+        assertThat(enProceso.get("frase").isNull()).isTrue();
+        assertThat(enProceso.get("motivoSinFrase").asText()).isEqualTo("La deuda anterior al inicio se reclama dentro del proceso.");
+        etapa(cuerpo("CORRECCION_DE_ERROR", hoy, null)).andExpect(status().isCreated());
+        assertThat(estadoDeCuenta().get("frase").asText()).contains("Tienda");
     }
 }

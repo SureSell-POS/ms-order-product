@@ -204,10 +204,21 @@ class SaldoAFavorTest {
                 .contentType(MediaType.APPLICATION_JSON).content(cuerpo));
     }
 
+    /** Marca con la fecha (endpoint de F4.4) o, con null, levanta informando la etapa (F4.13 b: el null ya no levanta). */
     private void insolvencia(String desde) throws Exception {
+        if (desde == null) {
+            levantar().andExpect(status().isCreated());
+            return;
+        }
         mockMvc.perform(post("/api/cartera/clientes/" + TIENDA + "/insolvencia").header("Authorization", bearer(ADMIN, "admin"))
-                        .contentType(MediaType.APPLICATION_JSON).content("{\"desde\":" + (desde == null ? "null" : "\"" + desde + "\"") + "}"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"desde\":\"" + desde + "\"}"))
                 .andExpect(status().isOk());
+    }
+
+    private ResultActions levantar() throws Exception {
+        return mockMvc.perform(post("/api/cartera/clientes/" + TIENDA + "/insolvencia/etapas").header("Authorization", bearer(ADMIN, "admin"))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"etapa\":\"CORRECCION_DE_ERROR\",\"fecha\":\"" + hoy + "\",\"documento\":\"Se marco por error\",\"informadoPor\":\"admin\"}"));
     }
 
     private JsonNode leer(ResultActions r) throws Exception {
@@ -322,7 +333,7 @@ class SaldoAFavorTest {
         devolver(ADMIN, "admin", TIENDA, devolucion(20000, "CLIENTE_LO_PIDIO", null, "ii-devolucion"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.numero").value(1));
         devolver(ADMIN, "admin", TIENDA, devolucion(10000, "CLIENTE_LO_PIDIO", null, "ii-devolucion"))
-                .andExpect(status().isConflict()).andExpect(jsonPath("$.codigo").value("IDEMPOTENCIA_REUTILIZADA"));
+                .andExpect(status().isConflict()).andExpect(ConflictoConMensaje.de("IDEMPOTENCIA_REUTILIZADA"));
         // No más de lo que tiene a favor (ya 0).
         devolver(ADMIN, "admin", TIENDA, devolucion(1, "CLIENTE_LO_PIDIO", null, "ii-de-mas"))
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.campo").value("monto")).andExpect(jsonPath("$.maximo").value(0));
@@ -416,11 +427,11 @@ class SaldoAFavorTest {
                 + "VALUES (?, ?, ?, 40000, now(), 'Venta a credito', ?, 'DEBIT', ?, ?)", UUID.randomUUID().toString(), T, cuenta,
                 java.sql.Date.valueOf(hoy.minusDays(30)), java.sql.Date.valueOf(hoy.minusDays(22)), anterior);
 
-        // Vía 1: abono con facturas elegidas a la cuenta en proceso → 409 CLIENTE_EN_INSOLVENCIA, sin recibo.
+        // Vía 1: abono con facturas elegidas a una factura anterior al inicio → 409 ABONO_A_DEUDA_ANTERIOR (F4.13 b), sin recibo.
         abonar("{\"clienteDocumento\":\"" + TIENDA + "\",\"monto\":20000,\"medio\":\"EFECTIVO\",\"idempotencyKey\":\"ins-elegida\","
                 + "\"aplicaciones\":[{\"orderUuid\":\"" + anterior + "\",\"monto\":20000}]}")
                 .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.codigo").value("CLIENTE_EN_INSOLVENCIA"));
+                .andExpect(ConflictoConMensaje.de("ABONO_A_DEUDA_ANTERIOR"));
         // Vía 2: venta nueva a crédito desde la caja → entra marcada y no se aplica el saldo.
         vender(ventaACredito(TIENDA, "ins-venta", true))
                 .andExpect(status().isCreated())
@@ -428,9 +439,7 @@ class SaldoAFavorTest {
                 .andExpect(jsonPath("$.saldoAFavorAplicado").value(0))
                 .andExpect(jsonPath("$.saldoAFavorRestante").value(20000));
         // Vía 3: levantar la insolvencia no aplica nada en ese momento.
-        JsonNode levantada = leer(mockMvc.perform(post("/api/cartera/clientes/" + TIENDA + "/insolvencia")
-                        .header("Authorization", bearer(ADMIN, "admin")).contentType(MediaType.APPLICATION_JSON).content("{\"desde\":null}"))
-                .andExpect(status().isOk()));
+        JsonNode levantada = leer(levantar().andExpect(status().isCreated()));
         assertThat(levantada.has("saldoAFavorAplicado")).as(levantada.toString()).isFalse();
         insolvencia(hoy.toString());
         // Vía 4: anular el recibo que pagó la factura la reabre; con la cuenta en proceso el saldo no se cruza.
@@ -510,7 +519,7 @@ class SaldoAFavorTest {
         mockMvc.perform(post("/api/cartera/recibos/" + recibo + "/anular").header("Authorization", bearer(ADMIN, "admin"))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"motivo\":\"ERROR_DE_MONTO\"}"))
                 .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.codigo").value("SALDO_A_FAVOR_YA_DEVUELTO"));
+                .andExpect(ConflictoConMensaje.de("SALDO_A_FAVOR_YA_DEVUELTO"));
         assertThat(contar("SELECT count(*) FROM recibos_de_caja WHERE tenant_id = ? AND anula_recibo_id IS NOT NULL", T)).isZero();
         assertThat(libro(TIENDA)).isEqualByComparingTo(libroAntes);
         assertThat(estadoDeCuenta(TIENDA).get("saldoAFavor").decimalValue()).isEqualByComparingTo("15000");

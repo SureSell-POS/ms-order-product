@@ -11,6 +11,8 @@ package com.suresell.orders.shared.exception;
  *   <li>{@code RECIBO_ES_ANULACION}: una anulación no se anula; se registra otro recibo.</li>
  *   <li>{@code VENTA_YA_RESUELTA}: esa venta a un insolvente ya tiene su decisión (F4.11).</li>
  * </ul>
+ *
+ * <p>Siempre con texto: el POS y el panel pintan {@code message} (ConflictosDeCarteraConMensajeTest).
  */
 public class ConflictoDeCarteraException extends RuntimeException {
 
@@ -23,8 +25,16 @@ public class ConflictoDeCarteraException extends RuntimeException {
     private final String codigo;
 
     public ConflictoDeCarteraException(String codigo, String mensaje) {
-        super(mensaje);
+        super(conTexto(mensaje));
         this.codigo = codigo;
+    }
+
+    /** Quien pinta el 409 muestra este texto: sin él, el POS cae en un genérico que engaña. */
+    private static String conTexto(String mensaje) {
+        if (mensaje == null || mensaje.isBlank()) {
+            throw new IllegalArgumentException("Un conflicto de cartera lleva texto para quien lo pinta.");
+        }
+        return mensaje;
     }
 
     public String codigo() {

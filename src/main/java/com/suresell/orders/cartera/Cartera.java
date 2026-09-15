@@ -56,6 +56,10 @@ public class Cartera {
     /** `debt_transactions.amount` es NUMERIC(10,2) (V28). */
     static final BigDecimal MONTO_MAXIMO = new BigDecimal("99999999.99");
     static final String NO_EXISTE = "Ese cliente no existe en el negocio.";
+    /** TEXTOS §B9 (F4.13 b). */
+    static final String DEUDA_ANTERIOR_SE_RECLAMA_EN_EL_PROCESO = "La deuda anterior al inicio se reclama dentro del proceso.";
+    public static final String ABONO_A_DEUDA_ANTERIOR = "ABONO_A_DEUDA_ANTERIOR";
+    private static final DateTimeFormatter FECHA_LARGA = DateTimeFormatter.ofPattern("d 'de' MMMM 'de' yyyy", Locale.forLanguageTag("es-CO"));
 
     private final JdbcTemplate jdbc;
 
@@ -190,8 +194,12 @@ public class Cartera {
         estado.put("documentos", documentos);
         estado.put("recibos", recibos);
         saldoAFavorDelCliente(quien.negocio(), (String) cliente.get("clienteDocumento"), inicio, fin, estado);
-        estado.put("insolvencia", insolvenciaAbierta(quien.negocio(), (String) cliente.get("clienteDocumento")));
-        estado.put("frase", frase(quien.negocio(), cliente, hoy));
+        Map<String, Object> insolvencia = insolvenciaAbierta(quien.negocio(), (String) cliente.get("clienteDocumento"));
+        estado.put("insolvencia", insolvencia);
+        // F4.13 (b): en proceso no se ofrece la frase de cobro; ofrecer cobrar la deuda anterior es lo que la ley castiga.
+        boolean enProceso = insolvencia != null && Boolean.TRUE.equals(insolvencia.get("enProceso"));
+        estado.put("frase", enProceso ? null : frase(quien.negocio(), cliente, hoy));
+        estado.put("motivoSinFrase", enProceso ? DEUDA_ANTERIOR_SE_RECLAMA_EN_EL_PROCESO : null);
         return estado;
     }
 
@@ -480,25 +488,55 @@ public class Cartera {
 
         Map<String, Object> ficha = fichaVisible(quien, documento);
         LocalDate hoy = LocalDate.now(BOGOTA);
-        // Insolvencia: se suspenden los cobros. Ley 1116 de 2006 (y Ley 2445 de 2025): los pagos
-        // por fuera del proceso a deudas anteriores a su inicio son ineficaces. Anular sí se permite.
+        boolean aSaldoAFavor = EXCEDENTE_A_FAVOR.equals(r.excedente() == null ? null : r.excedente().trim().toUpperCase(Locale.ROOT));
+        // Insolvencia (F4.13 b): pagar por fuera del proceso lo anterior a su inicio es ineficaz (Ley 1116 de 2006, Ley 2445
+        // de 2025). Con el proceso en curso se abona solo lo POSTERIOR; la base lo repite (V76). Anular sí se permite.
         Object insolvente = ficha == null ? null : ficha.get("en_insolvencia_desde");
+        LocalDate inicioDelProceso = null;
+        Set<String> anteriores = Set.of();
         if (insolvente != null && !((java.sql.Date) insolvente).toLocalDate().isAfter(hoy)) {
-            throw ClienteEnInsolvenciaException.alCobrar(documento, ((java.sql.Date) insolvente).toLocalDate());
+            inicioDelProceso = jdbc.queryForList("""
+                    SELECT inicio FROM v_insolvencia_vigente WHERE tenant_id = ? AND cliente_documento = ? AND en_proceso""",
+                    java.sql.Date.class, negocio, documento).stream().findFirst().map(java.sql.Date::toLocalDate).orElse(null);
+            if (inicioDelProceso == null) {
+                // La columna puesta sin proceso en curso (escrita fuera de la función de V75): los cobros siguen suspendidos.
+                throw ClienteEnInsolvenciaException.alCobrar(documento, ((java.sql.Date) insolvente).toLocalDate());
+            }
+            anteriores = new HashSet<>(jdbc.queryForList("""
+                    SELECT debito_tx_id FROM v_insolvencia_clasificacion
+                     WHERE tenant_id = ? AND cliente_documento = ? AND clasificacion = 'ANTERIOR'""", String.class, negocio, documento));
         }
 
         String cuenta = cuentaBloqueada(negocio, documento)
                 .orElseThrow(() -> new DatoInvalidoException("clienteDocumento", "Ese cliente no tiene cuenta por cobrar."));
-        List<Map<String, Object>> vivas = facturasVivas(negocio, cuenta);
+        List<Map<String, Object>> delCliente = facturasVivas(negocio, cuenta);
+        List<Map<String, Object>> vivas = delCliente;
+        if (inicioDelProceso != null) {
+            Set<String> deAntes = anteriores;
+            ConflictoDeCarteraException alAnterior = new ConflictoDeCarteraException(ABONO_A_DEUDA_ANTERIOR,
+                    "Esa factura es anterior al inicio del proceso (" + inicioDelProceso.format(FECHA_LARGA)
+                            + "): se reclama dentro del proceso. No se registró el abono.");
+            if (r.aplicaciones() != null && r.aplicaciones().stream().anyMatch(a -> a != null && delCliente.stream()
+                    .anyMatch(f -> f.get("order_uuid") != null && f.get("order_uuid").equals(a.orderUuid())
+                            && deAntes.contains((String) f.get("debito_tx_id"))))) {
+                throw alAnterior;
+            }
+            boolean habiaAnteriores = delCliente.stream().anyMatch(f -> deAntes.contains((String) f.get("debito_tx_id")));
+            vivas = delCliente.stream().filter(f -> !deAntes.contains((String) f.get("debito_tx_id"))).toList();
+            if (vivas.isEmpty() && habiaAnteriores && !aSaldoAFavor) {
+                throw alAnterior;
+            }
+        }
         BigDecimal deudaFacturas = vivas.stream().map(f -> decimal(f.get("saldo"))).reduce(BigDecimal.ZERO, BigDecimal::add);
         BigDecimal deudaLibro = saldoDelLibro(negocio, cuenta);
-        BigDecimal debe = deudaFacturas.min(deudaLibro);
+        // En proceso, lo anterior no cuenta como deuda que se pueda abonar: el tope es lo posterior.
+        BigDecimal debe = inicioDelProceso != null ? deudaFacturas : deudaFacturas.min(deudaLibro);
         BigDecimal aAplicar = monto;
         if (monto.compareTo(debe) > 0) {
             BigDecimal maximo = debe.max(BigDecimal.ZERO);
             // F4.12: la bifurcación. Sin la intención explícita, el 400 de siempre (un POS o panel que no la conoce
             // no cambia); con SALDO_A_FAVOR, se aplica lo que debe y el resto queda a su favor.
-            if (!EXCEDENTE_A_FAVOR.equals(r.excedente() == null ? null : r.excedente().trim().toUpperCase(Locale.ROOT))) {
+            if (!aSaldoAFavor) {
                 throw new com.suresell.orders.shared.exception.MontoPorEncimaDelMaximoException("monto", maximo,
                         "El cliente debe " + pesos(maximo) + "; no se puede abonar más.");
             }

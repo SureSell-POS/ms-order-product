@@ -113,7 +113,7 @@ public class CarteraController {
 
     @PostMapping("/clientes/{documento}/insolvencia")
     @Operation(summary = "F4.4 — Marcar (o con desde=null, levantar) la insolvencia de un cliente (solo admin). Desde F4.13: "
-            + "con fecha registra INICIO sin documento y régimen pendiente; con null, CORRECCION_DE_ERROR; "
+            + "con fecha registra INICIO sin documento y régimen pendiente; con null y proceso abierto, 409 LEVANTAR_SIN_ETAPA; "
             + "409 LIQUIDACION_NO_SE_LEVANTA en liquidación; 400 fecha si es posterior a hoy")
     public Map<String, Object> insolvencia(@PathVariable String documento, @RequestBody Insolvencia cuerpo,
                                            HttpServletRequest http) {

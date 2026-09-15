@@ -79,6 +79,9 @@ class CostoDeLaFotoDeInsolvenciaTest {
                         + "SELECT gen_random_uuid(), r.tenant_id, 0, 'D1', r.monto, 'EFECTIVO', r.ocurrido_en + interval '1 day', r.idempotency_key || '-anul', r.id, 'DUPLICADO' "
                         + "FROM recibos_de_caja r WHERE r.tenant_id = '" + n + "' AND substring(r.idempotency_key from '[0-9]+$')::int % 7 = 0");
             }
+            // Un negocio con muchos clientes: con dos filas el plan de clientes sería un Seq Scan que no dice nada.
+            st.execute("INSERT INTO clientes (tenant_id, documento, nombre, plazo_dias, creado_por) "
+                    + "SELECT 'foto-vecino', 'V' || g, 'Cliente ' || g, 8, 's' FROM generate_series(1, 5000) g");
             st.execute("ANALYZE");
         }
     }
@@ -166,6 +169,57 @@ class CostoDeLaFotoDeInsolvenciaTest {
                 filas.put("foto por la función", rs.getInt(1));
             }
         }
+        // F4.13 (b), V76: el disparador de cartera_aplicaciones sobre el caso normal, un cliente SIN proceso en un negocio con
+        // 20.000 facturas (el vecino). Tiene que ser el recibo y el cliente por índice, y fuera.
+        String planDelDisparador;
+        try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), "app_user", "app_pw");
+             Statement st = c.createStatement()) {
+            st.execute("SET jit = off");
+            st.execute("SELECT set_config('app.tenant_id', 'foto-vecino', false)");
+            String recibo;
+            try (ResultSet rs = st.executeQuery("SELECT id::text FROM recibos_de_caja WHERE tenant_id = 'foto-vecino' AND anula_recibo_id IS NULL LIMIT 1")) {
+                rs.next();
+                recibo = rs.getString(1);
+            }
+            StringBuilder plan = new StringBuilder();
+            // Las dos lecturas del disparador; el cliente, uno del final del orden (V4999) para que un recorrido se notara.
+            for (String[] lectura : new String[][] {
+                    {"recibo", "EXPLAIN (ANALYZE) SELECT r.cliente_documento FROM recibos_de_caja r WHERE r.tenant_id = 'foto-vecino' AND r.id = '" + recibo + "'"},
+                    {"cliente", "EXPLAIN (ANALYZE) SELECT c.en_insolvencia_desde FROM clientes c WHERE c.tenant_id = 'foto-vecino' AND c.documento = 'V4999'"}}) {
+                try (ResultSet rs = st.executeQuery(lectura[1])) {
+                    while (rs.next()) {
+                        plan.append(rs.getString(1)).append('\n');
+                        if (rs.getString(1).startsWith("Execution Time:")) {
+                            tiempos.put("disparador V76, cliente sin proceso (" + lectura[0] + ")", Double.parseDouble(rs.getString(1).replaceAll("[^0-9.]", "")));
+                        }
+                    }
+                }
+            }
+            planDelDisparador = plan.toString();
+            c.setAutoCommit(false);
+            String credito;
+            String debito;
+            try (ResultSet rs = st.executeQuery("SELECT (SELECT id FROM debt_transactions WHERE recibo_id = '" + recibo + "'), "
+                    + "(SELECT id FROM debt_transactions WHERE tenant_id = 'foto-vecino' AND type = 'DEBIT' LIMIT 1)")) {
+                rs.next();
+                credito = rs.getString(1);
+                debito = rs.getString(2);
+            }
+            try (ResultSet rs = st.executeQuery("EXPLAIN (ANALYZE) INSERT INTO cartera_aplicaciones (tenant_id, recibo_id, credito_tx_id, debito_tx_id, monto, regla) "
+                    + "VALUES ('foto-vecino', '" + recibo + "', '" + credito + "', '" + debito + "', 1, 'MAS_ANTIGUA_PRIMERO')")) {
+                while (rs.next()) {
+                    String l = rs.getString(1);
+                    if (l.startsWith("Trigger trg_aplicacion_respeta_la_insolvencia")) {
+                        tiempos.put("disparador V76 en el INSERT", Double.parseDouble(l.replaceAll(".*time=([0-9.]+).*", "$1")));
+                    }
+                }
+            }
+            c.rollback();
+        }
+        System.out.println("── plan de la lectura del disparador V76 ──\n" + planDelDisparador);
+        assertThat(planDelDisparador).contains("Index Scan using pk_recibos_de_caja", "Index Scan using ux_clientes_documento")
+                .contains("Index Cond: ((tenant_id = 'foto-vecino'::text) AND (documento = 'V4999'::text))")
+                .doesNotContain("Seq Scan").doesNotContain("Join");
         System.out.println("── foto de insolvencia, tiempos (ms, sin JIT, app_user) ── " + tiempos + " · facturas con saldo al corte " + filas);
         assertThat(filas.get("foto por la función")).isEqualTo(filas.get("corte hace 180 días"));
         assertThat(tiempos.values()).allSatisfy(ms -> assertThat(ms).isPositive());

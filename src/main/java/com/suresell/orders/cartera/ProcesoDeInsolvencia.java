@@ -39,6 +39,10 @@ public class ProcesoDeInsolvencia {
     public static final Set<String> REGIMENES = Set.of("LEY_1116", "CGP");
     public static final String LIQUIDACION_NO_SE_LEVANTA = "LIQUIDACION_NO_SE_LEVANTA";
     public static final String ETAPA_NO_PERMITIDA = "ETAPA_NO_PERMITIDA";
+    public static final String LEVANTAR_SIN_ETAPA = "LEVANTAR_SIN_ETAPA";
+    /** TEXTOS §B8 (F4.13 b). */
+    static final String SE_LEVANTA_CON_UNA_ETAPA = "La insolvencia se levanta informando que el acuerdo se cumplió y el proceso "
+            + "terminó, o que se marcó por error. No se registró nada.";
 
     /** TEXTOS §B9, aprobado por ECM el 2026-09-15: la fecha del INICIO (y la que la corrige). */
     static final String FECHA_POSTERIOR_A_HOY =
@@ -68,7 +72,6 @@ public class ProcesoDeInsolvencia {
             "CORRECCION_DE_ERROR", "Corrección de registro");
 
     static final String SIN_DOCUMENTO_DESDE_LA_MARCA = "Sin documento (registrado desde la marca anterior)";
-    static final String LEVANTADA_DESDE_LA_MARCA = "Levantada desde la marca anterior";
     static final String FECHA_CORREGIDA_DESDE_LA_MARCA = "Fecha de inicio corregida desde la marca anterior";
 
     private final JdbcTemplate jdbc;
@@ -127,8 +130,9 @@ public class ProcesoDeInsolvencia {
 
     /**
      * POST /api/cartera/clientes/{documento}/insolvencia (admin), el endpoint de F4.4 que consume el panel (R10). Con fecha:
-     * INICIO sin documento y con régimen pendiente (o corrige la fecha del INICIO si ya estaba en proceso). Con null: se
-     * levanta como corrección de error, salvo en LIQUIDACION (409). Responde lo mismo que antes.
+     * INICIO sin documento y con régimen pendiente (o corrige la fecha del INICIO si ya estaba en proceso). Con null y un
+     * proceso abierto: 409 LEVANTAR_SIN_ETAPA (F4.13 b), o LIQUIDACION_NO_SE_LEVANTA en liquidación; sin proceso, nada.
+     * Responde lo mismo que antes.
      */
     @Transactional
     public Map<String, Object> marcarDesdeLaMarcaAnterior(Quien quien, String documento, LocalDate desde) {
@@ -149,8 +153,8 @@ public class ProcesoDeInsolvencia {
         } else if ("LIQUIDACION".equals(etapa)) {
             throw new ConflictoDeCarteraException(LIQUIDACION_NO_SE_LEVANTA, EN_LIQUIDACION_NO_SE_LEVANTA);
         } else if (etapa != null) {
-            informar(quien, doc, "CORRECCION_DE_ERROR", LocalDate.now(Cartera.BOGOTA), LEVANTADA_DESDE_LA_MARCA, null, autor,
-                    null, null, null);
+            // F4.13 (b): se levanta solo informando CUMPLIDO_TERMINADO o CORRECCION_DE_ERROR por …/insolvencia/etapas (B8).
+            throw new ConflictoDeCarteraException(LEVANTAR_SIN_ETAPA, SE_LEVANTA_CON_UNA_ETAPA);
         }
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("clienteDocumento", doc);

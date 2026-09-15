@@ -224,7 +224,7 @@ class CarteraTest {
                 .andExpect(jsonPath("$.repetido").value(true));
         abonar(CAJA, "cajero", abono(TIENDA_A, 25000, "EFECTIVO", "idem-1"))
                 .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.codigo").value("IDEMPOTENCIA_REUTILIZADA"));
+                .andExpect(ConflictoConMensaje.de("IDEMPOTENCIA_REUTILIZADA"));
         assertThat(dueno.queryForObject("SELECT count(*) FROM recibos_de_caja WHERE tenant_id = ?", Integer.class, T)).isEqualTo(1);
         assertThat(totalDebt(TIENDA_A)).isEqualByComparingTo("90000");
     }
@@ -292,11 +292,11 @@ class CarteraTest {
 
         mockMvc.perform(post("/api/cartera/recibos/" + id + "/anular").header("Authorization", bearer(ADMIN, "admin"))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"motivo\":\"DUPLICADO\"}"))
-                .andExpect(status().isConflict()).andExpect(jsonPath("$.codigo").value("RECIBO_YA_ANULADO"));
+                .andExpect(status().isConflict()).andExpect(ConflictoConMensaje.de("RECIBO_YA_ANULADO"));
         mockMvc.perform(post("/api/cartera/recibos/" + anulacion.get("id").asText() + "/anular")
                         .header("Authorization", bearer(ADMIN, "admin"))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"motivo\":\"DUPLICADO\"}"))
-                .andExpect(status().isConflict()).andExpect(jsonPath("$.codigo").value("RECIBO_ES_ANULACION"));
+                .andExpect(status().isConflict()).andExpect(ConflictoConMensaje.de("RECIBO_ES_ANULACION"));
         // El recibo original muestra quién lo anuló.
         mockMvc.perform(get("/api/cartera/clientes/" + TIENDA_A + "/estado-de-cuenta").header("Authorization", bearer(ADMIN, "admin")))
                 .andExpect(jsonPath("$.recibos[0].anuladoPor.numero").value(2))
@@ -351,13 +351,18 @@ class CarteraTest {
         mockMvc.perform(post("/api/cartera/clientes/" + TIENDA_A + "/insolvencia").header("Authorization", bearer(ADMIN, "admin"))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"desde\":\"" + hoy + "\"}"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.enInsolvenciaDesde").value(hoy.toString()));
+        // F4.13 (b): toda su deuda es anterior al inicio; el abono sin elegir no la toca.
         abonar(CAJA, "cajero", abono(TIENDA_A, 1000, "EFECTIVO", "ins-1"))
                 .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.codigo").value("CLIENTE_EN_INSOLVENCIA"))
-                .andExpect(jsonPath("$.message").value(Matchers.containsString("cobros")));
+                .andExpect(ConflictoConMensaje.de("ABONO_A_DEUDA_ANTERIOR"))
+                .andExpect(jsonPath("$.message").value(Matchers.containsString("anterior al inicio del proceso")));
         mockMvc.perform(post("/api/cartera/clientes/" + TIENDA_A + "/insolvencia").header("Authorization", bearer(ADMIN, "admin"))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"desde\":null}"))
-                .andExpect(status().isOk());
+                .andExpect(status().isConflict()).andExpect(ConflictoConMensaje.de("LEVANTAR_SIN_ETAPA"));
+        mockMvc.perform(post("/api/cartera/clientes/" + TIENDA_A + "/insolvencia/etapas").header("Authorization", bearer(ADMIN, "admin"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"etapa\":\"CORRECCION_DE_ERROR\",\"fecha\":\"" + hoy + "\",\"documento\":\"Se marco por error\",\"informadoPor\":\"admin\"}"))
+                .andExpect(status().isCreated());
         abonar(CAJA, "cajero", abono(TIENDA_A, 1000, "EFECTIVO", "ins-2")).andExpect(status().isCreated());
         assertThat(dueno.queryForList("SELECT campo FROM clientes_eventos WHERE tenant_id = ? ORDER BY ocurrido_en", String.class, T))
                 .containsExactly("cupo", "en_insolvencia_desde", "en_insolvencia_desde");

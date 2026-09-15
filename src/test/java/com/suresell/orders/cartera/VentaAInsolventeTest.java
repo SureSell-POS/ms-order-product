@@ -177,7 +177,7 @@ class VentaAInsolventeTest {
     void sinCajaSeSigueRechazando() throws Exception {
         vender(ventaACredito(INSOLVENTE, "api-insolvente", false))
                 .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.codigo").value("CLIENTE_EN_INSOLVENCIA"));
+                .andExpect(ConflictoConMensaje.de("CLIENTE_EN_INSOLVENCIA"));
         assertThat(contar("SELECT count(*) FROM orders WHERE tenant_id = ? AND idempotency_key = 'api-insolvente'", T)).isZero();
         assertThat(contar("SELECT count(*) FROM debt_transactions WHERE tenant_id = ?", T)).isZero();
         assertThat(contar("SELECT count(*) FROM ventas_a_insolvente WHERE tenant_id = ?", T)).isZero();
@@ -239,7 +239,7 @@ class VentaAInsolventeTest {
         mockMvc.perform(post("/api/cartera/ventas-a-insolvente/" + id + "/resolucion").header("Authorization", bearer(ADMIN, "admin"))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"decision\":\"COBRAR_DE_CONTADO\"}"))
                 .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.codigo").value("VENTA_YA_RESUELTA"));
+                .andExpect(ConflictoConMensaje.de("VENTA_YA_RESUELTA"));
         assertThat(contar("SELECT count(*) FROM ventas_a_insolvente_resoluciones WHERE tenant_id = ?", T)).isEqualTo(1);
         assertThat(contar("SELECT count(*) FROM debt_transactions WHERE tenant_id = ? AND type = 'DEBIT'", T)).isEqualTo(1);
 
