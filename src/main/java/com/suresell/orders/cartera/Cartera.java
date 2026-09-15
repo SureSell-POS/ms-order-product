@@ -146,8 +146,10 @@ public class Cartera {
 
         List<Map<String, Object>> documentos = jdbc.queryForList("""
                 SELECT d.debito_tx_id, d.order_uuid, d.fecha, d.vence_el, d.monto, d.aplicado, d.saldo,
-                       d.dias_vencido, d.edad
+                       d.dias_vencido, d.edad, k.clasificacion
                   FROM v_cartera_por_documento d
+                  -- F4.13: ANTERIOR o POSTERIOR al corte del proceso en curso; null sin proceso (V75).
+                  LEFT JOIN v_insolvencia_clasificacion k ON k.tenant_id = d.tenant_id AND k.debito_tx_id = d.debito_tx_id
                  WHERE d.tenant_id = ? AND d.cliente_documento = ?
                    AND (d.saldo > 0 OR d.fecha BETWEEN ? AND ?)
                    -- F4.12: el DEBIT de una devolución de saldo a favor no es una factura.
@@ -165,6 +167,7 @@ public class Cartera {
                     r.put("saldo", f.get("saldo"));
                     r.put("diasVencido", f.get("dias_vencido"));
                     r.put("edad", f.get("edad"));
+                    r.put("clasificacion", f.get("clasificacion"));
                     return r;
                 }).toList();
 
@@ -187,8 +190,27 @@ public class Cartera {
         estado.put("documentos", documentos);
         estado.put("recibos", recibos);
         saldoAFavorDelCliente(quien.negocio(), (String) cliente.get("clienteDocumento"), inicio, fin, estado);
+        estado.put("insolvencia", insolvenciaAbierta(quien.negocio(), (String) cliente.get("clienteDocumento")));
         estado.put("frase", frase(quien.negocio(), cliente, hoy));
         return estado;
+    }
+
+    /** F4.13: el proceso de insolvencia abierto del cliente (también en SOLICITUD), o null. El detalle, en ProcesoDeInsolvencia. */
+    private Map<String, Object> insolvenciaAbierta(String negocio, String documento) {
+        return jdbc.queryForList("""
+                SELECT proceso_id, etapa, en_proceso, inicio, regimen, numero_proceso FROM v_insolvencia_vigente
+                 WHERE tenant_id = ? AND cliente_documento = ? AND abierto ORDER BY abierto_en DESC LIMIT 1""", negocio, documento)
+                .stream().findFirst().map(v -> {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("procesoId", v.get("proceso_id"));
+                    m.put("etapa", v.get("etapa"));
+                    m.put("enProceso", v.get("en_proceso"));
+                    m.put("inicio", fecha(v.get("inicio")));
+                    m.put("regimen", v.get("regimen"));
+                    m.put("regimenPendiente", v.get("regimen") == null);
+                    m.put("numeroProceso", v.get("numero_proceso"));
+                    return m;
+                }).orElse(null);
     }
 
     /** «En una frase», para WhatsApp. Sin enlaces ni datos internos. */
@@ -738,27 +760,6 @@ public class Cartera {
         return resumenVisible(quien, doc);
     }
 
-    /**
-     * POST /api/cartera/clientes/{documento}/insolvencia (admin). {@code desde} null
-     * levanta la marca. El rastro lo escribe el disparador de {@code clientes} (V64).
-     */
-    @Transactional
-    public Map<String, Object> marcarInsolvencia(Quien quien, String documento, LocalDate desde) {
-        String doc = obligatorio(documento, "documento", NO_EXISTE);
-        fijarAutor(quien);
-        int n = jdbc.update("UPDATE clientes SET en_insolvencia_desde = ?, actualizado_en = now() WHERE tenant_id = ? AND documento = ?",
-                desde == null ? null : java.sql.Date.valueOf(desde), quien.negocio(), doc);
-        if (n == 0) {
-            throw new DatoInvalidoException("documento", NO_EXISTE);
-        }
-        Map<String, Object> r = new LinkedHashMap<>();
-        r.put("clienteDocumento", doc);
-        r.put("enInsolvenciaDesde", desde == null ? null : desde.toString());
-        // F4.12: levantar la insolvencia NO aplica el saldo a favor (compensar en un proceso es ineficaz). Queda visible y
-        // la regla normal vuelve con la siguiente venta a crédito. Límite conocido (V74): levantar sin proceso terminado; F4.13.
-        return r;
-    }
-
     // ------------------------------------------------------------ saldo a favor (F4.12)
 
     static final Set<String> MOTIVOS_DE_EGRESO = Set.of("CLIENTE_LO_PIDIO", "CIERRE_DE_CUENTA", "DEVUELTO_AL_PROCESO");
@@ -779,7 +780,7 @@ public class Cartera {
                 java.sql.Date.class, negocio, documento).stream().findFirst().map(java.sql.Date::toLocalDate);
     }
 
-    private BigDecimal saldoAFavor(String negocio, String documento) {
+    BigDecimal saldoAFavor(String negocio, String documento) {
         return jdbc.queryForObject("""
                 SELECT COALESCE(sum(saldo_a_favor), 0) FROM v_saldo_a_favor_por_recibo
                  WHERE tenant_id = ? AND cliente_documento = ?""", BigDecimal.class, negocio, documento);
@@ -1153,7 +1154,7 @@ public class Cartera {
      * otro no existe (mismo texto, no se confirma nada). Una cuenta antigua sin
      * ficha solo la ve quien no es vendedor: devuelve null.
      */
-    private Map<String, Object> fichaVisible(Quien quien, String documento) {
+    Map<String, Object> fichaVisible(Quien quien, String documento) {
         List<Map<String, Object>> fichas = jdbc.queryForList(
                 "SELECT vendedor_id, en_insolvencia_desde FROM clientes WHERE tenant_id = ? AND documento = ?",
                 quien.negocio(), documento);
@@ -1195,12 +1196,12 @@ public class Cartera {
                   FROM debt_transactions WHERE tenant_id = ? AND account_id = ?""", BigDecimal.class, negocio, cuenta);
     }
 
-    private void fijarAutor(Quien quien) {
+    void fijarAutor(Quien quien) {
         jdbc.query("SELECT set_config('app.user_id', ?, true)", rs -> null,
                 quien.usuarioId() == null ? "" : String.valueOf(quien.usuarioId()));
     }
 
-    private static String autorDelLibro(Quien quien) {
+    static String autorDelLibro(Quien quien) {
         return quien.usuarioId() == null ? "usuario:desconocido" : "usuario:" + quien.usuarioId();
     }
 

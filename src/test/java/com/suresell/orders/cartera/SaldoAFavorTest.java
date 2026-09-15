@@ -98,6 +98,7 @@ class SaldoAFavorTest {
     void sembrar() {
         dueno = new JdbcTemplate(new DriverManagerDataSource(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword()));
         for (String t : new String[] {T, OTRO}) {
+            ProcesoDeInsolvenciaTest.limpiarInsolvencia(dueno, t);
             dueno.update("DELETE FROM cartera_aplicaciones WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM egresos_de_cartera WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM contadores_de_egresos WHERE tenant_id = ?", t);

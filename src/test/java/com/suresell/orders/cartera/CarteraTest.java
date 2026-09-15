@@ -95,6 +95,7 @@ class CarteraTest {
     void sembrar() {
         dueno = new JdbcTemplate(new DriverManagerDataSource(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword()));
         for (String t : new String[] {T, OTRO}) {
+            ProcesoDeInsolvenciaTest.limpiarInsolvencia(dueno, t);
             dueno.update("DELETE FROM cartera_aplicaciones WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM debt_transactions WHERE tenant_id = ?", t);
             dueno.update("DELETE FROM recibos_de_caja WHERE tenant_id = ? AND anula_recibo_id IS NOT NULL", t);

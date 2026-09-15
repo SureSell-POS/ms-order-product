@@ -2,6 +2,7 @@ package com.suresell.orders.infrastructure.web;
 
 import com.suresell.orders.cartera.Cartera;
 import com.suresell.orders.cartera.Cartera.Quien;
+import com.suresell.orders.cartera.ProcesoDeInsolvencia;
 import com.suresell.orders.multitenant.JwtTenantResolver;
 import com.suresell.orders.multitenant.TenantContext;
 import com.suresell.orders.multitenant.UsuarioDeLaPeticion;
@@ -41,11 +42,14 @@ public class CarteraController {
     static final Set<String> ROLES_QUE_COBRAN = Set.of("admin", "cajero", "vendedor");
 
     private final Cartera cartera;
+    private final ProcesoDeInsolvencia insolvencias;
     private final JwtTenantResolver tokens;
     private final UsuarioDeLaPeticion usuarios;
 
-    public CarteraController(Cartera cartera, JwtTenantResolver tokens, UsuarioDeLaPeticion usuarios) {
+    public CarteraController(Cartera cartera, ProcesoDeInsolvencia insolvencias, JwtTenantResolver tokens,
+                             UsuarioDeLaPeticion usuarios) {
         this.cartera = cartera;
+        this.insolvencias = insolvencias;
         this.tokens = tokens;
         this.usuarios = usuarios;
     }
@@ -108,11 +112,45 @@ public class CarteraController {
     public record Insolvencia(@DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate desde) {}
 
     @PostMapping("/clientes/{documento}/insolvencia")
-    @Operation(summary = "F4.4 — Marcar (o con desde=null, levantar) la insolvencia de un cliente (solo admin)")
+    @Operation(summary = "F4.4 — Marcar (o con desde=null, levantar) la insolvencia de un cliente (solo admin). Desde F4.13: "
+            + "con fecha registra INICIO sin documento y régimen pendiente; con null, CORRECCION_DE_ERROR; "
+            + "409 LIQUIDACION_NO_SE_LEVANTA en liquidación; 400 fecha si es posterior a hoy")
     public Map<String, Object> insolvencia(@PathVariable String documento, @RequestBody Insolvencia cuerpo,
                                            HttpServletRequest http) {
-        return cartera.marcarInsolvencia(quien(http, Set.of("admin"), "marcar la insolvencia de un cliente"), documento,
-                cuerpo == null ? null : cuerpo.desde());
+        return insolvencias.marcarDesdeLaMarcaAnterior(quien(http, Set.of("admin"), "marcar la insolvencia de un cliente"),
+                documento, cuerpo == null ? null : cuerpo.desde());
+    }
+
+    @PostMapping("/clientes/{documento}/insolvencia/etapas")
+    @Operation(summary = "F4.13 — Informar una etapa del proceso de insolvencia (solo admin): SOLICITUD, SOLICITUD_NO_ADMITIDA, "
+            + "INICIO (toma la foto de la deuda), ACUERDO_CONFIRMADO, CUMPLIDO_TERMINADO, LIQUIDACION o CORRECCION_DE_ERROR "
+            + "(con corrigeEtapaId corrige la fecha de esa etapa). 409 ETAPA_NO_PERMITIDA o LIQUIDACION_NO_SE_LEVANTA")
+    @ResponseStatus(HttpStatus.CREATED)
+    public Map<String, Object> informarEtapa(@PathVariable String documento, @RequestBody ProcesoDeInsolvencia.NuevaEtapa cuerpo,
+                                             HttpServletRequest http) {
+        return insolvencias.informarEtapa(quien(http, Set.of("admin"), "informar una etapa de insolvencia"), documento, cuerpo);
+    }
+
+    @GetMapping("/clientes/{documento}/insolvencia")
+    @Operation(summary = "F4.13 — El proceso de insolvencia del cliente: etapa vigente, inicio, corte, régimen, etapas, foto y "
+            + "cifras (deuda anterior al inicio, saldo a favor, ventas posteriores)")
+    public Map<String, Object> proceso(@PathVariable String documento, HttpServletRequest http) {
+        return insolvencias.proceso(quien(http, ROLES_QUE_COBRAN, "ver la cartera"), documento);
+    }
+
+    @GetMapping("/clientes/{documento}/insolvencia/foto")
+    @Operation(summary = "F4.13 — La deuda al inicio del proceso factura por factura, con su huella (solo admin). "
+            + "?formato=csv para descargarla y presentarla al proceso")
+    public ResponseEntity<?> foto(@PathVariable String documento, @RequestParam(required = false) String formato,
+                                  HttpServletRequest http) {
+        Quien quien = quien(http, Set.of("admin"), "ver la deuda al inicio del proceso");
+        if ("csv".equalsIgnoreCase(formato)) {
+            return ResponseEntity.ok()
+                    .header("Content-Disposition", "attachment; filename=\"deuda-al-inicio-" + documento.replaceAll("[^A-Za-z0-9-]", "") + ".csv\"")
+                    .contentType(new org.springframework.http.MediaType("text", "csv", java.nio.charset.StandardCharsets.UTF_8))
+                    .body(insolvencias.fotoEnCsv(quien, documento));
+        }
+        return ResponseEntity.ok(insolvencias.foto(quien, documento));
     }
 
     @PostMapping("/clientes/{documento}/saldo-a-favor/devolver")
