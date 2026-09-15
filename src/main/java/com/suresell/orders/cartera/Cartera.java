@@ -915,7 +915,7 @@ public class Cartera {
     private static final String COLUMNAS_DEL_EGRESO = """
             SELECT e.id, e.numero, e.monto, e.medio, e.motivo, e.referencia, e.pagado_por, u.nombre, e.ocurrido_en,
                    e.cliente_documento, e.beneficiario, e.beneficiario_nombre, e.beneficiario_documento, e.forma,
-                   e.auto_designacion_numero, e.auto_designacion_fecha, e.etapa_al_devolver, e.regimen_al_devolver,
+                   e.auto_designacion_numero, e.auto_designacion_fecha, e.etapa_al_devolver, e.regimen_al_devolver, e.procedimiento_al_devolver,
                    c.nombre AS cliente_nombre
               FROM egresos_de_cartera e
               LEFT JOIN users u ON u.tenant_id = e.tenant_id AND u.id = e.pagado_por
@@ -951,6 +951,7 @@ public class Cartera {
             // F4.13f (aditivo): la etapa y el régimen vigentes el día de la devolución (null antes de V82) y el auto de designación.
             m.put("etapaAlDevolver", f.get("etapa_al_devolver"));
             m.put("regimenAlDevolver", f.get("regimen_al_devolver"));
+            m.put("procedimientoAlDevolver", f.get("procedimiento_al_devolver"));
             m.put("autoDesignacionLiquidador", f.get("auto_designacion_numero") == null ? null
                     : Map.of("numero", f.get("auto_designacion_numero"), "fecha", f.get("auto_designacion_fecha").toString()));
             m.put("mercancia", suyos);

@@ -198,7 +198,8 @@ ALTER TABLE public.egresos_de_cartera
     ADD COLUMN auto_designacion_numero TEXT NULL,
     ADD COLUMN auto_designacion_fecha  DATE NULL,
     ADD COLUMN etapa_al_devolver       TEXT NULL,
-    ADD COLUMN regimen_al_devolver     TEXT NULL;
+    ADD COLUMN regimen_al_devolver     TEXT NULL,
+    ADD COLUMN procedimiento_al_devolver TEXT NULL;
 ALTER TABLE public.egresos_de_cartera
     ADD CONSTRAINT ck_egresos_auto_designacion CHECK ((auto_designacion_numero IS NULL) = (auto_designacion_fecha IS NULL)
         AND (auto_designacion_fecha IS NULL OR auto_designacion_fecha <= (registrado_en AT TIME ZONE 'America/Bogota')::date));
@@ -207,14 +208,22 @@ RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp A
 DECLARE
     v_etapa TEXT;
     v_regimen TEXT;
+    v_proceso UUID;
+    v_procedimiento TEXT;
     v_insolvente DATE;
 BEGIN
     -- Sin la proyección de V75, el cliente no está en proceso: la vista no se lee.
     SELECT c.en_insolvencia_desde INTO v_insolvente FROM public.clientes c
      WHERE c.tenant_id = NEW.tenant_id AND c.documento = NEW.cliente_documento;
     IF v_insolvente IS NOT NULL THEN
-        SELECT vv.etapa, vv.regimen INTO v_etapa, v_regimen FROM public.v_insolvencia_vigente vv
+        SELECT vv.etapa, vv.regimen, vv.proceso_id INTO v_etapa, v_regimen, v_proceso FROM public.v_insolvencia_vigente vv
          WHERE vv.tenant_id = NEW.tenant_id AND vv.cliente_documento = NEW.cliente_documento AND vv.en_proceso;
+        -- B19 (Red): el procedimiento de ese día distingue la frase de la devolución (convalidación o negociación de deudas).
+        IF v_proceso IS NOT NULL THEN
+            SELECT e.procedimiento INTO v_procedimiento FROM public.insolvencia_etapas e
+             WHERE e.tenant_id = NEW.tenant_id AND e.proceso_id = v_proceso AND e.procedimiento IS NOT NULL
+             ORDER BY e.secuencia DESC LIMIT 1;
+        END IF;
     END IF;
     IF v_etapa IS NOT DISTINCT FROM 'LIQUIDACION' AND NEW.beneficiario <> 'LIQUIDADOR' THEN
         RAISE EXCEPTION 'En liquidacion el saldo a favor se entrega al liquidador, no al cliente. No se registro nada.' USING ERRCODE = 'P0001';
@@ -228,6 +237,7 @@ BEGIN
     END IF;
     NEW.etapa_al_devolver := v_etapa;
     NEW.regimen_al_devolver := v_regimen;
+    NEW.procedimiento_al_devolver := v_procedimiento;
     RETURN NEW;
 END $$;
 
@@ -325,7 +335,8 @@ BEGIN
     VALUES (a, 0, 'v82-c', 1000, 'TRANSFERENCIA', 'DEVUELTO_AL_PROCESO', 'Oficio', 'v82-e2', v_user, now(), 'v82-con-auto',
             'LIQUIDADOR', 'Liquidadora', '900', 'Auto 555', v_hoy - 1);
     IF NOT EXISTS (SELECT 1 FROM public.egresos_de_cartera WHERE tenant_id = a AND idempotency_key = 'v82-con-auto'
-                     AND etapa_al_devolver = 'LIQUIDACION' AND regimen_al_devolver = 'LEY_1116') THEN
+                     AND etapa_al_devolver = 'LIQUIDACION' AND regimen_al_devolver = 'LEY_1116'
+                     AND procedimiento_al_devolver = 'REORGANIZACION_ABREVIADA') THEN
         RAISE EXCEPTION 'V82: el egreso no guardo la etapa y el regimen de ese dia';
     END IF;
 
@@ -382,5 +393,5 @@ END $cierre$;
 -- fn_insolvencia_informar_etapa: DROP la de 15 parámetros y restaurar la de V75 (md5 65bb1499…) con sus permisos;
 -- fn_egreso_beneficiario_de_la_etapa: restaurar la de V78 (md5 2f8fa4d3…);
 -- ALTER TABLE public.egresos_de_cartera DROP CONSTRAINT ck_egresos_auto_designacion, DROP COLUMN regimen_al_devolver,
---   DROP COLUMN etapa_al_devolver, DROP COLUMN auto_designacion_fecha, DROP COLUMN auto_designacion_numero;
+--   DROP COLUMN procedimiento_al_devolver, DROP COLUMN etapa_al_devolver, DROP COLUMN auto_designacion_fecha, DROP COLUMN auto_designacion_numero;
 -- ALTER TABLE public.insolvencia_etapas DROP CONSTRAINT … (los cinco CHECK), DROP COLUMN … (las seis columnas);

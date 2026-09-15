@@ -595,7 +595,7 @@ class SaldoAFavorTest {
         mockMvc.perform(post("/api/cartera/clientes/" + TIENDA + "/insolvencia/etapas").header("Authorization", bearer(ADMIN, "admin"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"etapa\":\"" + etapa + "\",\"fecha\":\"" + hoy + "\",\"documento\":\"Auto\",\"informadoPor\":\"abogado\""
-                                + ("INICIO".equals(etapa) ? ",\"numeroProceso\":\"2026-0913\"" : "") + "}"))
+                                + ("INICIO".equals(etapa) ? ",\"numeroProceso\":\"2026-0913\",\"procedimiento\":\"REORGANIZACION\"" : "") + "}"))
                 .andExpect(status().isCreated());
     }
 
@@ -692,6 +692,7 @@ class SaldoAFavorTest {
                 .andExpect(jsonPath("$.beneficiarioNombre").value("Liquidadora S.A.S."))
                 .andExpect(jsonPath("$.beneficiarioDocumento").value("900123456"))
                 .andExpect(jsonPath("$.etapaAlDevolver").value("LIQUIDACION"))
+                .andExpect(jsonPath("$.procedimientoAlDevolver").value("REORGANIZACION"))
                 .andExpect(jsonPath("$.autoDesignacionLiquidador.numero").value("400-77"))
                 .andExpect(jsonPath("$.autoDesignacionLiquidador.fecha").value(hoy.minusDays(1).toString()))
                 .andExpect(jsonPath("$.documentoDeSatisfaccion").isEmpty());
@@ -706,6 +707,7 @@ class SaldoAFavorTest {
                 .contains("al liquidador Liquidadora S.A.S. (900123456), designado por auto N.º 400-77 del " + fechaLargaAuto + ": 1 × ");
         JsonNode egresos = estadoDeCuenta(TIENDA).get("egresos");
         assertThat(egresos.findValuesAsText("etapaAlDevolver")).containsOnly("LIQUIDACION");
+        assertThat(egresos.findValuesAsText("procedimientoAlDevolver")).as("el procedimiento de ese día (B19)").containsOnly("REORGANIZACION");
         assertThat(egresos.findValues("regimenAlDevolver")).allSatisfy(x -> assertThat(x.isNull()).as("la Tienda no informó régimen").isTrue());
     }
 
