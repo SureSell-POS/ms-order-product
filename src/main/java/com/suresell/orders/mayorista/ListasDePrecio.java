@@ -146,7 +146,9 @@ public class ListasDePrecio {
             c.tipo_documento, c.razon_social, c.tipo_cliente, c.direccion_entrega, c.municipio_dane,
             c.correo, c.whatsapp, c.vendedor_id, v.nombre AS vendedor, c.exige_factura, c.en_insolvencia_desde, c.dv,
             libro.saldo AS deuda, a.credit_limit AS cupo, a.status AS estado_cartera,
-            (libro.saldo > a.credit_limit) AS excede_cupo
+            (libro.saldo > a.credit_limit) AS excede_cupo,
+            vv.etapa AS insolvencia_etapa, vv.en_proceso AS insolvencia_en_proceso,
+            cp.vigente AS insolvencia_credito_vigente, cp.plazo_maximo_dias AS insolvencia_credito_plazo
             """;
 
     /**
@@ -164,6 +166,10 @@ public class ListasDePrecio {
                   SELECT COALESCE(sum(CASE WHEN d.type = 'DEBIT' THEN d.amount ELSE -d.amount END), 0) AS saldo
                     FROM debt_transactions d
                    WHERE d.tenant_id = a.tenant_id AND d.account_id = a.id) libro ON a.id IS NOT NULL
+              -- F4.13 (c): el proceso de insolvencia abierto y el crédito después del inicio (V75, V77), un join a cada vista.
+              LEFT JOIN v_insolvencia_vigente vv
+                     ON vv.tenant_id = c.tenant_id AND vv.cliente_documento = c.documento AND vv.abierto
+              LEFT JOIN v_insolvencia_credito_posterior cp ON cp.tenant_id = vv.tenant_id AND cp.proceso_id = vv.proceso_id
             """;
 
     /**
@@ -192,7 +198,32 @@ public class ListasDePrecio {
             args.add(patron);
         }
         sql.append(" ORDER BY c.nombre");
-        return jdbc.queryForList(sql.toString(), args.toArray());
+        return jdbc.queryForList(sql.toString(), args.toArray()).stream().map(ListasDePrecio::conInsolvencia).toList();
+    }
+
+    /**
+     * F4.13 (c), aditivo: la caja decide la venta a crédito con esta ficha (y su caché sin red). {@code insolvencia} =
+     * {enProceso, etapa, creditoPosterior: {habilitado, plazoMaximoDias}}, o null sin proceso abierto.
+     * {@code en_insolvencia_desde} no cambia.
+     */
+    static Map<String, Object> conInsolvencia(Map<String, Object> fila) {
+        Object etapa = fila.remove("insolvencia_etapa");
+        Object enProceso = fila.remove("insolvencia_en_proceso");
+        Object vigente = fila.remove("insolvencia_credito_vigente");
+        Object plazo = fila.remove("insolvencia_credito_plazo");
+        if (etapa == null) {
+            fila.put("insolvencia", null);
+            return fila;
+        }
+        Map<String, Object> credito = new java.util.LinkedHashMap<>();
+        credito.put("habilitado", Boolean.TRUE.equals(vigente));
+        credito.put("plazoMaximoDias", Boolean.TRUE.equals(vigente) ? plazo : null);
+        Map<String, Object> insolvencia = new java.util.LinkedHashMap<>();
+        insolvencia.put("enProceso", Boolean.TRUE.equals(enProceso));
+        insolvencia.put("etapa", etapa);
+        insolvencia.put("creditoPosterior", credito);
+        fila.put("insolvencia", insolvencia);
+        return fila;
     }
 
     /** F1.6: la ficha de un cliente del negocio, o vacío. */
@@ -200,7 +231,7 @@ public class ListasDePrecio {
         List<Map<String, Object>> filas = jdbc.queryForList(
                 "SELECT " + COLUMNAS_DEL_CLIENTE + DESDE_CLIENTES + " WHERE c.tenant_id = ? AND c.documento = ?",
                 exigirNegocio(negocio), documento == null ? null : documento.trim());
-        return filas.stream().findFirst();
+        return filas.stream().findFirst().map(ListasDePrecio::conInsolvencia);
     }
 
     /**

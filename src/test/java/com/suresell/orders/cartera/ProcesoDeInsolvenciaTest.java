@@ -120,6 +120,7 @@ class ProcesoDeInsolvenciaTest {
 
     /** Lo que deja un proceso de insolvencia (V75), para las pruebas que borran el negocio de prueba. */
     static void limpiarInsolvencia(JdbcTemplate dueno, String tenant) {
+        dueno.update("DELETE FROM insolvencia_credito_posterior WHERE tenant_id = ?", tenant);
         dueno.update("DELETE FROM insolvencia_foto_facturas WHERE tenant_id = ?", tenant);
         dueno.update("DELETE FROM insolvencia_fotos WHERE tenant_id = ?", tenant);
         dueno.update("DELETE FROM insolvencia_etapas WHERE tenant_id = ?", tenant);

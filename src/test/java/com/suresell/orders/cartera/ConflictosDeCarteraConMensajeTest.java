@@ -35,7 +35,8 @@ class ConflictosDeCarteraConMensajeTest {
         }
         codigos.addAll(List.of(ClienteEnInsolvenciaException.CODIGO, Cartera.ABONO_A_DEUDA_ANTERIOR,
                 ProcesoDeInsolvencia.LEVANTAR_SIN_ETAPA, ProcesoDeInsolvencia.LIQUIDACION_NO_SE_LEVANTA,
-                ProcesoDeInsolvencia.ETAPA_NO_PERMITIDA));
+                ProcesoDeInsolvencia.ETAPA_NO_PERMITIDA, ProcesoDeInsolvencia.SIN_PROCESO_EN_CURSO,
+                ProcesoDeInsolvencia.CREDITO_POSTERIOR_EN_LIQUIDACION));
         String pruebas;
         try (Stream<Path> ficheros = Files.list(Path.of("src/test/java/com/suresell/orders/cartera"))) {
             pruebas = String.join("\n", ficheros.filter(p -> p.toString().endsWith("Test.java")).map(p -> {

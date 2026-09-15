@@ -148,12 +148,19 @@ public class Cartera {
                 String.class, quien.negocio(), cliente.get("clienteDocumento")).stream().filter(java.util.Objects::nonNull)
                 .findFirst().orElse(null));
 
+        // F4.13: ANTERIOR o POSTERIOR al corte del proceso en curso (V75), leído UNA vez por cliente y solo si está en
+        // proceso. Unida a la lista, el planificador evaluaba la vista vigente por cada factura (medido: loops=1000).
+        Map<String, Object> insolvencia = insolvenciaAbierta(quien.negocio(), (String) cliente.get("clienteDocumento"));
+        boolean enProceso = insolvencia != null && Boolean.TRUE.equals(insolvencia.get("enProceso"));
+        Map<String, String> clasificacion = new java.util.HashMap<>();
+        if (enProceso) {
+            jdbc.query("SELECT debito_tx_id, clasificacion FROM v_insolvencia_clasificacion WHERE tenant_id = ? AND cliente_documento = ?",
+                    rs -> { clasificacion.put(rs.getString(1), rs.getString(2)); }, quien.negocio(), cliente.get("clienteDocumento"));
+        }
         List<Map<String, Object>> documentos = jdbc.queryForList("""
                 SELECT d.debito_tx_id, d.order_uuid, d.fecha, d.vence_el, d.monto, d.aplicado, d.saldo,
-                       d.dias_vencido, d.edad, k.clasificacion
+                       d.dias_vencido, d.edad
                   FROM v_cartera_por_documento d
-                  -- F4.13: ANTERIOR o POSTERIOR al corte del proceso en curso; null sin proceso (V75).
-                  LEFT JOIN v_insolvencia_clasificacion k ON k.tenant_id = d.tenant_id AND k.debito_tx_id = d.debito_tx_id
                  WHERE d.tenant_id = ? AND d.cliente_documento = ?
                    AND (d.saldo > 0 OR d.fecha BETWEEN ? AND ?)
                    -- F4.12: el DEBIT de una devolución de saldo a favor no es una factura.
@@ -171,7 +178,7 @@ public class Cartera {
                     r.put("saldo", f.get("saldo"));
                     r.put("diasVencido", f.get("dias_vencido"));
                     r.put("edad", f.get("edad"));
-                    r.put("clasificacion", f.get("clasificacion"));
+                    r.put("clasificacion", clasificacion.get((String) f.get("debito_tx_id")));
                     return r;
                 }).toList();
 
@@ -194,10 +201,8 @@ public class Cartera {
         estado.put("documentos", documentos);
         estado.put("recibos", recibos);
         saldoAFavorDelCliente(quien.negocio(), (String) cliente.get("clienteDocumento"), inicio, fin, estado);
-        Map<String, Object> insolvencia = insolvenciaAbierta(quien.negocio(), (String) cliente.get("clienteDocumento"));
         estado.put("insolvencia", insolvencia);
         // F4.13 (b): en proceso no se ofrece la frase de cobro; ofrecer cobrar la deuda anterior es lo que la ley castiga.
-        boolean enProceso = insolvencia != null && Boolean.TRUE.equals(insolvencia.get("enProceso"));
         estado.put("frase", enProceso ? null : frase(quien.negocio(), cliente, hoy));
         estado.put("motivoSinFrase", enProceso ? DEUDA_ANTERIOR_SE_RECLAMA_EN_EL_PROCESO : null);
         return estado;
@@ -217,6 +222,15 @@ public class Cartera {
                     m.put("regimen", v.get("regimen"));
                     m.put("regimenPendiente", v.get("regimen") == null);
                     m.put("numeroProceso", v.get("numero_proceso"));
+                    // F4.13 (c): el crédito después del inicio, solo con el proceso en curso.
+                    m.put("creditoPosterior", Boolean.TRUE.equals(v.get("en_proceso")) ? jdbc.queryForList("""
+                            SELECT vigente, plazo_maximo_dias FROM v_insolvencia_credito_posterior WHERE tenant_id = ? AND proceso_id = ?""",
+                            negocio, v.get("proceso_id")).stream().findFirst().map(cp -> {
+                                Map<String, Object> c = new LinkedHashMap<>();
+                                c.put("habilitado", Boolean.TRUE.equals(cp.get("vigente")));
+                                c.put("plazoMaximoDias", Boolean.TRUE.equals(cp.get("vigente")) ? cp.get("plazo_maximo_dias") : null);
+                                return c;
+                            }).orElse(null) : null);
                     return m;
                 }).orElse(null);
     }

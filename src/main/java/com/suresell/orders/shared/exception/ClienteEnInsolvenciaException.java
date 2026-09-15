@@ -22,9 +22,19 @@ public class ClienteEnInsolvenciaException extends RuntimeException {
 
     private final String clienteDocumento;
 
+    /** TEXTOS §B9 (F4.13 c): la venta a crédito sin el crédito después del inicio habilitado. */
+    static final String VENTA_SIN_CREDITO_HABILITADO =
+            "Cliente en proceso de insolvencia: véndele de contado, o habilita el crédito para este cliente.";
+    /** TEXTOS §B10 (F4.13 c): en liquidación el crédito no se habilita. */
+    static final String VENTA_EN_LIQUIDACION = "Cliente en liquidación: véndele de contado.";
+
     public ClienteEnInsolvenciaException(String clienteDocumento, LocalDate desde) {
-        this(clienteDocumento, "El cliente " + clienteDocumento + " está en proceso de insolvencia" + desdeEl(desde)
-                + ": no se le vende a crédito. La venta no se registró.");
+        this(clienteDocumento, VENTA_SIN_CREDITO_HABILITADO);
+    }
+
+    /** F4.13 (c): el cliente está en liquidación; ahí no se habilita el crédito. */
+    public static ClienteEnInsolvenciaException enLiquidacion(String clienteDocumento) {
+        return new ClienteEnInsolvenciaException(clienteDocumento, VENTA_EN_LIQUIDACION);
     }
 
     private ClienteEnInsolvenciaException(String clienteDocumento, String mensaje) {

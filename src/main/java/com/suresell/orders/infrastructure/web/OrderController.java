@@ -119,6 +119,10 @@ public class OrderController {
         body.put("saldoAFavorAplicado", created != null ? created.getSaldoAFavorAplicado() : null);
         // F4.12 (aditivo): el saldo a favor que le queda al cliente, para «Saldo a favor restante: $Y». null = no es a crédito.
         body.put("saldoAFavorRestante", created != null ? created.getSaldoAFavorRestante() : null);
+        // F4.13 c (aditivo): true = venta a crédito con el crédito después del inicio habilitado; la tirilla dice
+        // «Venta posterior al inicio del proceso de insolvencia». venceEl: el vencimiento de su deuda (acotado); null = no es a crédito.
+        body.put("ventaPosteriorAlInicio", created != null && Boolean.TRUE.equals(created.getVentaPosteriorAlInicio()));
+        body.put("venceEl", created == null || created.getVenceEl() == null ? null : created.getVenceEl().toString());
         return ResponseEntity.status(HttpStatus.CREATED).body(body);
     }
     @PutMapping("/{orderId}")

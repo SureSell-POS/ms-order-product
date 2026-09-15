@@ -8,6 +8,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
@@ -82,6 +83,23 @@ class CostoDeLaFotoDeInsolvenciaTest {
             // Un negocio con muchos clientes: con dos filas el plan de clientes sería un Seq Scan que no dice nada.
             st.execute("INSERT INTO clientes (tenant_id, documento, nombre, plazo_dias, creado_por) "
                     + "SELECT 'foto-vecino', 'V' || g, 'Cliente ' || g, 8, 's' FROM generate_series(1, 5000) g");
+            // F4.13 (c): un negocio de 500 clientes con cuenta y 5 facturas cada uno, 10 de ellos en proceso y 5 con crédito habilitado.
+            st.execute("INSERT INTO tenants (id, name, plan) VALUES ('lista-500','L','pro')");
+            st.execute("INSERT INTO users (email, password_hash, tenant_id, role) VALUES ('admin@lista-500.invalid', '!', 'lista-500', 'admin')");
+            st.execute("INSERT INTO clientes (tenant_id, documento, nombre, plazo_dias, creado_por) "
+                    + "SELECT 'lista-500', 'L' || g, 'Cliente ' || g, 8, 's' FROM generate_series(1, 500) g");
+            st.execute("INSERT INTO accounts_receivable (id, tenant_id, created_at, credit_limit, customer_document, customer_name, status, total_debt, updated_at) "
+                    + "SELECT 'lista-500-c' || g, 'lista-500', now(), 1000000, 'L' || g, 'Cliente', 'ACTIVE', 0, now() FROM generate_series(1, 500) g");
+            st.execute("INSERT INTO debt_transactions (id, tenant_id, account_id, amount, created_at, description, transaction_date, type, vence_el) "
+                    + "SELECT 'lista-500-d' || g || '-' || k, 'lista-500', 'lista-500-c' || g, 10000, now(), 'x', current_date - 30, 'DEBIT', current_date - 22 "
+                    + "FROM generate_series(1, 500) g, generate_series(1, 5) k");
+            st.execute("BEGIN");
+            st.execute("SELECT set_config('app.tenant_id', 'lista-500', true), "
+                    + "set_config('app.user_id', (SELECT id::text FROM users WHERE tenant_id = 'lista-500'), true)");
+            st.execute("SELECT fn_insolvencia_informar_etapa('L' || g, 'INICIO', current_date - 5, 'Auto', NULL, 'abogado', NULL, NULL, NULL) "
+                    + "FROM generate_series(1, 10) g");
+            st.execute("SELECT fn_insolvencia_credito_posterior('L' || g, true, 8, 'Prueba de costo') FROM generate_series(1, 5) g");
+            st.execute("COMMIT");
             st.execute("ANALYZE");
         }
     }
@@ -158,10 +176,36 @@ class CostoDeLaFotoDeInsolvenciaTest {
             tiempos.put("estado de cuenta sin clasificación (control)", ejecucion(st, "EXPLAIN (ANALYZE) SELECT d.debito_tx_id, d.saldo "
                     + "FROM v_cartera_por_documento d WHERE d.tenant_id = 'foto-a' AND d.cliente_documento = 'D1' "
                     + "AND (d.saldo > 0 OR d.fecha BETWEEN current_date - 90 AND current_date)"));
-            tiempos.put("estado de cuenta con clasificación", ejecucion(st, "EXPLAIN (ANALYZE) SELECT d.debito_tx_id, d.saldo, k.clasificacion "
-                    + "FROM v_cartera_por_documento d LEFT JOIN v_insolvencia_clasificacion k ON k.tenant_id = d.tenant_id "
-                    + "AND k.debito_tx_id = d.debito_tx_id WHERE d.tenant_id = 'foto-a' AND d.cliente_documento = 'D1' "
-                    + "AND (d.saldo > 0 OR d.fecha BETWEEN current_date - 90 AND current_date)"));
+            // La clasificación va aparte, una lectura por cliente (unida a la lista se evaluaba por factura).
+            StringBuilder planDeLaClasificacion = new StringBuilder();
+            try (ResultSet rs = st.executeQuery("EXPLAIN (ANALYZE) SELECT debito_tx_id, clasificacion FROM v_insolvencia_clasificacion "
+                    + "WHERE tenant_id = 'foto-a' AND cliente_documento = 'D1'")) {
+                while (rs.next()) {
+                    planDeLaClasificacion.append(rs.getString(1)).append('\n');
+                    if (rs.getString(1).startsWith("Execution Time:")) {
+                        tiempos.put("estado de cuenta: clasificación del cliente (aparte)", Double.parseDouble(rs.getString(1).replaceAll("[^0-9.]", "")));
+                    }
+                }
+            }
+            System.out.println("── plan de la clasificación de un cliente ──\n" + planDeLaClasificacion);
+            StringBuilder planDeLaDeudaPosterior = new StringBuilder();
+            double deudaPosteriorMs = 0;
+            for (String lectura : List.of(ProcesoDeInsolvencia.POSTERIORES_DEL_CLIENTE, ProcesoDeInsolvencia.SALDOS_VIVOS_DEL_CLIENTE)) {
+                try (ResultSet rs = st.executeQuery("EXPLAIN (ANALYZE) " + lectura.replaceFirst("\\?", "'foto-a'").replaceFirst("\\?", "'D1'"))) {
+                    while (rs.next()) {
+                        planDeLaDeudaPosterior.append(rs.getString(1)).append('\n');
+                        if (rs.getString(1).startsWith("Execution Time:")) {
+                            deudaPosteriorMs += Double.parseDouble(rs.getString(1).replaceAll("[^0-9.]", ""));
+                        }
+                    }
+                }
+            }
+            tiempos.put("GET insolvencia: deuda posterior al inicio (dos lecturas)", deudaPosteriorMs);
+            System.out.println("── plan de la deuda posterior ──\n" + planDeLaDeudaPosterior);
+            assertThat(planDeLaDeudaPosterior.toString().lines()
+                    .filter(l -> l.contains("insolvencia_") && l.matches(".*loops=([5-9][0-9]{2}|[0-9]{4,}).*"))).as("nada por factura").isEmpty();
+            assertThat(planDeLaClasificacion.toString().lines()
+                    .filter(l -> l.contains("insolvencia_") && l.matches(".*loops=([5-9][0-9]{2}|[0-9]{4,}).*"))).as("nada por factura").isEmpty();
             tiempos.put("proceso vigente", ejecucion(st, "EXPLAIN (ANALYZE) SELECT * FROM v_insolvencia_vigente "
                     + "WHERE tenant_id = 'foto-a' AND cliente_documento = 'D1' AND abierto"));
             try (ResultSet rs = st.executeQuery("SELECT facturas, total FROM insolvencia_fotos WHERE tenant_id = 'foto-a'")) {
@@ -215,6 +259,49 @@ class CostoDeLaFotoDeInsolvenciaTest {
                 }
             }
             c.rollback();
+        }
+        // F4.13 (c): la lista de clientes del mayorista (la de la caja) con el join a las dos vistas, contra la misma sin él.
+        java.lang.reflect.Field columnas = com.suresell.orders.mayorista.ListasDePrecio.class.getDeclaredField("COLUMNAS_DEL_CLIENTE");
+        java.lang.reflect.Field desde = com.suresell.orders.mayorista.ListasDePrecio.class.getDeclaredField("DESDE_CLIENTES");
+        columnas.setAccessible(true);
+        desde.setAccessible(true);
+        String conInsolvencia = "SELECT " + columnas.get(null) + desde.get(null) + " WHERE c.tenant_id = 'lista-500' ORDER BY c.nombre";
+        String sinInsolvencia = conInsolvencia
+                .replaceAll("(?s),\\s*vv\\.etapa AS insolvencia_etapa.*?AS insolvencia_credito_plazo", "")
+                .replaceAll("(?s)-- F4\\.13 \\(c\\).*?cp\\.proceso_id = vv\\.proceso_id", "");
+        assertThat(sinInsolvencia).as("el control quita el join").doesNotContain("v_insolvencia").isNotEqualTo(conInsolvencia);
+        try (Connection c = DriverManager.getConnection(PG.getJdbcUrl(), "app_user", "app_pw");
+             Statement st = c.createStatement()) {
+            st.execute("SET jit = off");
+            st.execute("SELECT set_config('app.tenant_id', 'lista-500', false)");
+            for (int vuelta = 0; vuelta < 3; vuelta++) {
+                tiempos.put("lista de 500 clientes sin insolvencia (control)", ejecucion(st, "EXPLAIN (ANALYZE) " + sinInsolvencia));
+                tiempos.put("lista de 500 clientes con insolvencia", ejecucion(st, "EXPLAIN (ANALYZE) " + conInsolvencia));
+            }
+            StringBuilder planDeLaLista = new StringBuilder();
+            try (ResultSet rs = st.executeQuery("EXPLAIN (ANALYZE) " + conInsolvencia)) {
+                while (rs.next()) {
+                    planDeLaLista.append(rs.getString(1)).append('\n');
+                }
+            }
+            System.out.println("── plan de la lista de 500 clientes con insolvencia ──\n" + planDeLaLista);
+            // Nada por fila de cliente sobre las tablas de insolvencia: ningún nodo suyo se repite 500 veces.
+            assertThat(planDeLaLista.toString().lines()
+                    .filter(l -> l.contains("insolvencia_") && l.matches(".*loops=([5-9][0-9]{2}|[0-9]{4,}).*"))).isEmpty();
+            int enProceso = 0;
+            int habilitados = 0;
+            try (ResultSet rs = st.executeQuery("SELECT count(*) FILTER (WHERE insolvencia_en_proceso), count(*) FILTER (WHERE insolvencia_credito_vigente) FROM ("
+                    + conInsolvencia + ") q")) {
+                rs.next();
+                enProceso = rs.getInt(1);
+                habilitados = rs.getInt(2);
+            }
+            assertThat(enProceso).isEqualTo(10);
+            assertThat(habilitados).isEqualTo(5);
+            // La lectura que añade fn_venta_a_credito, solo con el cliente en proceso.
+            tiempos.put("venta a crédito: lectura del crédito posterior (cliente en proceso)", ejecucion(st,
+                    "EXPLAIN (ANALYZE) SELECT cp.plazo_maximo_dias FROM v_insolvencia_credito_posterior cp "
+                            + "WHERE cp.tenant_id = 'lista-500' AND cp.cliente_documento = 'L3' AND cp.vigente"));
         }
         System.out.println("── plan de la lectura del disparador V76 ──\n" + planDelDisparador);
         assertThat(planDelDisparador).contains("Index Scan using pk_recibos_de_caja", "Index Scan using ux_clientes_documento")

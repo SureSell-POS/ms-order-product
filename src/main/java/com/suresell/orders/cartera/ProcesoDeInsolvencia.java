@@ -40,6 +40,19 @@ public class ProcesoDeInsolvencia {
     public static final String LIQUIDACION_NO_SE_LEVANTA = "LIQUIDACION_NO_SE_LEVANTA";
     public static final String ETAPA_NO_PERMITIDA = "ETAPA_NO_PERMITIDA";
     public static final String LEVANTAR_SIN_ETAPA = "LEVANTAR_SIN_ETAPA";
+    public static final String CREDITO_POSTERIOR_EN_LIQUIDACION = "CREDITO_POSTERIOR_EN_LIQUIDACION";
+    public static final String SIN_PROCESO_EN_CURSO = "SIN_PROCESO_EN_CURSO";
+    /** TEXTOS §B10 (F4.13 c). */
+    static final String NO_SE_HABILITA_EN_LIQUIDACION = "En liquidación no se habilita el crédito: véndele de contado. No se registró nada.";
+    static final String SOLO_CON_EL_PROCESO_INICIADO = "Solo se habilita el crédito cuando el proceso ya inició; antes, se le vende "
+            + "como a cualquier cliente. No se registró nada.";
+    static final int PLAZO_MAXIMO_POR_DEFECTO = 8;
+
+    /** Las dos lecturas de la deuda posterior (cifra de B6); CostoDeLaFotoDeInsolvenciaTest mide estas mismas. */
+    static final String POSTERIORES_DEL_CLIENTE =
+            "SELECT debito_tx_id FROM v_insolvencia_clasificacion WHERE tenant_id = ? AND cliente_documento = ? AND clasificacion = 'POSTERIOR'";
+    static final String SALDOS_VIVOS_DEL_CLIENTE =
+            "SELECT debito_tx_id, saldo FROM v_cartera_por_documento WHERE tenant_id = ? AND cliente_documento = ? AND saldo > 0";
     /** TEXTOS §B8 (F4.13 b). */
     static final String SE_LEVANTA_CON_UNA_ETAPA = "La insolvencia se levanta informando que el acuerdo se cumplió y el proceso "
             + "terminó, o que se marcó por error. No se registró nada.";
@@ -81,6 +94,8 @@ public class ProcesoDeInsolvencia {
         this.jdbc = jdbc;
         this.cartera = cartera;
     }
+
+    public record CreditoPosterior(Boolean habilitado, Integer plazoMaximoDias, String motivo) {}
 
     public record NuevaEtapa(String etapa, LocalDate fecha, String documento, String autoridad, String informadoPor,
                              String regimen, String numeroProceso, UUID corrigeEtapaId) {}
@@ -164,6 +179,31 @@ public class ProcesoDeInsolvencia {
         return r;
     }
 
+    /**
+     * PUT /api/cartera/clientes/{documento}/insolvencia/credito-posterior (admin, F4.13 c): habilita o deshabilita la venta a
+     * crédito después del inicio para el proceso en curso. Solo anexa (V77). Devuelve el proceso.
+     */
+    @Transactional
+    public Map<String, Object> cambiarCreditoPosterior(Quien quien, String documento, CreditoPosterior c) {
+        String doc = clienteBloqueado(quien, documento);
+        if (c == null || c.habilitado() == null) {
+            throw new DatoInvalidoException("habilitado", "Indica si se habilita o no.");
+        }
+        int plazo = c.plazoMaximoDias() == null ? PLAZO_MAXIMO_POR_DEFECTO : c.plazoMaximoDias();
+        if (plazo < 0 || plazo > 30) {
+            throw new DatoInvalidoException("plazoMaximoDias", "El plazo máximo es de 0 a 30 días.");
+        }
+        String motivo = obligatorio(c.motivo(), "motivo", "Falta el motivo.");
+        Map<String, Object> vigente = abierto(quien.negocio(), doc).filter(v -> Boolean.TRUE.equals(v.get("en_proceso")))
+                .orElseThrow(() -> new ConflictoDeCarteraException(SIN_PROCESO_EN_CURSO, SOLO_CON_EL_PROCESO_INICIADO));
+        if ("LIQUIDACION".equals(vigente.get("etapa")) && c.habilitado()) {
+            throw new ConflictoDeCarteraException(CREDITO_POSTERIOR_EN_LIQUIDACION, NO_SE_HABILITA_EN_LIQUIDACION);
+        }
+        cartera.fijarAutor(quien);
+        jdbc.queryForObject("SELECT fn_insolvencia_credito_posterior(?, ?, ?, ?)", UUID.class, doc, c.habilitado(), plazo, motivo);
+        return proceso(quien, doc);
+    }
+
     // ------------------------------------------------------------------ leer
 
     /**
@@ -217,15 +257,22 @@ public class ProcesoDeInsolvencia {
             Map<String, Object> cifras = new LinkedHashMap<>();
             cifras.put("deudaAnteriorAlInicio", v.get("foto_total") == null ? BigDecimal.ZERO : v.get("foto_total"));
             cifras.put("saldoAFavor", cartera.saldoAFavor(quien.negocio(), doc));
-            cifras.put("deudaPosteriorAlInicio", jdbc.queryForObject("""
-                    SELECT COALESCE(sum(d.saldo), 0) FROM v_insolvencia_clasificacion k
-                      JOIN v_cartera_por_documento d ON d.tenant_id = k.tenant_id AND d.debito_tx_id = k.debito_tx_id
-                     WHERE k.tenant_id = ? AND k.cliente_documento = ? AND k.clasificacion = 'POSTERIOR'""",
-                    BigDecimal.class, quien.negocio(), doc));
+            // Dos lecturas planas y la suma aquí: unidas en SQL, el planificador evaluaba la vista (o la CTE) por factura.
+            java.util.Set<String> posteriores = new java.util.HashSet<>(jdbc.queryForList(POSTERIORES_DEL_CLIENTE, String.class, quien.negocio(), doc));
+            BigDecimal[] deudaPosterior = {BigDecimal.ZERO};
+            if (!posteriores.isEmpty()) {
+                jdbc.query(SALDOS_VIVOS_DEL_CLIENTE, rs -> {
+                    if (posteriores.contains(rs.getString(1))) {
+                        deudaPosterior[0] = deudaPosterior[0].add(rs.getBigDecimal(2));
+                    }
+                }, quien.negocio(), doc);
+            }
+            cifras.put("deudaPosteriorAlInicio", deudaPosterior[0]);
             r.put("cifras", cifras);
         } else {
             r.put("cifras", null);
         }
+        r.put("creditoPosterior", enProceso ? creditoPosterior(quien.negocio(), v.get("proceso_id")) : null);
         r.put("etapas", jdbc.queryForList("""
                 SELECT e.id, e.secuencia, e.etapa, e.fecha, e.documento, e.autoridad, e.informado_por, e.regimen,
                        e.numero_proceso, e.corrige_etapa_id, e.registrado_por, u.nombre, e.registrado_en
@@ -314,6 +361,24 @@ public class ProcesoDeInsolvencia {
         }
         csv.append("Total;;;;;").append(numero(f.get("total"))).append('\n');
         return csv.toString();
+    }
+
+    /** El crédito después del inicio del proceso en curso (V77): lo último registrado y si vale; null si nunca se registró. */
+    Map<String, Object> creditoPosterior(String negocio, Object procesoId) {
+        return jdbc.queryForList("""
+                SELECT cp.vigente, cp.habilitado, cp.plazo_maximo_dias, cp.motivo, cp.registrado_por, u.nombre, cp.registrado_en
+                  FROM v_insolvencia_credito_posterior cp
+                  LEFT JOIN users u ON u.tenant_id = cp.tenant_id AND u.id = cp.registrado_por
+                 WHERE cp.tenant_id = ? AND cp.proceso_id = ?""", negocio, procesoId).stream().findFirst().map(f -> {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("habilitado", Boolean.TRUE.equals(f.get("vigente")));
+                    m.put("plazoMaximoDias", f.get("plazo_maximo_dias"));
+                    m.put("motivo", f.get("motivo"));
+                    m.put("registradoPorId", f.get("registrado_por"));
+                    m.put("registradoPor", f.get("nombre"));
+                    m.put("registradoEn", instante(f.get("registrado_en")));
+                    return m;
+                }).orElse(null);
     }
 
     // ------------------------------------------------------------------ piezas

@@ -196,9 +196,53 @@ public class AtribucionDeLaVenta {
                  WHERE c.tenant_id = ? AND c.documento = ?
                    AND c.en_insolvencia_desde <= (now() AT TIME ZONE 'America/Bogota')::date""",
                 java.sql.Date.class, negocio, documento);
-        if (!desde.isEmpty()) {
-            throw new com.suresell.orders.shared.exception.ClienteEnInsolvenciaException(
-                    documento, desde.get(0).toLocalDate());
+        if (desde.isEmpty()) {
+            return;
         }
+        // F4.13 (c): solo con el cliente en insolvencia se lee el crédito después del inicio (V77).
+        List<java.util.Map<String, Object>> credito = jdbc.queryForList("""
+                SELECT etapa, vigente FROM v_insolvencia_credito_posterior WHERE tenant_id = ? AND cliente_documento = ?""",
+                negocio, documento);
+        if (!credito.isEmpty() && Boolean.TRUE.equals(credito.get(0).get("vigente"))) {
+            return;
+        }
+        if (!credito.isEmpty() && "LIQUIDACION".equals(credito.get(0).get("etapa"))) {
+            throw com.suresell.orders.shared.exception.ClienteEnInsolvenciaException.enLiquidacion(documento);
+        }
+        throw new com.suresell.orders.shared.exception.ClienteEnInsolvenciaException(documento, desde.get(0).toLocalDate());
+    }
+
+    /**
+     * V77 (F4.13 c): la venta a crédito entró con el crédito después del inicio habilitado: cliente en proceso, sin la marca
+     * de F4.11. Con el cliente sin insolvencia no lee nada más.
+     */
+    public boolean ventaPosteriorAlInicio(String negocio, java.util.UUID venta) {
+        if (negocio == null || venta == null) {
+            return false;
+        }
+        Boolean enInsolvencia = jdbc.queryForObject("""
+                SELECT EXISTS (SELECT 1 FROM orders o JOIN clientes c ON c.tenant_id = o.tenant_id AND c.documento = o.cliente_documento
+                                WHERE o.tenant_id = ? AND o.uuid_id = ? AND c.en_insolvencia_desde IS NOT NULL)""",
+                Boolean.class, negocio, venta);
+        if (!Boolean.TRUE.equals(enInsolvencia) || quedoPorRevisarPorInsolvencia(negocio, venta)) {
+            return false;
+        }
+        return Boolean.TRUE.equals(jdbc.queryForObject("""
+                SELECT EXISTS (SELECT 1 FROM debt_transactions d
+                                 JOIN v_insolvencia_clasificacion k ON k.tenant_id = d.tenant_id AND k.debito_tx_id = d.id
+                                WHERE d.tenant_id = ? AND d.order_uuid = ? AND d.type = 'DEBIT' AND k.clasificacion = 'POSTERIOR')""",
+                Boolean.class, negocio, venta));
+    }
+
+    /** V77 (F4.13 c): el vencimiento de la deuda de la venta a crédito, o null. */
+    public java.time.LocalDate venceEl(String negocio, java.util.UUID venta) {
+        if (negocio == null || venta == null) {
+            return null;
+        }
+        return jdbc.queryForList("""
+                SELECT vence_el FROM debt_transactions
+                 WHERE tenant_id = ? AND order_uuid = ? AND type = 'DEBIT' AND recibo_id IS NULL
+                 ORDER BY created_at LIMIT 1""", java.sql.Date.class, negocio, venta)
+                .stream().filter(java.util.Objects::nonNull).findFirst().map(java.sql.Date::toLocalDate).orElse(null);
     }
 }

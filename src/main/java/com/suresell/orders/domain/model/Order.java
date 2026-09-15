@@ -236,6 +236,19 @@ public class Order implements org.springframework.data.domain.Persistable<java.u
     @com.fasterxml.jackson.annotation.JsonIgnore
     private BigDecimal saldoAFavorAplicado;
 
+    /**
+     * V77 (F4.13 c) — true si la venta a crédito entró con el crédito después del inicio habilitado (cliente en
+     * proceso de insolvencia, sin la marca de F4.11). La tirilla dice «Venta posterior al inicio del proceso de insolvencia».
+     */
+    @Transient
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private Boolean ventaPosteriorAlInicio;
+
+    /** V77 (F4.13 c) — el vencimiento de la deuda de esta venta a crédito (acotado si el crédito posterior lo acota). */
+    @Transient
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private java.time.LocalDate venceEl;
+
     /** V74 (F4.12) — saldo a favor que le queda al cliente después de esta venta a crédito. No es columna. */
     @Transient
     @com.fasterxml.jackson.annotation.JsonIgnore

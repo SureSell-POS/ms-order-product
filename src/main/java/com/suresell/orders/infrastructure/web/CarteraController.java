@@ -131,6 +131,15 @@ public class CarteraController {
         return insolvencias.informarEtapa(quien(http, Set.of("admin"), "informar una etapa de insolvencia"), documento, cuerpo);
     }
 
+    @PutMapping("/clientes/{documento}/insolvencia/credito-posterior")
+    @Operation(summary = "F4.13 — Habilitar o deshabilitar la venta a crédito después del inicio del proceso (solo admin): "
+            + "{habilitado, plazoMaximoDias 0..30 (8 si no llega), motivo}. 409 SIN_PROCESO_EN_CURSO o CREDITO_POSTERIOR_EN_LIQUIDACION")
+    public Map<String, Object> creditoPosterior(@PathVariable String documento, @RequestBody ProcesoDeInsolvencia.CreditoPosterior cuerpo,
+                                                HttpServletRequest http) {
+        return insolvencias.cambiarCreditoPosterior(quien(http, Set.of("admin"), "habilitar el crédito después del inicio"),
+                documento, cuerpo);
+    }
+
     @GetMapping("/clientes/{documento}/insolvencia")
     @Operation(summary = "F4.13 — El proceso de insolvencia del cliente: etapa vigente, inicio, corte, régimen, etapas, foto y "
             + "cifras (deuda anterior al inicio, saldo a favor, ventas posteriores)")
